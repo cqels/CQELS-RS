@@ -1,0 +1,17 @@
+[package]
+name = "cqels-reasoning"
+description = "RETE-based incremental reasoning engine for CQELS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cqels-model.workspace = true
+cqels-core.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

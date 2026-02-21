@@ -1,0 +1,61 @@
+[workspace]
+members = [
+    "cqels-model",
+    "cqels-core",
+    "cqels-engine",
+    "cqels-reasoning",
+    "cqels-benchmarks",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/cqels/cqels-rs"
+
+[workspace.dependencies]
+# RDF
+oxigraph = "0.4"
+oxrdf = "0.2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# Parsing
+pest = "2.7"
+pest_derive = "2.7"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Concurrency
+dashmap = "6"
+crossbeam = "0.8"
+parking_lot = "0.12"
+rayon = "1.10"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Testing
+proptest = "1"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Internal crates
+cqels-model = { path = "cqels-model" }
+cqels-core = { path = "cqels-core" }
+cqels-engine = { path = "cqels-engine" }
+cqels-reasoning = { path = "cqels-reasoning" }

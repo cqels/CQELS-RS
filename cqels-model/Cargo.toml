@@ -1,0 +1,17 @@
+[package]
+name = "cqels-model"
+description = "RDF model abstraction layer for the CQELS streaming engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+oxigraph.workspace = true
+oxrdf.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "cqels-core"
+description = "Core abstractions for CQELS: streams, windows, operators, and query language parsers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cqels-model.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+pest.workspace = true
+pest_derive.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+crossbeam.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -1,0 +1,20 @@
+[package]
+name = "cqels-benchmarks"
+description = "Benchmarks for the CQELS streaming engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cqels-model.workspace = true
+cqels-core.workspace = true
+cqels-engine.workspace = true
+cqels-reasoning.workspace = true
+tokio.workspace = true
+criterion.workspace = true
+rand = "0.8"
+
+[[bench]]
+name = "stream_throughput"
+harness = false
