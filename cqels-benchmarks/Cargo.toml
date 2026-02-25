@@ -12,6 +12,7 @@ cqels-core.workspace = true
 cqels-engine.workspace = true
 cqels-reasoning.workspace = true
 tokio.workspace = true
+futures.workspace = true
 criterion.workspace = true
 rand = "0.8"
 

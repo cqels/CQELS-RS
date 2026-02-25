@@ -6,9 +6,14 @@ use futures::Stream;
 
 use crate::stream::Timestamped;
 
-/// Supported window types.
+/// Supported window types that classify how a stream is partitioned into
+/// finite batches.
 ///
-/// Maps to Java's `WindowType` enum.
+/// Each variant corresponds to a distinct windowing strategy. Time-based
+/// windows partition by elapsed time; count-based windows partition by the
+/// number of elements; session windows partition by activity gaps.
+///
+/// Maps to Java's `WindowType` enum in CQELS 2.0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowType {
     TumblingTime,
@@ -32,9 +37,13 @@ impl fmt::Display for WindowType {
     }
 }
 
-/// A batch of stream elements within a window.
+/// A batch of stream elements collected within a single window evaluation.
 ///
-/// Maps to Java's `WindowedBatch<T>`.
+/// Carries the elements together with the window's time boundaries and type,
+/// enabling downstream operators (e.g., aggregation) to process the batch
+/// in its temporal context.
+///
+/// Maps to Java's `WindowedBatch<T>` in CQELS 2.0.
 #[derive(Clone, Debug)]
 pub struct WindowedBatch<T> {
     pub elements: Vec<T>,
@@ -80,20 +89,34 @@ impl<T: fmt::Debug> fmt::Display for WindowedBatch<T> {
     }
 }
 
-/// A window specification — describes window parameters without applying them.
+/// A declarative window specification parsed from CQELS-QL queries.
 ///
-/// Maps to Java's `WindowSpec` in the query language.
+/// `WindowSpec` captures the *parameters* of a window (size, slide, count)
+/// without applying them to a stream. It is typically produced by the query
+/// parser and later converted into a concrete [`Window`] implementation.
+///
+/// Maps to Java's `WindowSpec` in the CQELS 2.0 query language.
+///
+/// # Variants
+///
+/// | Variant | CQELS-QL Syntax | Meaning |
+/// |---------|----------------|---------|
+/// | `Now` | `[NOW]` | Process only the latest element |
+/// | `Range(d)` | `[RANGE d]` | Time-based tumbling window of duration `d` |
+/// | `RangeSlide(d, s)` | `[RANGE d SLIDE s]` | Time-based sliding window |
+/// | `Rows(n)` | `[ROWS n]` | Count-based tumbling window |
+/// | `RowsSlide(n, s)` | `[ROWS n SLIDE s]` | Count-based sliding window |
 #[derive(Clone, Debug, PartialEq)]
 pub enum WindowSpec {
-    /// Process immediately (NOW window).
+    /// Process only the most recent element (NOW window).
     Now,
-    /// Time-based tumbling window.
+    /// Time-based tumbling window with the given duration.
     Range(Duration),
-    /// Time-based sliding window with step.
+    /// Time-based sliding window: `(size, slide)`.
     RangeSlide(Duration, Duration),
-    /// Count-based window.
+    /// Count-based tumbling window holding at most `n` elements.
     Rows(usize),
-    /// Count-based sliding window.
+    /// Count-based sliding window: `(window_size, slide_size)`.
     RowsSlide(usize, usize),
 }
 
@@ -109,26 +132,44 @@ impl WindowSpec {
     }
 }
 
-/// Trait for window operators that transform a stream of elements into
-/// a stream of windowed batches.
+/// Trait for window operators that transform an unbounded stream of
+/// timestamped elements into a stream of finite [`WindowedBatch`] segments.
 ///
-/// Maps to Java's `Window<T extends StreamElement>` interface.
+/// Implementors define the windowing strategy (tumbling, sliding, session,
+/// count-based) by consuming the input stream and emitting batches when
+/// window boundaries are reached.
+///
+/// Maps to Java's `Window<T extends StreamElement>` interface in CQELS 2.0.
+///
+/// # Type Parameters
+///
+/// * `T` -- The stream element type. Must implement [`Timestamped`] so the
+///   window can inspect event times.
 pub trait Window<T: Timestamped + Clone + Send + 'static>: Send + Sync {
-    /// Applies this window to a stream, producing windowed batches.
+    /// Applies this window operator to the given input stream, producing a
+    /// new stream of [`WindowedBatch`] values.
     fn apply(
         &self,
         stream: Pin<Box<dyn Stream<Item = T> + Send>>,
     ) -> Pin<Box<dyn Stream<Item = WindowedBatch<T>> + Send>>;
 
-    /// Returns the window type.
+    /// Returns the [`WindowType`] that classifies this window.
     fn window_type(&self) -> WindowType;
 }
 
 /// Non-overlapping fixed-duration time window.
 ///
-/// Maps to Java's `TumblingWindow`.
+/// A tumbling window divides the timeline into consecutive, non-overlapping
+/// intervals of the given `size`. Every stream element falls into exactly
+/// one window based on its timestamp.
+///
+/// For example, a 5-second tumbling window produces batches
+/// `[0, 5000)`, `[5000, 10000)`, `[10000, 15000)`, and so on.
+///
+/// Maps to Java's `TumblingWindow` in CQELS 2.0.
 #[derive(Clone, Debug)]
 pub struct TumblingWindow {
+    /// The fixed duration of each window.
     pub size: Duration,
 }
 
@@ -171,10 +212,18 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for TumblingWindow {
 
 /// Overlapping time-based sliding window.
 ///
-/// Maps to Java's `SlidingWindow`.
+/// A sliding window of `size` advances by `slide` increments, producing
+/// overlapping batches. Each element may appear in multiple windows.
+///
+/// For example, a window with `size = 5s` and `slide = 2s` produces
+/// windows `[0, 5000)`, `[2000, 7000)`, `[4000, 9000)`, etc.
+///
+/// Maps to Java's `SlidingWindow` in CQELS 2.0.
 #[derive(Clone, Debug)]
 pub struct SlidingWindow {
+    /// The total duration each window spans.
     pub size: Duration,
+    /// The interval between successive window starts.
     pub slide: Duration,
 }
 
@@ -226,9 +275,18 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SlidingWindow {
 
 /// Activity-based session window.
 ///
-/// Maps to Java's `SessionWindow`.
+/// A session window groups consecutive events that are separated by less
+/// than the specified `gap` duration. When a gap exceeding the threshold
+/// occurs, the current session is closed and emitted as a batch.
+///
+/// Session windows are useful for detecting bursts of activity, such as
+/// a user interaction session or a sensor anomaly episode.
+///
+/// Maps to Java's `SessionWindow` in CQELS 2.0.
 #[derive(Clone, Debug)]
 pub struct SessionWindow {
+    /// Maximum allowed inactivity gap between consecutive events. If the
+    /// gap between two events exceeds this duration, the session is closed.
     pub gap: Duration,
 }
 
@@ -293,11 +351,18 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SessionWindow {
     }
 }
 
-/// Count-based tumbling window.
+/// Non-overlapping count-based tumbling window.
 ///
-/// Maps to Java's `TumblingCountWindow`.
+/// Collects exactly `count` elements into each batch. The window boundaries
+/// are determined by element arrival order rather than timestamps.
+///
+/// If the stream ends before filling a batch, the remaining elements are
+/// emitted as a partial (smaller) batch.
+///
+/// Maps to Java's `TumblingCountWindow` in CQELS 2.0.
 #[derive(Clone, Debug)]
 pub struct TumblingCountWindow {
+    /// Number of elements per batch.
     pub count: usize,
 }
 
@@ -329,21 +394,34 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for TumblingCountWindow 
     }
 }
 
-/// Factory functions for creating common window types.
+// ---------------------------------------------------------------------------
+// Factory functions
+// ---------------------------------------------------------------------------
+
+/// Creates a [`TumblingWindow`] with the given duration.
 ///
-/// Maps to Java's `Window` static factory methods.
+/// Convenience factory matching Java's `Window.tumbling(size)`.
 pub fn tumbling(size: Duration) -> TumblingWindow {
     TumblingWindow::new(size)
 }
 
+/// Creates a [`SlidingWindow`] with the given window size and slide interval.
+///
+/// Convenience factory matching Java's `Window.sliding(size, slide)`.
 pub fn sliding(size: Duration, slide: Duration) -> SlidingWindow {
     SlidingWindow::new(size, slide)
 }
 
+/// Creates a [`SessionWindow`] with the given inactivity gap.
+///
+/// Convenience factory matching Java's `Window.session(gap)`.
 pub fn session(gap: Duration) -> SessionWindow {
     SessionWindow::new(gap)
 }
 
+/// Creates a [`TumblingCountWindow`] that batches the given number of elements.
+///
+/// Convenience factory matching Java's `Window.tumblingCount(count)`.
 pub fn tumbling_count(count: usize) -> TumblingCountWindow {
     TumblingCountWindow::new(count)
 }
@@ -461,5 +539,86 @@ mod tests {
 
         let tc = tumbling_count(100);
         assert_eq!(<TumblingCountWindow as Window<TV>>::window_type(&tc), WindowType::TumblingCount);
+    }
+
+    // ─── NEW TESTS ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_tumbling_window_empty_stream() {
+        let stream = Box::pin(futures::stream::iter(Vec::<TimestampedValue<i64>>::new()));
+        let window = TumblingWindow::new(Duration::from_secs(5));
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert_eq!(batches.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_tumbling_window_single_element() {
+        let elements = make_elements(&[500]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = TumblingWindow::new(Duration::from_secs(5));
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].elements.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tumbling_count_exact_multiple() {
+        let elements = make_elements(&[100, 200, 300, 400]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = TumblingCountWindow::new(2);
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].size(), 2);
+        assert_eq!(batches[1].size(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_tumbling_count_single_batch_size() {
+        let elements = make_elements(&[100, 200, 300]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = TumblingCountWindow::new(1);
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert_eq!(batches.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_session_multiple_sessions() {
+        let elements = make_elements(&[100, 200, 300, 2000, 2100, 2200, 4000, 4100]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = SessionWindow::new(Duration::from_millis(500));
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        // Two completed sessions; last session doesn't close (no subsequent gap)
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].elements.len(), 3);
+        assert_eq!(batches[1].elements.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_sliding_window_overlap() {
+        let elements = make_elements(&[0, 1000, 2000, 3000, 4000]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = SlidingWindow::new(Duration::from_secs(3), Duration::from_secs(1));
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert!(!batches.is_empty());
+    }
+
+    #[test]
+    fn test_windowed_batch_accessors() {
+        let batch: WindowedBatch<i32> =
+            WindowedBatch::new(vec![1, 2, 3], 0, 5000, WindowType::TumblingTime);
+        assert_eq!(batch.size(), 3);
+        assert_eq!(batch.window_start, 0);
+        assert_eq!(batch.window_end, 5000);
+        assert_eq!(batch.window_type, WindowType::TumblingTime);
+    }
+
+    #[test]
+    fn test_window_spec_debug() {
+        let now_dbg = format!("{:?}", WindowSpec::Now);
+        assert!(now_dbg.contains("Now"));
+        let range_dbg = format!("{:?}", WindowSpec::Range(Duration::from_secs(10)));
+        assert!(range_dbg.contains("Range"));
+        let rows_dbg = format!("{:?}", WindowSpec::Rows(50));
+        assert!(rows_dbg.contains("50"));
     }
 }

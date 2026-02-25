@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
-use cqels_model::{BindingSet, Statement, Value};
-
-use crate::stream::Timestamped;
+use cqels_model::Statement;
 
 /// Join function — combines a left and right element to produce output.
 pub trait JoinFunction<L, R, Out>: Send + Sync {
@@ -309,24 +307,43 @@ impl GraphPatternJoinState {
     }
 
     /// Evicts edges older than the given timestamp.
+    ///
+    /// Uses incremental index removal instead of rebuilding from scratch,
+    /// which is O(evicted) rather than O(total_edges).
     pub fn evict_before(&mut self, cutoff: i64) {
-        self.edges.retain(|e| e.timestamp >= cutoff);
-        // Rebuild indexes from remaining edges
-        self.subject_index.clear();
-        self.object_index.clear();
-        for edge in &self.edges {
-            self.subject_index
-                .entry(edge.subject.clone())
-                .or_default()
-                .entry(edge.predicate.clone())
-                .or_default()
-                .insert(edge.object.clone());
-            self.object_index
-                .entry(edge.object.clone())
-                .or_default()
-                .entry(edge.predicate.clone())
-                .or_default()
-                .insert(edge.subject.clone());
+        // Partition: collect expired edges and remove them from indexes
+        let mut i = 0;
+        while i < self.edges.len() {
+            if self.edges[i].timestamp < cutoff {
+                let edge = self.edges.swap_remove(i);
+                // Remove from subject index
+                if let Some(preds) = self.subject_index.get_mut(&edge.subject) {
+                    if let Some(objs) = preds.get_mut(&edge.predicate) {
+                        objs.remove(&edge.object);
+                        if objs.is_empty() {
+                            preds.remove(&edge.predicate);
+                        }
+                    }
+                    if preds.is_empty() {
+                        self.subject_index.remove(&edge.subject);
+                    }
+                }
+                // Remove from object index
+                if let Some(preds) = self.object_index.get_mut(&edge.object) {
+                    if let Some(subjs) = preds.get_mut(&edge.predicate) {
+                        subjs.remove(&edge.subject);
+                        if subjs.is_empty() {
+                            preds.remove(&edge.predicate);
+                        }
+                    }
+                    if preds.is_empty() {
+                        self.object_index.remove(&edge.object);
+                    }
+                }
+                // Don't increment i — swap_remove moved last element here
+            } else {
+                i += 1;
+            }
         }
     }
 }
@@ -440,7 +457,7 @@ impl VariableLengthPathOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqels_model::term::{IriTerm, LiteralTerm};
+    use cqels_model::term::IriTerm;
     use cqels_model::Term;
 
     fn make_stmt(s: &str, p: &str, o: &str) -> Statement {

@@ -21,10 +21,10 @@ impl<F: Fn(&BindingSet) -> Option<Value> + Send + Sync> BindOperator<F> {
     }
 
     /// Applies the bind to a stream of binding sets.
-    pub fn apply(
-        &self,
-        stream: Pin<Box<dyn Stream<Item = BindingSet> + Send + '_>>,
-    ) -> Pin<Box<dyn Stream<Item = BindingSet> + Send + '_>> {
+    pub fn apply<'a>(
+        &'a self,
+        stream: Pin<Box<dyn Stream<Item = BindingSet> + Send + 'a>>,
+    ) -> Pin<Box<dyn Stream<Item = BindingSet> + Send + 'a>> {
         let var = self.variable.clone();
         let stream = stream.map(move |mut bs| {
             if let Some(value) = (self.expression)(&bs) {

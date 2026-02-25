@@ -47,7 +47,9 @@ impl BindingSet {
     pub fn get_required(&self, variable: &str) -> Result<&Value, CqelsError> {
         self.bindings
             .get(variable)
-            .ok_or_else(|| CqelsError::BindingNotFound(variable.to_string()))
+            .ok_or_else(|| CqelsError::BindingNotFound {
+                variable: variable.to_string(),
+            })
     }
 
     /// Returns `true` if the given variable is bound.

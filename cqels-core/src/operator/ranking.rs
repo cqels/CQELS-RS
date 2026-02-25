@@ -59,10 +59,12 @@ impl<T> Ord for ScoredElement<T> {
             .partial_cmp(&other.score)
             .unwrap_or(Ordering::Equal);
         match self.direction {
-            // For descending, higher scores come first (max-heap natural order)
-            SortDirection::Descending => cmp,
-            // For ascending, lower scores come first (reverse for min-heap behavior)
-            SortDirection::Ascending => cmp.reverse(),
+            // For descending top-K, the heap must pop the smallest score (min-heap),
+            // so we reverse the natural ordering.
+            SortDirection::Descending => cmp.reverse(),
+            // For ascending top-K, the heap must pop the largest score (max-heap),
+            // so we use natural ordering.
+            SortDirection::Ascending => cmp,
         }
     }
 }

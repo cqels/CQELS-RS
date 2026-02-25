@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn test_value_from_types() {
         assert_eq!(Value::from(42i64), Value::Integer(42));
-        assert_eq!(Value::from(3.14f64), Value::Float(3.14));
+        assert_eq!(Value::from(3.15f64), Value::Float(3.15));
         assert_eq!(Value::from(true), Value::Boolean(true));
         assert_eq!(Value::from("hello"), Value::String("hello".to_string()));
     }
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn test_value_as_conversions() {
         assert_eq!(Value::Integer(42).as_integer(), Some(42));
-        assert_eq!(Value::Float(3.14).as_float(), Some(3.14));
+        assert_eq!(Value::Float(3.15).as_float(), Some(3.15));
         assert_eq!(Value::Boolean(true).as_boolean(), Some(true));
         assert_eq!(Value::String("hi".into()).as_string(), Some("hi"));
     }
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn test_value_display() {
         assert_eq!(Value::Integer(42).to_string(), "42");
-        assert_eq!(Value::Float(3.14).to_string(), "3.14");
+        assert_eq!(Value::Float(3.15).to_string(), "3.15");
         assert_eq!(Value::Boolean(true).to_string(), "true");
         assert_eq!(Value::Null.to_string(), "null");
     }
@@ -254,5 +254,86 @@ mod tests {
         set.insert(Value::Integer(42));
         set.insert(Value::Integer(42));
         assert_eq!(set.len(), 1);
+    }
+
+    // ─── NEW TESTS ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_value_wrong_type_conversions() {
+        assert_eq!(Value::String("hello".into()).as_integer(), None);
+        assert_eq!(Value::Boolean(true).as_integer(), None);
+        assert_eq!(Value::Null.as_integer(), None);
+        assert_eq!(Value::Null.as_float(), None);
+        assert_eq!(Value::Null.as_string(), None);
+        assert_eq!(Value::Null.as_boolean(), None);
+    }
+
+    #[test]
+    fn test_value_negative_numbers() {
+        let neg_int = Value::Integer(-100);
+        assert_eq!(neg_int.as_integer(), Some(-100));
+        assert_eq!(neg_int.to_string(), "-100");
+
+        let neg_float = Value::Float(-2.72);
+        assert_eq!(neg_float.as_float(), Some(-2.72));
+    }
+
+    #[test]
+    fn test_value_boundary_integers() {
+        let max = Value::Integer(i64::MAX);
+        assert_eq!(max.as_integer(), Some(i64::MAX));
+
+        let min = Value::Integer(i64::MIN);
+        assert_eq!(min.as_integer(), Some(i64::MIN));
+    }
+
+    #[test]
+    fn test_value_float_special_cases() {
+        let inf = Value::Float(f64::INFINITY);
+        assert_eq!(inf.as_float(), Some(f64::INFINITY));
+
+        let neg_inf = Value::Float(f64::NEG_INFINITY);
+        assert_eq!(neg_inf.as_float(), Some(f64::NEG_INFINITY));
+
+        let nan = Value::Float(f64::NAN);
+        assert!(nan.as_float().unwrap().is_nan());
+    }
+
+    #[test]
+    fn test_value_empty_string() {
+        let v = Value::String(String::new());
+        assert_eq!(v.as_string(), Some(""));
+        assert!(!v.is_null());
+    }
+
+    #[test]
+    fn test_value_to_term_all_types() {
+        assert!(Value::Integer(42).to_term().is_some());
+        assert!(Value::Float(2.72).to_term().is_some());
+        assert!(Value::Boolean(true).to_term().is_some());
+        assert!(Value::String("hello".into()).to_term().is_some());
+        assert!(Value::Null.to_term().is_none());
+    }
+
+    #[test]
+    fn test_value_different_types_not_equal() {
+        // Integer 42 and Float 42.0 should not be equal as values
+        let int_val = Value::Integer(42);
+        let float_val = Value::Float(42.0);
+        assert_ne!(int_val, float_val);
+    }
+
+    #[test]
+    fn test_value_ordering() {
+        let v1 = Value::Integer(1);
+        let v2 = Value::Integer(2);
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn test_value_clone() {
+        let v = Value::String("test".into());
+        let cloned = v.clone();
+        assert_eq!(v, cloned);
     }
 }

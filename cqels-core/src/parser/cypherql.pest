@@ -1,0 +1,248 @@
+// CypherQL PEG Grammar for pest
+// Translated from CypherQL.g4 ANTLR grammar
+
+// Whitespace and comments
+WHITESPACE    = _{ " " | "\t" | "\r" | "\n" }
+COMMENT       = _{ ("//" ~ (!"\n" ~ ANY)*) | ("/*" ~ (!"*/" ~ ANY)* ~ "*/") }
+
+// ─── Top-level rules ─────────────────────────────────────────────────────────
+
+query = { SOI ~ (register_query | continuous_query) ~ EOI }
+
+register_query = { ^"register" ~ ^"query" ~ identifier ~ ^"as" ~ continuous_query }
+
+continuous_query = {
+    from_clauses
+    ~ match_clause
+    ~ where_clause?
+    ~ group_by_clause?
+    ~ having_clause?
+    ~ return_clause
+    ~ post_return_having_clause?
+    ~ order_by_clause?
+    ~ limit_clause?
+}
+
+// ─── FROM clauses ────────────────────────────────────────────────────────────
+
+from_clauses = { from_clause+ }
+
+from_clause = { from_stream | from_static | from_graph }
+
+from_stream = { ^"from" ~ ^"stream" ~ identifier ~ "[" ~ window_spec ~ "]" }
+
+from_static = {
+    ^"from" ~ ^"static" ~ string_literal
+    ~ (^"with" ~ ^"depth" ~ integer_literal)?
+    ~ (^"cache" ~ cache_spec)?
+}
+
+from_graph = {
+    ^"from" ~ ^"graph" ~ string_literal
+    ~ (^"with" ~ ^"depth" ~ integer_literal)?
+    ~ (^"cache" ~ cache_spec)?
+}
+
+// ─── Window specifications ───────────────────────────────────────────────────
+
+window_spec = { window_now | window_slide | window_range | window_triples }
+
+window_now     = { ^"now" }
+window_range   = { ^"range" ~ duration ~ (^"step" ~ duration)? }
+window_triples = { ^"triples" ~ integer_literal }
+window_slide   = { ^"slide" ~ duration ~ ^"step" ~ duration }
+
+duration  = { integer_literal ~ time_unit }
+time_unit = { ^"ms" | ^"s" | ^"m" | ^"h" | ^"d" }
+
+cache_spec = { duration }
+
+// ─── MATCH clause ────────────────────────────────────────────────────────────
+
+match_clause = { ^"match" ~ pattern_group ~ ("," ~ pattern_group)* }
+
+pattern_group = {
+    stream_pattern_group
+    | static_pattern_group
+    | graph_pattern_group
+    | pattern
+}
+
+stream_pattern_group = { ^"stream" ~ identifier ~ "{" ~ pattern ~ "}" }
+static_pattern_group = { ^"static" ~ "{" ~ pattern ~ "}" }
+graph_pattern_group  = { ^"graph" ~ string_literal ~ "{" ~ pattern ~ "}" }
+
+// ─── Cypher patterns ─────────────────────────────────────────────────────────
+
+pattern = { pattern_part ~ ("," ~ pattern_part)* }
+
+pattern_part = { (identifier ~ "=" ~ anonymous_pattern_part) | anonymous_pattern_part }
+
+anonymous_pattern_part = { pattern_element }
+
+pattern_element = { node_pattern ~ pattern_element_chain* | "(" ~ pattern_element ~ ")" }
+
+pattern_element_chain = { relationship_pattern ~ node_pattern }
+
+node_pattern = { "(" ~ identifier? ~ node_labels? ~ properties? ~ ")" }
+
+relationship_pattern = {
+    incoming_rel | outgoing_rel | undirected_rel
+}
+
+incoming_rel    = { "<-" ~ relationship_detail? ~ "-" }
+outgoing_rel    = { "-" ~ relationship_detail? ~ "->" }
+undirected_rel  = { "-" ~ relationship_detail? ~ "-" }
+
+relationship_detail = { "[" ~ identifier? ~ relationship_types? ~ path_length? ~ properties? ~ "]" }
+
+path_length = {
+    "*" ~ (integer_literal ~ (".." ~ integer_literal?)?)?
+    | "*" ~ ".." ~ integer_literal
+}
+
+node_labels = { node_label+ }
+node_label  = { ":" ~ identifier }
+
+relationship_types = { ":" ~ identifier ~ ("|" ~ ":"? ~ identifier)* }
+
+properties = { "{" ~ (property_key_value ~ ("," ~ property_key_value)*)? ~ "}" }
+
+property_key_value = { identifier ~ ":" ~ expression }
+
+// ─── WHERE clause ────────────────────────────────────────────────────────────
+
+where_clause = { ^"where" ~ expression }
+
+// ─── GROUP BY clause ─────────────────────────────────────────────────────────
+
+group_by_clause = { ^"group" ~ ^"by" ~ group_item ~ ("," ~ group_item)* }
+
+group_item = { expression }
+
+// ─── HAVING clause ───────────────────────────────────────────────────────────
+
+having_clause = { ^"having" ~ expression }
+
+post_return_having_clause = { ^"having" ~ expression }
+
+// ─── RETURN clause ───────────────────────────────────────────────────────────
+
+return_clause = { ^"return" ~ distinct_kw? ~ return_items }
+
+distinct_kw = { ^"distinct" }
+
+return_items = { return_item ~ ("," ~ return_item)* }
+
+return_item = { expression ~ (^"as" ~ identifier)? }
+
+// ─── ORDER BY clause ─────────────────────────────────────────────────────────
+
+order_by_clause = { ^"order" ~ ^"by" ~ order_item ~ ("," ~ order_item)* }
+
+order_item = { expression ~ (asc_kw | desc_kw)? }
+
+asc_kw  = { ^"asc" }
+desc_kw = { ^"desc" }
+
+// ─── LIMIT clause ────────────────────────────────────────────────────────────
+
+limit_clause = { ^"limit" ~ integer_literal }
+
+// ─── Expression grammar ─────────────────────────────────────────────────────
+
+expression = { or_expression }
+
+or_expression = { and_expression ~ (or_kw ~ and_expression)* }
+or_kw = @{ ^"or" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+and_expression = { not_expression ~ (and_kw ~ not_expression)* }
+and_kw = @{ ^"and" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+not_expression = { not_kw? ~ comparison_expression }
+not_kw = @{ ^"not" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+comparison_expression = { add_expression ~ (comparison_operator ~ add_expression)? }
+
+comparison_operator = {
+    "<>" | "<=" | ">=" | "=" | "<" | ">"
+    | contains_kw | starts_with_kw | ends_with_kw | in_kw
+}
+
+contains_kw    = @{ ^"contains" ~ !(ASCII_ALPHANUMERIC | "_") }
+starts_with_kw = { ^"starts" ~ ^"with" }
+ends_with_kw   = { ^"ends" ~ ^"with" }
+in_kw          = @{ ^"in" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+add_expression = { multiply_expression ~ (("+" | "-") ~ multiply_expression)* }
+
+multiply_expression = { power_expression ~ (("*" | "/" | "%") ~ power_expression)* }
+
+power_expression = { unary_expression ~ ("^" ~ unary_expression)? }
+
+unary_expression = { ("+" | "-")? ~ atom }
+
+atom = {
+    literal
+    | parameter
+    | case_expression
+    | function_invocation
+    | identifier ~ ("." ~ identifier)*
+    | "(" ~ expression ~ ")"
+    | list_comprehension
+    | pattern_comprehension
+}
+
+// ─── Literals ────────────────────────────────────────────────────────────────
+
+literal = { number_literal | string_literal | boolean_literal | null_literal | list_literal | map_literal }
+
+number_literal = { decimal_literal | integer_literal }
+
+string_literal = @{
+    "'" ~ (!"'" ~ !"\\" ~ ANY | "\\" ~ ANY)* ~ "'"
+    | "\"" ~ (!"\"" ~ !"\\" ~ ANY | "\\" ~ ANY)* ~ "\""
+}
+
+boolean_literal = { ^"true" | ^"false" }
+
+null_literal = { ^"null" }
+
+integer_literal = @{ ASCII_DIGIT+ }
+
+decimal_literal = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ | "." ~ ASCII_DIGIT+ }
+
+list_literal = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }
+
+map_literal = { "{" ~ (property_key_value ~ ("," ~ property_key_value)*)? ~ "}" }
+
+// ─── Function and special expressions ────────────────────────────────────────
+
+function_invocation = { identifier ~ "(" ~ distinct_kw? ~ (expression ~ ("," ~ expression)*)? ~ ")" }
+
+case_expression = { ^"case" ~ expression? ~ case_alternative+ ~ (^"else" ~ expression)? ~ ^"end" }
+
+case_alternative = { ^"when" ~ expression ~ ^"then" ~ expression }
+
+list_comprehension = { "[" ~ identifier ~ ^"in" ~ expression ~ (^"where" ~ expression)? ~ ("|" ~ expression)? ~ "]" }
+
+pattern_comprehension = { "[" ~ pattern_element ~ (^"where" ~ expression)? ~ ("|" ~ expression)? ~ "]" }
+
+parameter = { "$" ~ identifier }
+
+// ─── Identifiers ─────────────────────────────────────────────────────────────
+
+identifier = @{
+    !(reserved_word ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+    | "`" ~ (!"`" ~ ANY)+ ~ "`"
+}
+
+reserved_word = @{
+    ^"register" | ^"query" | ^"from" | ^"stream" | ^"static" | ^"graph"
+    | ^"now" | ^"range" | ^"triples" | ^"slide" | ^"step" | ^"cache" | ^"depth"
+    | ^"match" | ^"where" | ^"group" | ^"having" | ^"return" | ^"distinct"
+    | ^"order" | ^"with" | ^"by" | ^"asc" | ^"desc" | ^"limit"
+    | ^"contains" | ^"starts" | ^"ends"
+    | ^"and" | ^"not" | ^"or" | ^"in" | ^"as"
+    | ^"null" | ^"true" | ^"false" | ^"case" | ^"when" | ^"then" | ^"else" | ^"end"
+}

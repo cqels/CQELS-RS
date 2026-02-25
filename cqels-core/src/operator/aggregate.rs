@@ -2,33 +2,55 @@ use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 
-use crate::window::{WindowSpec, WindowType};
-
-/// Core aggregate function trait.
+/// Core aggregate function trait for incremental stream aggregation.
 ///
-/// Maps to Java's `AggregateFunction<T, ACC, R>`.
+/// An `AggregateFunction` defines four operations that together enable
+/// incremental, mergeable aggregation over stream windows:
+///
+/// 1. **create** -- Initialize an empty accumulator.
+/// 2. **add** -- Fold a new element into the accumulator.
+/// 3. **get_result** -- Extract the final result from an accumulator.
+/// 4. **merge** -- Combine two independent accumulators (enables parallel
+///    and out-of-order aggregation).
+///
+/// # Type Parameters
+///
+/// * `T` -- Input element type.
+/// * `ACC` -- Accumulator type that holds intermediate state.
+/// * `R` -- Result type extracted from the accumulator.
+///
+/// Maps to Java's `AggregateFunction<T, ACC, R>` in CQELS 2.0.
 pub trait AggregateFunction<T, ACC, R>: Send + Sync {
-    /// Creates a new, empty accumulator.
+    /// Creates a new, empty accumulator representing the identity element
+    /// of this aggregation.
     fn create_accumulator(&self) -> ACC;
 
-    /// Adds an element to the accumulator.
+    /// Folds `element` into `accumulator`, returning the updated accumulator.
     fn add(&self, element: &T, accumulator: ACC) -> ACC;
 
-    /// Extracts the result from the accumulator.
+    /// Extracts the final result from the given accumulator.
     fn get_result(&self, accumulator: &ACC) -> R;
 
-    /// Merges two accumulators.
+    /// Merges two independent accumulators into one. This must be
+    /// associative and commutative for correct parallel aggregation.
     fn merge(&self, a: ACC, b: ACC) -> ACC;
 }
 
-/// Extension trait for aggregate functions that support efficient retraction.
+/// Extension trait for aggregate functions that support efficient element
+/// retraction (removal).
 ///
-/// Maps to Java's `RetractableAggregateFunction<T, ACC, R>`.
+/// In sliding-window aggregation, elements expire from the window as it
+/// advances. A retractable aggregate can undo the effect of an element in
+/// O(1) time rather than recomputing from scratch, which is critical for
+/// high-throughput stream processing.
+///
+/// Maps to Java's `RetractableAggregateFunction<T, ACC, R>` in CQELS 2.0.
 pub trait RetractableAggregateFunction<T, ACC, R>: AggregateFunction<T, ACC, R> {
-    /// Retracts an element from the accumulator.
+    /// Removes the contribution of `element` from the `accumulator`,
+    /// returning the updated accumulator.
     fn retract(&self, element: &T, accumulator: ACC) -> ACC;
 
-    /// Returns `true` if retraction is efficient (O(1)).
+    /// Returns `true` if retraction runs in O(1) time. Defaults to `true`.
     fn supports_efficient_retraction(&self) -> bool {
         true
     }
@@ -38,7 +60,9 @@ pub trait RetractableAggregateFunction<T, ACC, R>: AggregateFunction<T, ACC, R> 
 // Concrete aggregate functions
 // ---------------------------------------------------------------------------
 
-/// Counts elements.
+/// Counts the number of elements in a window.
+///
+/// Accumulator is `i64`; result is `i64`. Supports retraction.
 pub struct CountAggregate;
 
 impl<T> AggregateFunction<T, i64, i64> for CountAggregate {
@@ -62,7 +86,8 @@ impl<T> RetractableAggregateFunction<T, i64, i64> for CountAggregate {
     }
 }
 
-/// Sums numeric values extracted via a function.
+/// Sums numeric values extracted from stream elements via an extractor
+/// function. Supports retraction.
 pub struct SumAggregate<T, F: Fn(&T) -> f64> {
     extractor: F,
     _phantom: PhantomData<T>,
@@ -77,7 +102,7 @@ impl<T, F: Fn(&T) -> f64> SumAggregate<T, F> {
     }
 }
 
-impl<T, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for SumAggregate<T, F> {
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for SumAggregate<T, F> {
     fn create_accumulator(&self) -> f64 {
         0.0
     }
@@ -92,7 +117,7 @@ impl<T, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for SumAg
     }
 }
 
-impl<T, F: Fn(&T) -> f64 + Send + Sync> RetractableAggregateFunction<T, f64, f64>
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> RetractableAggregateFunction<T, f64, f64>
     for SumAggregate<T, F>
 {
     fn retract(&self, element: &T, accumulator: f64) -> f64 {
@@ -100,14 +125,21 @@ impl<T, F: Fn(&T) -> f64 + Send + Sync> RetractableAggregateFunction<T, f64, f64
     }
 }
 
-/// Accumulator for average computation.
+/// Accumulator for incremental average computation.
+///
+/// Tracks a running sum and count so the average can be computed as
+/// `sum / count` and updated in O(1) per element.
 #[derive(Clone, Debug, Default)]
 pub struct AvgAccumulator {
+    /// Running sum of all added values.
     pub sum: f64,
+    /// Number of elements added (minus retracted).
     pub count: i64,
 }
 
-/// Computes average of numeric values.
+/// Computes the arithmetic average of numeric values extracted via an
+/// extractor function. Uses [`AvgAccumulator`] for O(1) incremental
+/// updates and supports retraction.
 pub struct AvgAggregate<T, F: Fn(&T) -> f64> {
     extractor: F,
     _phantom: PhantomData<T>,
@@ -122,7 +154,7 @@ impl<T, F: Fn(&T) -> f64> AvgAggregate<T, F> {
     }
 }
 
-impl<T, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, AvgAccumulator, f64>
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, AvgAccumulator, f64>
     for AvgAggregate<T, F>
 {
     fn create_accumulator(&self) -> AvgAccumulator {
@@ -148,7 +180,7 @@ impl<T, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, AvgAccumulator, f64
     }
 }
 
-impl<T, F: Fn(&T) -> f64 + Send + Sync> RetractableAggregateFunction<T, AvgAccumulator, f64>
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> RetractableAggregateFunction<T, AvgAccumulator, f64>
     for AvgAggregate<T, F>
 {
     fn retract(&self, element: &T, mut acc: AvgAccumulator) -> AvgAccumulator {
@@ -158,7 +190,11 @@ impl<T, F: Fn(&T) -> f64 + Send + Sync> RetractableAggregateFunction<T, AvgAccum
     }
 }
 
-/// Tracks minimum value.
+/// Tracks the minimum numeric value extracted from stream elements.
+///
+/// The accumulator is a single `f64` initialized to [`f64::MAX`].
+/// Note: `MinAggregate` does **not** support efficient retraction because
+/// removing the current minimum requires rescanning remaining elements.
 pub struct MinAggregate<T, F: Fn(&T) -> f64> {
     extractor: F,
     _phantom: PhantomData<T>,
@@ -173,7 +209,7 @@ impl<T, F: Fn(&T) -> f64> MinAggregate<T, F> {
     }
 }
 
-impl<T, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for MinAggregate<T, F> {
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for MinAggregate<T, F> {
     fn create_accumulator(&self) -> f64 {
         f64::MAX
     }
@@ -188,7 +224,10 @@ impl<T, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for MinAg
     }
 }
 
-/// Tracks maximum value.
+/// Tracks the maximum numeric value extracted from stream elements.
+///
+/// The accumulator is a single `f64` initialized to [`f64::MIN`].
+/// Like [`MinAggregate`], this does **not** support efficient retraction.
 pub struct MaxAggregate<T, F: Fn(&T) -> f64> {
     extractor: F,
     _phantom: PhantomData<T>,
@@ -203,7 +242,7 @@ impl<T, F: Fn(&T) -> f64> MaxAggregate<T, F> {
     }
 }
 
-impl<T, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for MaxAggregate<T, F> {
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for MaxAggregate<T, F> {
     fn create_accumulator(&self) -> f64 {
         f64::MIN
     }
@@ -222,7 +261,13 @@ impl<T, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for MaxAg
 // Aggregate result
 // ---------------------------------------------------------------------------
 
-/// Result of a windowed aggregation.
+/// The result of applying an aggregate function over a single window
+/// (and optionally a group key).
+///
+/// Contains the computed value together with the window boundaries and
+/// the group key (if a GROUP BY was specified). The `timestamp` field
+/// is set to the window end time, making the result itself a timestamped
+/// value suitable for downstream processing.
 #[derive(Clone, Debug)]
 pub struct AggregateResult<R> {
     pub window_start: i64,
@@ -246,9 +291,14 @@ impl<R: fmt::Display> fmt::Display for AggregateResult<R> {
     }
 }
 
-/// A group key for GROUP BY operations.
+/// A composite group key for GROUP BY operations.
+///
+/// Holds one or more string values that together identify a group. For
+/// example, grouping by `(city, country)` produces a `GroupKey` with two
+/// values.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct GroupKey {
+    /// Ordered list of grouping values.
     pub values: Vec<String>,
 }
 
@@ -274,10 +324,22 @@ impl fmt::Display for GroupKey {
 // Windowed aggregate operator
 // ---------------------------------------------------------------------------
 
-/// Windowed aggregate operator that groups elements by window and optional group key,
-/// then applies an aggregate function.
+/// Windowed aggregate operator that partitions elements by time window and
+/// an optional group key, then applies an [`AggregateFunction`] to each
+/// partition.
 ///
-/// Maps to Java's `WindowedAggregateOperator`.
+/// This is the main entry point for performing grouped, windowed aggregation
+/// in CQELS queries (e.g., `SELECT COUNT(*) ... GROUP BY ?sensor`).
+///
+/// # Type Parameters
+///
+/// * `T` -- Input element type (must be [`Timestamped`](crate::stream::Timestamped)).
+/// * `ACC` -- Accumulator type used by the aggregate function.
+/// * `R` -- Result type produced by the aggregate function.
+/// * `AF` -- The concrete [`AggregateFunction`] implementation.
+/// * `GF` -- A closure that extracts an optional [`GroupKey`] from each element.
+///
+/// Maps to Java's `WindowedAggregateOperator` in CQELS 2.0.
 pub struct WindowedAggregateOperator<T, ACC, R, AF, GF>
 where
     AF: AggregateFunction<T, ACC, R>,
@@ -350,24 +412,30 @@ where
 mod tests {
     use super::*;
 
+    // Helper type alias to pin CountAggregate to a concrete T
+    type CountStr = dyn AggregateFunction<&'static str, i64, i64>;
+    type CountI32 = dyn AggregateFunction<i32, i64, i64>;
+
     #[test]
     fn test_count_aggregate() {
         let agg = CountAggregate;
-        let mut acc = agg.create_accumulator();
-        acc = agg.add(&"a", acc);
-        acc = agg.add(&"b", acc);
-        acc = agg.add(&"c", acc);
-        assert_eq!(agg.get_result(&acc), 3);
+        let agg_ref: &CountStr = &agg;
+        let mut acc = agg_ref.create_accumulator();
+        acc = agg_ref.add(&"a", acc);
+        acc = agg_ref.add(&"b", acc);
+        acc = agg_ref.add(&"c", acc);
+        assert_eq!(agg_ref.get_result(&acc), 3);
     }
 
     #[test]
     fn test_count_retractable() {
         let agg = CountAggregate;
-        let mut acc = agg.create_accumulator();
-        acc = agg.add(&1, acc);
-        acc = agg.add(&2, acc);
-        acc = agg.retract(&1, acc);
-        assert_eq!(agg.get_result(&acc), 1);
+        let agg_ref: &CountI32 = &agg;
+        let mut acc = agg_ref.create_accumulator();
+        acc = agg_ref.add(&1, acc);
+        acc = agg_ref.add(&2, acc);
+        acc = RetractableAggregateFunction::<i32, i64, i64>::retract(&agg, &1, acc);
+        assert_eq!(agg_ref.get_result(&acc), 1);
     }
 
     #[test]
@@ -441,15 +509,16 @@ mod tests {
     #[test]
     fn test_merge_aggregates() {
         let agg = CountAggregate;
-        let mut acc1 = agg.create_accumulator();
-        acc1 = agg.add(&1, acc1);
-        acc1 = agg.add(&2, acc1);
+        let agg_ref: &CountI32 = &agg;
+        let mut acc1 = agg_ref.create_accumulator();
+        acc1 = agg_ref.add(&1, acc1);
+        acc1 = agg_ref.add(&2, acc1);
 
-        let mut acc2 = agg.create_accumulator();
-        acc2 = agg.add(&3, acc2);
+        let mut acc2 = agg_ref.create_accumulator();
+        acc2 = agg_ref.add(&3, acc2);
 
-        let merged = agg.merge(acc1, acc2);
-        assert_eq!(agg.get_result(&merged), 3);
+        let merged = agg_ref.merge(acc1, acc2);
+        assert_eq!(agg_ref.get_result(&merged), 3);
     }
 
     #[test]

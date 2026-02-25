@@ -1,0 +1,219 @@
+// CqelsQL PEG Grammar for pest
+// Translated from CqelsQL.g4 ANTLR grammar
+
+// Whitespace and comments (implicit in pest with WHITESPACE/COMMENT)
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ ("--" ~ (!"\n" ~ ANY)*) | ("#" ~ (!"\n" ~ ANY)*) }
+
+// ─── Top-level rules ─────────────────────────────────────────────────────────
+
+query = { SOI ~ prefix_decl* ~ (register_query | select_query) ~ EOI }
+
+prefix_decl = { ^"prefix" ~ pname_ns ~ iri_ref }
+
+register_query = { ^"register" ~ ^"query" ~ identifier ~ ^"as" ~ select_query }
+
+select_query = {
+    ^"select" ~ select_list
+    ~ from_clauses
+    ~ ^"where" ~ where_clause
+    ~ group_by_clause?
+    ~ order_by_clause?
+    ~ limit_clause?
+}
+
+// ─── SELECT list ─────────────────────────────────────────────────────────────
+
+select_list = { distinct_kw? ~ select_element ~ (","? ~ select_element)* }
+
+distinct_kw = { ^"distinct" }
+
+select_element = { expression_alias | variable }
+
+expression_alias = { "(" ~ expression ~ ^"as" ~ variable ~ ")" }
+
+// ─── Aggregate functions ─────────────────────────────────────────────────────
+
+aggregate_function = {
+    count_agg | avg_agg | sum_agg | min_agg | max_agg
+}
+
+count_agg = { ^"count" ~ "(" ~ (star | variable) ~ ")" }
+avg_agg   = { ^"avg" ~ "(" ~ variable ~ ")" }
+sum_agg   = { ^"sum" ~ "(" ~ variable ~ ")" }
+min_agg   = { ^"min" ~ "(" ~ variable ~ ")" }
+max_agg   = { ^"max" ~ "(" ~ variable ~ ")" }
+
+star = { "*" }
+
+// ─── GROUP BY / ORDER BY / LIMIT ─────────────────────────────────────────────
+
+group_by_clause = { ^"group" ~ ^"by" ~ variable ~ (","? ~ variable)* }
+
+order_by_clause = { ^"order" ~ ^"by" ~ order_condition ~ (","? ~ order_condition)* }
+
+order_condition = { variable ~ (asc_kw | desc_kw)? }
+
+asc_kw  = { ^"asc" }
+desc_kw = { ^"desc" }
+
+limit_clause = { ^"limit" ~ integer }
+
+// ─── FROM clauses ────────────────────────────────────────────────────────────
+
+from_clauses = { from_clause+ }
+
+from_clause = { from_stream | from_static | from_named }
+
+from_stream = { ^"from" ~ ^"stream" ~ identifier ~ "[" ~ window_spec ~ "]" }
+
+from_static = {
+    ^"from" ~ ^"static"? ~ iri_ref
+    ~ (^"with" ~ ^"depth" ~ integer)?
+    ~ (^"cache" ~ cache_spec)?
+}
+
+from_named = {
+    ^"from" ~ ^"named" ~ iri_ref
+    ~ (^"with" ~ ^"depth" ~ integer)?
+    ~ (^"cache" ~ cache_spec)?
+}
+
+// ─── Window specifications ───────────────────────────────────────────────────
+
+window_spec = { window_now | window_slide | window_range | window_triples }
+
+window_now     = { ^"now" }
+window_range   = { ^"range" ~ duration ~ (^"step" ~ duration)? }
+window_triples = { ^"triples" ~ integer }
+window_slide   = { ^"slide" ~ duration ~ ^"step" ~ duration }
+
+duration  = { integer ~ time_unit }
+time_unit = { "ms" | "s" | "m" | "h" | "d" }
+
+cache_spec = { duration }
+
+// ─── WHERE clause ────────────────────────────────────────────────────────────
+
+where_clause = { "{" ~ pattern_group+ ~ "}" }
+
+pattern_group = {
+    stream_pattern_group
+    | static_pattern_group
+    | named_graph_pattern_group
+    | filter_constraint
+    | bind_pattern
+    | optional_pattern
+    | triple_pattern
+}
+
+filter_constraint = { ^"filter" ~ "(" ~ expression ~ ")" }
+
+bind_pattern = { ^"bind" ~ "(" ~ expression ~ ^"as" ~ variable ~ ")" }
+
+optional_pattern = { ^"optional" ~ "{" ~ pattern_group+ ~ "}" }
+
+stream_pattern_group = { ^"stream" ~ identifier ~ "{" ~ triple_pattern+ ~ "}" }
+
+static_pattern_group = { ^"static" ~ "{" ~ triple_pattern+ ~ "}" }
+
+named_graph_pattern_group = { ^"graph" ~ iri_ref ~ "{" ~ triple_pattern+ ~ "}" }
+
+// ─── Triple patterns ────────────────────────────────────────────────────────
+
+triple_pattern = { subject ~ predicate_object_list ~ (";" ~ predicate_object_list)* ~ "."? }
+
+predicate_object_list = { predicate ~ object_list }
+
+object_list = { object ~ ("," ~ object)* }
+
+subject = { variable | iri_ref | prefixed_name }
+
+predicate = { variable | iri_ref | prefixed_name | a_keyword }
+
+a_keyword = { "a" }
+
+object = { variable | iri_ref | prefixed_name | literal }
+
+// ─── Expression grammar ─────────────────────────────────────────────────────
+
+expression = { conditional_or_expr }
+
+conditional_or_expr = { conditional_and_expr ~ ("||" ~ conditional_and_expr)* }
+
+conditional_and_expr = { relational_expr ~ ("&&" ~ relational_expr)* }
+
+relational_expr = { additive_expr ~ (relational_op ~ additive_expr)? }
+
+relational_op = { "<=" | ">=" | "!=" | "=" | "<" | ">" }
+
+additive_expr = { multiplicative_expr ~ (("+" | "-") ~ multiplicative_expr)* }
+
+multiplicative_expr = { unary_expr ~ (("*" | "/") ~ unary_expr)* }
+
+unary_expr = { ("!" | "+" | "-")? ~ primary_expr }
+
+primary_expr = {
+    aggregate_function
+    | built_in_call
+    | "(" ~ expression ~ ")"
+    | variable
+    | literal
+    | iri_ref
+    | prefixed_name
+}
+
+built_in_call = {
+    bound_call
+    | if_call
+    | function_call
+}
+
+bound_call = { ^"bound" ~ "(" ~ variable ~ ")" }
+
+if_call = { ^"if" ~ "(" ~ expression ~ "," ~ expression ~ "," ~ expression ~ ")" }
+
+function_call = { (iri_ref | identifier) ~ "(" ~ expression_list? ~ ")" }
+
+expression_list = { expression ~ ("," ~ expression)* }
+
+// ─── Terminals ───────────────────────────────────────────────────────────────
+
+variable = ${ ("?" | "$") ~ identifier }
+
+iri_ref = @{ "<" ~ (!(">") ~ ANY)* ~ ">" }
+
+prefixed_name = @{ pname_ln | pname_ns }
+
+pname_ns = @{ pn_prefix? ~ ":" }
+
+pname_ln = @{ pname_ns ~ pn_local }
+
+literal = { string_literal | double | decimal | integer | boolean_literal }
+
+string_literal = @{
+    "\"" ~ (!"\"" ~ !"\\" ~ ANY | "\\" ~ ANY)* ~ "\""
+    | "'" ~ (!"'" ~ !"\\" ~ ANY | "\\" ~ ANY)* ~ "'"
+}
+
+integer = @{ ASCII_DIGIT+ }
+
+decimal = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+
+double = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ }
+
+boolean_literal = { ^"true" | ^"false" }
+
+identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+
+// ─── Fragments ───────────────────────────────────────────────────────────────
+
+pn_prefix = @{ pn_chars_base ~ (pn_chars | ".")* }
+
+pn_local = @{ (pn_chars_u | ASCII_DIGIT) ~ (pn_chars | "." | ":")* }
+
+pn_chars = _{ pn_chars_u | "-" | ASCII_DIGIT }
+
+pn_chars_u = _{ pn_chars_base | "_" }
+
+pn_chars_base = _{ ASCII_ALPHA }

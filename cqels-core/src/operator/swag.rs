@@ -248,9 +248,18 @@ impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> SwagOp<T, f64, f64> for Swa
 ///
 /// Provides amortized O(1) push, pop, and query operations.
 /// Maps to Java's `TwoStacksLiteWindow`.
+///
+/// The back stack stores individual lifted partials along with cumulative prefix
+/// aggregates. The front stack stores suffix aggregates (from each element to the
+/// top of the stack). This enables correct flip operations for non-invertible monoids.
 pub struct TwoStacksLiteWindow<In, Partial: Clone, Out, Op: SwagOp<In, Partial, Out>> {
-    front: Vec<Partial>,
-    back: Vec<Partial>,
+    /// Front stack: suffix aggregates (element i combined with all above it).
+    /// Top of vec = oldest element in the window.
+    front_agg: Vec<Partial>,
+    /// Back stack: individual lifted partials (in push order, oldest first).
+    back_vals: Vec<Partial>,
+    /// Back stack: cumulative prefix aggregate (combine of all elements from bottom to this point).
+    back_agg: Vec<Partial>,
     op: Op,
     _phantom: PhantomData<(In, Out)>,
 }
@@ -260,8 +269,9 @@ impl<In, Partial: Clone, Out, Op: SwagOp<In, Partial, Out>>
 {
     pub fn new(op: Op) -> Self {
         Self {
-            front: Vec::new(),
-            back: Vec::new(),
+            front_agg: Vec::new(),
+            back_vals: Vec::new(),
+            back_agg: Vec::new(),
             op,
             _phantom: PhantomData,
         }
@@ -270,53 +280,75 @@ impl<In, Partial: Clone, Out, Op: SwagOp<In, Partial, Out>>
     /// Pushes a value into the back of the window.
     pub fn push(&mut self, value: &In) {
         let partial = self.op.lift(value);
-        let top = self
-            .back
+        let cumulative = self
+            .back_agg
             .last()
             .map(|last| self.op.combine(last, &partial))
-            .unwrap_or(partial);
-        self.back.push(top);
+            .unwrap_or_else(|| partial.clone());
+        self.back_vals.push(partial);
+        self.back_agg.push(cumulative);
     }
 
     /// Pops the oldest value from the front of the window.
     pub fn pop(&mut self) {
-        if self.front.is_empty() {
+        if self.front_agg.is_empty() {
             self.flip();
         }
-        self.front.pop();
+        self.front_agg.pop();
     }
 
     /// Queries the current aggregate over the window.
     pub fn query(&self) -> Out {
-        let front_agg = self.front.last().cloned().unwrap_or_else(|| self.op.identity());
-        let back_agg = self.back.last().cloned().unwrap_or_else(|| self.op.identity());
-        let combined = self.op.combine(&front_agg, &back_agg);
+        let front = self
+            .front_agg
+            .last()
+            .cloned()
+            .unwrap_or_else(|| self.op.identity());
+        let back = self
+            .back_agg
+            .last()
+            .cloned()
+            .unwrap_or_else(|| self.op.identity());
+        let combined = self.op.combine(&front, &back);
         self.op.lower(&combined)
     }
 
     /// Returns the number of elements in the window.
     pub fn len(&self) -> usize {
-        self.front.len() + self.back.len()
+        self.front_agg.len() + self.back_vals.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.front.is_empty() && self.back.is_empty()
+        self.front_agg.is_empty() && self.back_vals.is_empty()
     }
 
     fn flip(&mut self) {
-        // Move all elements from back to front, recomputing prefix aggregates
-        let mut elements: Vec<Partial> = self.back.drain(..).collect();
-        elements.reverse();
+        // Move all individual partials from back to front, building suffix aggregates.
+        // The back is in push order (oldest first). We reverse so the oldest element
+        // ends up at the top of the front stack (popped first).
+        let vals: Vec<Partial> = self.back_vals.drain(..).collect();
+        self.back_agg.clear();
 
-        self.front.clear();
-        for (i, partial) in elements.iter().enumerate() {
-            if i == 0 {
-                self.front.push(partial.clone());
+        self.front_agg.clear();
+        // Build suffix aggregates: iterate in reverse (newest to oldest).
+        // front_agg[0] = newest individual partial
+        // front_agg[n-1] = combine(oldest, ..., newest) = suffix from oldest
+        let mut suffix_aggs: Vec<Partial> = Vec::with_capacity(vals.len());
+        for val in vals.iter().rev() {
+            let agg = if let Some(prev) = suffix_aggs.last() {
+                self.op.combine(val, prev)
             } else {
-                let prev = &self.front[i - 1];
-                self.front.push(self.op.combine(partial, prev));
-            }
+                val.clone()
+            };
+            suffix_aggs.push(agg);
         }
+        // Reverse so that the last element of front_agg is the oldest element's suffix
+        // (i.e., the full aggregate from oldest to newest — which is what we pop last).
+        // Actually, we want: front_agg.pop() removes the oldest element.
+        // front_agg[top] = suffix aggregate starting from oldest element = full aggregate.
+        // So front_agg should be: [newest_only, combine(2nd_newest, newest), ..., combine(oldest, ..., newest)]
+        // That's exactly suffix_aggs in order.
+        self.front_agg = suffix_aggs;
     }
 }
 
