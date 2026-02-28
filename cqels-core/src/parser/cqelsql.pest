@@ -9,6 +9,8 @@ COMMENT    = _{ ("--" ~ (!"\n" ~ ANY)*) | ("#" ~ (!"\n" ~ ANY)*) }
 
 query = { SOI ~ prefix_decl* ~ (register_query | select_query) ~ EOI }
 
+standalone_expression = { SOI ~ expression ~ EOI }
+
 prefix_decl = { ^"prefix" ~ pname_ns ~ iri_ref }
 
 register_query = { ^"register" ~ ^"query" ~ identifier ~ ^"as" ~ select_query }

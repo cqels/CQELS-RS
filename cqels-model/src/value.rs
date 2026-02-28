@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,23 @@ impl Value {
         )
     }
 
+    /// Attempts to extract a numeric value as f64.
+    ///
+    /// Converts `Integer` and `Float` variants to `f64`.
+    /// Returns `None` for non-numeric types.
+    pub fn as_numeric(&self) -> Option<f64> {
+        match self {
+            Value::Integer(i) => Some(*i as f64),
+            Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this value is a numeric type (`Integer` or `Float`).
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, Value::Integer(_) | Value::Float(_))
+    }
+
     /// Converts this value to an RDF Term if possible.
     pub fn to_term(&self) -> Option<Term> {
         match self {
@@ -120,6 +138,35 @@ impl Value {
 }
 
 impl Eq for Value {}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            // Numeric comparison with Integer→Float promotion
+            (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
+            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+            (Value::Integer(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
+            (Value::Float(a), Value::Integer(b)) => a.partial_cmp(&(*b as f64)),
+
+            // Boolean comparison
+            (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
+
+            // String comparison
+            (Value::String(a), Value::String(b)) => a.partial_cmp(b),
+
+            // Term comparison (IRI string comparison)
+            (Value::Term(a), Value::Term(b)) => {
+                a.to_string().partial_cmp(&b.to_string())
+            }
+
+            // Null is not comparable
+            (Value::Null, _) | (_, Value::Null) => None,
+
+            // Different incompatible types are not comparable
+            _ => None,
+        }
+    }
+}
 
 impl std::hash::Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -328,6 +375,47 @@ mod tests {
         let v1 = Value::Integer(1);
         let v2 = Value::Integer(2);
         assert_ne!(v1, v2);
+        assert!(v1 < v2);
+        assert!(v2 > v1);
+    }
+
+    #[test]
+    fn test_value_as_numeric() {
+        assert_eq!(Value::Integer(42).as_numeric(), Some(42.0));
+        assert_eq!(Value::Float(3.14).as_numeric(), Some(3.14));
+        assert_eq!(Value::String("hello".into()).as_numeric(), None);
+        assert_eq!(Value::Boolean(true).as_numeric(), None);
+        assert_eq!(Value::Null.as_numeric(), None);
+    }
+
+    #[test]
+    fn test_value_is_numeric() {
+        assert!(Value::Integer(1).is_numeric());
+        assert!(Value::Float(1.0).is_numeric());
+        assert!(!Value::String("1".into()).is_numeric());
+        assert!(!Value::Boolean(true).is_numeric());
+        assert!(!Value::Null.is_numeric());
+    }
+
+    #[test]
+    fn test_value_partial_ord_cross_type() {
+        // Integer vs Float promotion
+        assert!(Value::Integer(1) < Value::Float(2.0));
+        assert!(Value::Float(1.0) < Value::Integer(2));
+        assert_eq!(
+            Value::Integer(5).partial_cmp(&Value::Float(5.0)),
+            Some(std::cmp::Ordering::Equal)
+        );
+
+        // Null is not comparable
+        assert_eq!(Value::Null.partial_cmp(&Value::Integer(1)), None);
+        assert_eq!(Value::Integer(1).partial_cmp(&Value::Null), None);
+
+        // Different incompatible types are not comparable
+        assert_eq!(
+            Value::Integer(1).partial_cmp(&Value::String("1".into())),
+            None
+        );
     }
 
     #[test]

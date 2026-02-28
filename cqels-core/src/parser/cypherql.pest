@@ -9,6 +9,8 @@ COMMENT       = _{ ("//" ~ (!"\n" ~ ANY)*) | ("/*" ~ (!"*/" ~ ANY)* ~ "*/") }
 
 query = { SOI ~ (register_query | continuous_query) ~ EOI }
 
+standalone_expression = { SOI ~ expression ~ EOI }
+
 register_query = { ^"register" ~ ^"query" ~ identifier ~ ^"as" ~ continuous_query }
 
 continuous_query = {
