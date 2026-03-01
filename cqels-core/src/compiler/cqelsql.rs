@@ -4,16 +4,16 @@
 //! can be executed against input streams. Pre-parses all expression strings
 //! (filters, binds, order-by) into `Expression` trees at compile time.
 
-use crate::expression::ast::{AggregateExprFunction, Expression};
+use crate::expression::ast::Expression;
 use crate::expression::evaluator::ExpressionEvaluator;
 use crate::expression::parser::ExpressionParser;
 use crate::parser::ast::{
-    AggregateFunction, CqelsPatternGroup, CqelsQueryDefinition, SelectElement,
+    CqelsPatternGroup, CqelsQueryDefinition, SelectElement,
 };
 use crate::parser::ParseResult;
 
 use super::compiled::CompiledCqelsQuery;
-use super::pipeline::PipelineAggregateSpec;
+use super::pipeline::{convert_aggregate_function, hash_string, PipelineAggregateSpec};
 
 /// Compiler for CqelsQL (SPARQL-style) queries.
 pub struct CqelsQueryCompiler;
@@ -127,27 +127,6 @@ impl CqelsQueryCompiler {
             select_vars,
         })
     }
-}
-
-/// Converts parser AggregateFunction to expression AggregateExprFunction.
-fn convert_aggregate_function(f: AggregateFunction) -> AggregateExprFunction {
-    match f {
-        AggregateFunction::Count => AggregateExprFunction::Count,
-        AggregateFunction::Sum => AggregateExprFunction::Sum,
-        AggregateFunction::Avg => AggregateExprFunction::Avg,
-        AggregateFunction::Min => AggregateExprFunction::Min,
-        AggregateFunction::Max => AggregateExprFunction::Max,
-        AggregateFunction::Collect => AggregateExprFunction::Collect,
-    }
-}
-
-/// Simple string hash for generating query IDs.
-fn hash_string(s: &str) -> u64 {
-    let mut hash: u64 = 5381;
-    for byte in s.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
-    }
-    hash
 }
 
 #[cfg(test)]

@@ -204,6 +204,7 @@ fn parse_add(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 };
             }
         } else {
+            // Not an operator — treat as next multiply term
             let right = parse_multiply(next)?;
             result = Expression::BinaryOp {
                 op: BinaryOp::Add,
@@ -243,6 +244,7 @@ fn parse_multiply(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> 
                 };
             }
         } else {
+            // Not an operator — treat as next power term
             let right = parse_power(next)?;
             result = Expression::BinaryOp {
                 op: BinaryOp::Mul,
@@ -260,7 +262,19 @@ fn parse_power(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     if children.is_empty() {
         return Err(ParseError::Syntax("empty power expression".into()));
     }
-    parse_unary(children.remove(0))
+    let base = parse_unary(children.remove(0))?;
+    // If there's a "^" and a right operand, emit as a power() function call
+    if children.len() >= 2 {
+        // Skip the "^" token
+        children.remove(0);
+        let exponent = parse_unary(children.remove(0))?;
+        Ok(Expression::FunctionCall {
+            name: "power".to_string(),
+            args: vec![base, exponent],
+        })
+    } else {
+        Ok(base)
+    }
 }
 
 fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {

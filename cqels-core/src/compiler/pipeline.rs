@@ -14,7 +14,7 @@ use cqels_model::{BindingSet, Statement, Term, Value};
 
 use crate::expression::ast::{AggregateExprFunction, Expression};
 use crate::expression::evaluator::ExpressionEvaluator;
-use crate::parser::ast::SortDirection;
+use crate::parser::ast::{AggregateFunction, SortDirection};
 
 /// Specification for an aggregate in the pipeline.
 #[derive(Clone, Debug)]
@@ -235,8 +235,8 @@ pub fn apply_group_by_aggregates(
                     .or_else(|| var.strip_prefix('$'))
                     .unwrap_or(var);
                 bs.get(var_name)
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "null".to_string())
+                    .map(|v| format!("{:?}", v)) // Use Debug format to preserve type info
+                    .unwrap_or_else(|| "Null".to_string())
             })
             .collect();
         groups.entry(key).or_default().push(bs.clone());
@@ -304,13 +304,19 @@ fn compute_aggregate(function: AggregateExprFunction, values: &[Value]) -> Value
     match function {
         AggregateExprFunction::Count => Value::Integer(values.len() as i64),
         AggregateExprFunction::Sum => {
-            let sum: f64 = values
-                .iter()
-                .filter_map(|v| v.as_numeric())
-                .sum();
-            if values.iter().all(|v| matches!(v, Value::Integer(_))) {
-                Value::Integer(sum as i64)
+            let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+            if all_integers {
+                // Direct integer arithmetic to avoid f64 precision loss
+                let sum: i64 = values
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .sum();
+                Value::Integer(sum)
             } else {
+                let sum: f64 = values.iter().filter_map(|v| v.as_numeric()).sum();
                 Value::Float(sum)
             }
         }
@@ -326,20 +332,52 @@ fn compute_aggregate(function: AggregateExprFunction, values: &[Value]) -> Value
             }
         }
         AggregateExprFunction::Min => {
-            values
-                .iter()
-                .filter_map(|v| v.as_numeric())
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(Value::Float)
-                .unwrap_or(Value::Null)
+            if values.is_empty() {
+                return Value::Null;
+            }
+            let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+            if all_integers {
+                values
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .min()
+                    .map(Value::Integer)
+                    .unwrap_or(Value::Null)
+            } else {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_numeric())
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(Value::Float)
+                    .unwrap_or(Value::Null)
+            }
         }
         AggregateExprFunction::Max => {
-            values
-                .iter()
-                .filter_map(|v| v.as_numeric())
-                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(Value::Float)
-                .unwrap_or(Value::Null)
+            if values.is_empty() {
+                return Value::Null;
+            }
+            let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+            if all_integers {
+                values
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .max()
+                    .map(Value::Integer)
+                    .unwrap_or(Value::Null)
+            } else {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_numeric())
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(Value::Float)
+                    .unwrap_or(Value::Null)
+            }
         }
         AggregateExprFunction::Collect => {
             // COLLECT returns a string representation of all values
@@ -419,11 +457,51 @@ pub fn apply_distinct(
     let seen = std::sync::Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
 
     Box::pin(stream.filter(move |bs| {
-        // Use display representation as hash key
-        let key = bs.to_string();
-        let is_new = seen.lock().unwrap().insert(key);
+        // Build a deterministic key by sorting binding keys
+        let key = deterministic_binding_key(bs);
+        let is_new = seen.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
         futures::future::ready(is_new)
     }))
+}
+
+/// Produces a deterministic string key for a BindingSet by sorting variable names.
+fn deterministic_binding_key(bs: &BindingSet) -> String {
+    let mut pairs: Vec<(String, String)> = bs
+        .variables()
+        .map(|var| (var.to_string(), bs.get(var).map(|v| v.to_string()).unwrap_or_default()))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut key = String::new();
+    for (k, v) in &pairs {
+        if !key.is_empty() {
+            key.push(',');
+        }
+        key.push_str(k);
+        key.push('=');
+        key.push_str(v);
+    }
+    key
+}
+
+/// Converts parser AggregateFunction to expression AggregateExprFunction.
+pub(crate) fn convert_aggregate_function(f: AggregateFunction) -> AggregateExprFunction {
+    match f {
+        AggregateFunction::Count => AggregateExprFunction::Count,
+        AggregateFunction::Sum => AggregateExprFunction::Sum,
+        AggregateFunction::Avg => AggregateExprFunction::Avg,
+        AggregateFunction::Min => AggregateExprFunction::Min,
+        AggregateFunction::Max => AggregateExprFunction::Max,
+        AggregateFunction::Collect => AggregateExprFunction::Collect,
+    }
+}
+
+/// Simple string hash for generating query IDs.
+pub(crate) fn hash_string(s: &str) -> u64 {
+    let mut hash: u64 = 5381;
+    for byte in s.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+    }
+    hash
 }
 
 #[cfg(test)]

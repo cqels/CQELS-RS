@@ -275,6 +275,8 @@ pub struct CompiledCypherQuery {
     pub(crate) return_expressions: Vec<(Expression, String)>,
     /// Aggregate specifications.
     pub(crate) aggregate_specs: Vec<PipelineAggregateSpec>,
+    /// RETURN column aliases for projection.
+    pub(crate) select_vars: Vec<String>,
     /// Expression evaluator.
     pub(crate) evaluator: ExpressionEvaluator,
 }
@@ -305,6 +307,7 @@ impl ContinuousQuery for CompiledCypherQuery {
         let order_by_expressions = self.order_by_expressions.clone();
         let return_expressions = self.return_expressions.clone();
         let aggregate_specs = self.aggregate_specs.clone();
+        let select_vars = self.select_vars.clone();
         let evaluator = self.evaluator.clone();
         let distinct = definition.distinct;
         let limit = definition.limit;
@@ -508,18 +511,30 @@ impl ContinuousQuery for CompiledCypherQuery {
                         futures::stream::iter(results)
                     });
 
-            let result: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
-                if distinct {
-                    apply_distinct(Box::pin(result_stream))
+            let projected: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
+                if !select_vars.is_empty() {
+                    apply_projection(Box::pin(result_stream), &select_vars)
                 } else {
                     Box::pin(result_stream)
                 };
-            result
-        } else {
+
             if distinct {
-                apply_distinct(with_returns)
+                apply_distinct(projected)
             } else {
-                with_returns
+                projected
+            }
+        } else {
+            let projected: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
+                if !select_vars.is_empty() {
+                    apply_projection(with_returns, &select_vars)
+                } else {
+                    with_returns
+                };
+
+            if distinct {
+                apply_distinct(projected)
+            } else {
+                projected
             }
         }
     }

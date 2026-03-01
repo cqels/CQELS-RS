@@ -19,6 +19,15 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Value {
         "floor" => numeric_unary(args, f64::floor),
         "round" => numeric_unary(args, f64::round),
         "rand" => Value::Float(pseudo_random()),
+        "power" | "pow" => {
+            match (
+                args.first().and_then(|v| v.as_numeric()),
+                args.get(1).and_then(|v| v.as_numeric()),
+            ) {
+                (Some(base), Some(exp)) => Value::Float(base.powf(exp)),
+                _ => Value::Null,
+            }
+        }
 
         // ── String ───────────────────────────────────────────────────────
         "concat" => fn_concat(args),
@@ -136,7 +145,7 @@ fn fn_concat(args: &[Value]) -> Value {
 
 fn fn_strlen(args: &[Value]) -> Value {
     match args.first().and_then(|v| v.as_string()) {
-        Some(s) => Value::Integer(s.len() as i64),
+        Some(s) => Value::Integer(s.chars().count() as i64),
         None => Value::Null,
     }
 }
@@ -146,21 +155,33 @@ fn fn_substr(args: &[Value]) -> Value {
         Some(s) => s,
         None => return Value::Null,
     };
-    // SPARQL SUBSTR is 1-based
-    let start = match args.get(1).and_then(|v| v.as_integer()) {
-        Some(i) => (i.max(1) - 1) as usize,
+    // SPARQL SUBSTR is 1-based. Per spec, the effective range is
+    // [max(startingLoc, 1), startingLoc + length) intersected with [1, strlen+1).
+    let start_loc = match args.get(1).and_then(|v| v.as_integer()) {
+        Some(i) => i,
         None => return Value::Null,
     };
     let chars: Vec<char> = s.chars().collect();
-    if start >= chars.len() {
-        return Value::String(String::new());
-    }
     match args.get(2).and_then(|v| v.as_integer()) {
-        Some(len) => {
-            let end = (start + len.max(0) as usize).min(chars.len());
-            Value::String(chars[start..end].iter().collect())
+        Some(length) => {
+            // Effective start: max(startingLoc, 1), converted to 0-based
+            let eff_start = (start_loc.max(1) - 1) as usize;
+            // Effective end: startingLoc + length - 1, converted to 0-based
+            let eff_end = ((start_loc + length - 1).max(0) as usize).min(chars.len());
+            if eff_start >= chars.len() || eff_start >= eff_end {
+                Value::String(String::new())
+            } else {
+                Value::String(chars[eff_start..eff_end].iter().collect())
+            }
         }
-        None => Value::String(chars[start..].iter().collect()),
+        None => {
+            let eff_start = (start_loc.max(1) - 1) as usize;
+            if eff_start >= chars.len() {
+                Value::String(String::new())
+            } else {
+                Value::String(chars[eff_start..].iter().collect())
+            }
+        }
     }
 }
 
@@ -223,7 +244,11 @@ fn fn_replace(args: &[Value]) -> Value {
         args.get(2).and_then(|v| v.as_string()),
     ) {
         (Some(input), Some(pattern), Some(replacement)) => {
-            Value::String(input.replace(pattern, replacement))
+            // Try regex first (SPARQL spec), fall back to literal replacement
+            match regex::Regex::new(pattern) {
+                Ok(re) => Value::String(re.replace_all(input, replacement as &str).into_owned()),
+                Err(_) => Value::String(input.replace(pattern, replacement)),
+            }
         }
         _ => Value::Null,
     }
@@ -232,16 +257,19 @@ fn fn_replace(args: &[Value]) -> Value {
 fn fn_encode_for_uri(args: &[Value]) -> Value {
     match args.first().and_then(|v| v.as_string()) {
         Some(s) => {
-            let encoded: String = s
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || "-._~".contains(c) {
-                        c.to_string()
-                    } else {
-                        format!("%{:02X}", c as u32)
+            let mut encoded = String::new();
+            for c in s.chars() {
+                if c.is_ascii_alphanumeric() || "-._~".contains(c) {
+                    encoded.push(c);
+                } else {
+                    // Percent-encode each UTF-8 byte, not the codepoint
+                    let mut buf = [0u8; 4];
+                    for byte in c.encode_utf8(&mut buf).as_bytes() {
+                        use std::fmt::Write;
+                        write!(encoded, "%{:02X}", byte).unwrap();
                     }
-                })
-                .collect();
+                }
+            }
             Value::String(encoded)
         }
         None => Value::Null,
@@ -255,11 +283,57 @@ fn extract_datetime_part(args: &[Value], part_index: usize) -> Value {
         Some(s) => s.to_string(),
         None => return Value::Null,
     };
-    // Expect format: YYYY-MM-DDThh:mm:ss or similar
-    let parts: Vec<&str> = s.split(&['T', '-', ':', '+'][..]).collect();
-    match parts.get(part_index).and_then(|p| p.parse::<i64>().ok()) {
-        Some(val) => Value::Integer(val),
-        None => Value::Null,
+    // Parse ISO-8601: YYYY-MM-DDThh:mm:ss[.frac][Z|+HH:MM|-HH:MM]
+    // Split date and time parts carefully to avoid timezone offset interference
+    let (date_part, time_part) = match s.split_once('T') {
+        Some((d, t)) => (d, Some(t)),
+        None => (s.as_str(), None),
+    };
+
+    let date_fields: Vec<&str> = date_part.splitn(3, '-').collect();
+
+    match part_index {
+        // Year, Month, Day from date part
+        0 => date_fields
+            .first()
+            .and_then(|p| p.parse::<i64>().ok())
+            .map(Value::Integer)
+            .unwrap_or(Value::Null),
+        1 => date_fields
+            .get(1)
+            .and_then(|p| p.parse::<i64>().ok())
+            .map(Value::Integer)
+            .unwrap_or(Value::Null),
+        2 => date_fields
+            .get(2)
+            .and_then(|p| p.parse::<i64>().ok())
+            .map(Value::Integer)
+            .unwrap_or(Value::Null),
+        // Hours, Minutes, Seconds from time part
+        3 | 4 | 5 => {
+            let time_str = match time_part {
+                Some(t) => t,
+                None => return Value::Null,
+            };
+            // Strip timezone suffix (Z, +HH:MM, -HH:MM)
+            let time_core = time_str
+                .trim_end_matches('Z')
+                .split(&['+', '-'][..])
+                .next()
+                .unwrap_or(time_str);
+            let time_fields: Vec<&str> = time_core.splitn(3, ':').collect();
+            let idx = part_index - 3;
+            time_fields
+                .get(idx)
+                .and_then(|p| {
+                    // For seconds, handle fractional part
+                    let numeric = p.split('.').next().unwrap_or(p);
+                    numeric.parse::<i64>().ok()
+                })
+                .map(Value::Integer)
+                .unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
     }
 }
 
@@ -403,7 +477,8 @@ fn fn_lang(args: &[Value]) -> Value {
             Some(lang) => Value::String(lang.to_string()),
             None => Value::String(String::new()),
         },
-        _ => Value::String(String::new()),
+        Some(Value::String(_)) => Value::String(String::new()),
+        _ => Value::Null,
     }
 }
 
@@ -488,6 +563,8 @@ fn fn_to_float(args: &[Value]) -> Value {
 fn fn_to_boolean(args: &[Value]) -> Value {
     match args.first() {
         Some(Value::Boolean(b)) => Value::Boolean(*b),
+        Some(Value::Integer(i)) => Value::Boolean(*i != 0),
+        Some(Value::Float(f)) => Value::Boolean(*f != 0.0 && !f.is_nan()),
         Some(v) => match v.as_string() {
             Some(s) => match s.to_lowercase().as_str() {
                 "true" | "1" => Value::Boolean(true),
@@ -514,23 +591,29 @@ pub fn value_to_bool(value: &Value) -> bool {
     }
 }
 
-/// Simple pseudo-random number generation using system time.
+/// Simple pseudo-random number generation using system time + atomic counter.
 /// Not cryptographically secure — used for SPARQL `rand()`, UUID, bnode generation.
 fn pseudo_random() -> f64 {
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    // Simple LCG-style mixing
-    let mixed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    (mixed as u64 as f64) / (u64::MAX as f64)
+    let mixed = next_pseudo_random_seed();
+    (mixed as f64) / (u64::MAX as f64)
 }
 
 fn pseudo_random_u64() -> u64 {
-    let seed = SystemTime::now()
+    next_pseudo_random_seed()
+}
+
+/// Returns a unique pseudo-random seed by combining system time with an atomic counter.
+/// This avoids collisions when called multiple times within the same nanosecond.
+fn next_pseudo_random_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let seed = time.wrapping_add(count as u128);
     seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) as u64
 }
 
@@ -572,6 +655,11 @@ mod tests {
         assert_eq!(
             call_builtin("strlen", &[Value::String("hello".into())]),
             Value::Integer(5)
+        );
+        // Multi-byte: char count, not byte count
+        assert_eq!(
+            call_builtin("strlen", &[Value::String("café".into())]),
+            Value::Integer(4)
         );
     }
 
@@ -758,6 +846,19 @@ mod tests {
         );
         assert_eq!(
             call_builtin("boolean", &[Value::String("false".into())]),
+            Value::Boolean(false)
+        );
+        // Numeric inputs
+        assert_eq!(
+            call_builtin("boolean", &[Value::Integer(1)]),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            call_builtin("boolean", &[Value::Integer(0)]),
+            Value::Boolean(false)
+        );
+        assert_eq!(
+            call_builtin("boolean", &[Value::Float(0.0)]),
             Value::Boolean(false)
         );
     }

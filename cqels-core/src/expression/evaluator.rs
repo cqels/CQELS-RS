@@ -2,7 +2,7 @@
 //!
 //! Follows SPARQL semantics:
 //! - Variable lookup strips `?`/`$` prefix, returns `Value::Null` if unbound
-//! - Null propagation: null in arithmetic → null; null in comparison → false
+//! - Null propagation: null in arithmetic/comparison → null
 //! - Three-valued logic: `null AND false = false`, `null OR true = true`
 //! - Type coercion: numeric comparison with Integer→Float promotion
 
@@ -58,11 +58,6 @@ impl ExpressionEvaluator {
                 let key = format!("{variable}.{property}");
                 bindings
                     .get(&key)
-                    .or_else(|| {
-                        // Also try just the property on the variable
-                        let alt_key = format!("{property}");
-                        bindings.get(&alt_key)
-                    })
                     .cloned()
                     .unwrap_or(Value::Null)
             }
@@ -181,14 +176,9 @@ impl ExpressionEvaluator {
         let rval = self.evaluate(right, bindings);
 
         // Null propagation for non-logical operators
+        // SPARQL three-valued logic: null in any comparison/arithmetic → null
         if lval.is_null() || rval.is_null() {
-            return match op {
-                // Comparisons with null → false (not null)
-                BinaryOp::Eq | BinaryOp::Neq | BinaryOp::Lt | BinaryOp::Gt
-                | BinaryOp::Lte | BinaryOp::Gte => Value::Boolean(false),
-                // Arithmetic with null → null
-                _ => Value::Null,
-            };
+            return Value::Null;
         }
 
         match op {
@@ -467,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_null_comparison_false() {
+    fn test_null_comparison_returns_null() {
         let eval = ExpressionEvaluator::new();
         let expr = Expression::BinaryOp {
             op: BinaryOp::Gt,
@@ -475,7 +465,27 @@ mod tests {
             right: Box::new(Expression::Literal(Value::Integer(5))),
         };
         let bs = BindingSet::new(0); // x is unbound → null
-        assert_eq!(eval.evaluate(&expr, &bs), Value::Boolean(false));
+        // SPARQL: null in comparison → null (evaluates to false in FILTER context)
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Null);
+    }
+
+    #[test]
+    fn test_null_equality_returns_null() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Eq,
+            left: Box::new(Expression::Variable("x".to_string())),
+            right: Box::new(Expression::Literal(Value::Integer(5))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Null);
+
+        // !(null = 5) should also be null, not true
+        let not_expr = Expression::UnaryOp {
+            op: UnaryOp::Not,
+            operand: Box::new(expr),
+        };
+        assert_eq!(eval.evaluate(&not_expr, &bs), Value::Null);
     }
 
     #[test]

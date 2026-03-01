@@ -29,6 +29,7 @@ async-trait = "0.1"
 # Parsing
 pest = "2.7"
 pest_derive = "2.7"
+regex = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

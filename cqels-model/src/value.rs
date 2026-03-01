@@ -43,10 +43,18 @@ impl Value {
     }
 
     /// Attempts to extract an integer value.
+    ///
+    /// Returns `None` for non-finite floats (NaN, Infinity) or values outside i64 range.
     pub fn as_integer(&self) -> Option<i64> {
         match self {
             Value::Integer(i) => Some(*i),
-            Value::Float(f) => Some(*f as i64),
+            Value::Float(f) => {
+                if f.is_finite() && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                    Some(*f as i64)
+                } else {
+                    None
+                }
+            }
             Value::Term(Term::Literal(lit)) => lit.value().parse().ok(),
             _ => None,
         }

@@ -140,6 +140,7 @@ fn parse_additive(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> 
                 };
             }
         } else {
+            // Not an operator — treat as next multiplicative term
             let right = parse_multiplicative(next)?;
             result = Expression::BinaryOp {
                 op: BinaryOp::Add,
@@ -178,6 +179,7 @@ fn parse_multiplicative(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expres
                 };
             }
         } else {
+            // Not an operator — treat as next unary term
             let right = parse_unary(next)?;
             result = Expression::BinaryOp {
                 op: BinaryOp::Mul,

@@ -4,16 +4,14 @@
 //! can be executed against input streams. Pre-parses all expression strings
 //! (WHERE, HAVING, ORDER BY, RETURN) into `Expression` trees at compile time.
 
-use crate::expression::ast::{AggregateExprFunction, Expression};
+use crate::expression::ast::Expression;
 use crate::expression::evaluator::ExpressionEvaluator;
 use crate::expression::parser::ExpressionParser;
-use crate::parser::ast::{
-    AggregateFunction, CypherQueryDefinition,
-};
+use crate::parser::ast::CypherQueryDefinition;
 use crate::parser::ParseResult;
 
 use super::compiled::CompiledCypherQuery;
-use super::pipeline::PipelineAggregateSpec;
+use super::pipeline::{convert_aggregate_function, hash_string, PipelineAggregateSpec};
 
 /// Compiler for CypherQL queries.
 pub struct CypherQueryCompiler;
@@ -60,8 +58,9 @@ impl CypherQueryCompiler {
                 .clone()
                 .unwrap_or_else(|| ret_expr.expression.clone());
 
-            // Check if this is an aggregate
-            if let Some(agg_fn) = &ret_expr.aggregate_function {
+            // Check if this is an aggregate — aggregates go to aggregate_specs only,
+            // not return_expressions (they are computed during the aggregation phase)
+            let is_aggregate = if let Some(agg_fn) = &ret_expr.aggregate_function {
                 let function = convert_aggregate_function(*agg_fn);
                 aggregate_specs.push(PipelineAggregateSpec {
                     function,
@@ -69,6 +68,7 @@ impl CypherQueryCompiler {
                     alias: alias.clone(),
                     distinct: ret_expr.distinct,
                 });
+                true
             } else if let Expression::Aggregate {
                 function,
                 argument,
@@ -81,10 +81,28 @@ impl CypherQueryCompiler {
                     alias: alias.clone(),
                     distinct: *distinct,
                 });
-            }
+                true
+            } else {
+                false
+            };
 
-            return_expressions.push((parsed, alias));
+            // Only add non-aggregate expressions to return_expressions
+            if !is_aggregate {
+                return_expressions.push((parsed, alias));
+            }
         }
+
+        // Build select_vars from RETURN aliases (for projection)
+        let select_vars: Vec<String> = definition
+            .return_expressions
+            .iter()
+            .map(|ret_expr| {
+                ret_expr
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| ret_expr.expression.clone())
+            })
+            .collect();
 
         // Query ID
         let query_id = definition
@@ -101,30 +119,10 @@ impl CypherQueryCompiler {
             order_by_expressions,
             return_expressions,
             aggregate_specs,
+            select_vars,
             evaluator,
         })
     }
-}
-
-/// Converts parser AggregateFunction to expression AggregateExprFunction.
-fn convert_aggregate_function(f: AggregateFunction) -> AggregateExprFunction {
-    match f {
-        AggregateFunction::Count => AggregateExprFunction::Count,
-        AggregateFunction::Sum => AggregateExprFunction::Sum,
-        AggregateFunction::Avg => AggregateExprFunction::Avg,
-        AggregateFunction::Min => AggregateExprFunction::Min,
-        AggregateFunction::Max => AggregateExprFunction::Max,
-        AggregateFunction::Collect => AggregateExprFunction::Collect,
-    }
-}
-
-/// Simple string hash for generating query IDs.
-fn hash_string(s: &str) -> u64 {
-    let mut hash: u64 = 5381;
-    for byte in s.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
-    }
-    hash
 }
 
 #[cfg(test)]
