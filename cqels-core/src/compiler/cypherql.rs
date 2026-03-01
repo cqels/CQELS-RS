@@ -67,6 +67,7 @@ impl CypherQueryCompiler {
                     argument: parsed.clone(),
                     alias: alias.clone(),
                     distinct: ret_expr.distinct,
+                    separator: None,
                 });
                 true
             } else if let Expression::Aggregate {
@@ -80,6 +81,7 @@ impl CypherQueryCompiler {
                     argument: *argument.clone(),
                     alias: alias.clone(),
                     distinct: *distinct,
+                    separator: None,
                 });
                 true
             } else {

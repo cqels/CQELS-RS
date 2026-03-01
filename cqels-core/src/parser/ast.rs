@@ -159,6 +159,7 @@ pub enum AggregateFunction {
     Min,
     Max,
     Collect,
+    GroupConcat,
 }
 
 impl fmt::Display for AggregateFunction {
@@ -170,6 +171,7 @@ impl fmt::Display for AggregateFunction {
             AggregateFunction::Min => write!(f, "MIN"),
             AggregateFunction::Max => write!(f, "MAX"),
             AggregateFunction::Collect => write!(f, "COLLECT"),
+            AggregateFunction::GroupConcat => write!(f, "GROUP_CONCAT"),
         }
     }
 }
@@ -277,6 +279,15 @@ pub enum CqelsPatternGroup {
     /// OPTIONAL pattern group.
     Optional {
         groups: Vec<CqelsPatternGroup>,
+    },
+    /// UNION — two alternative pattern groups, either may match.
+    Union {
+        left: Vec<CqelsPatternGroup>,
+        right: Vec<CqelsPatternGroup>,
+    },
+    /// MINUS — anti-join: filter out results where patterns match.
+    Minus {
+        patterns: Vec<TriplePattern>,
     },
 }
 

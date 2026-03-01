@@ -68,6 +68,7 @@ impl CqelsQueryCompiler {
                 argument,
                 alias: agg.alias.clone(),
                 distinct: false,
+                separator: None,
             });
         }
 
@@ -90,6 +91,7 @@ impl CqelsQueryCompiler {
                         argument: *argument.clone(),
                         alias: alias.clone(),
                         distinct: *distinct,
+                        separator: None,
                     });
                 } else {
                     // Regular computed expression — add as BIND

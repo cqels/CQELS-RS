@@ -37,14 +37,15 @@ expression_alias = { "(" ~ expression ~ ^"as" ~ variable ~ ")" }
 // ─── Aggregate functions ─────────────────────────────────────────────────────
 
 aggregate_function = {
-    count_agg | avg_agg | sum_agg | min_agg | max_agg
+    group_concat_agg | count_agg | avg_agg | sum_agg | min_agg | max_agg
 }
 
-count_agg = { ^"count" ~ "(" ~ (star | variable) ~ ")" }
-avg_agg   = { ^"avg" ~ "(" ~ variable ~ ")" }
-sum_agg   = { ^"sum" ~ "(" ~ variable ~ ")" }
-min_agg   = { ^"min" ~ "(" ~ variable ~ ")" }
-max_agg   = { ^"max" ~ "(" ~ variable ~ ")" }
+count_agg        = { ^"count" ~ "(" ~ (star | variable) ~ ")" }
+avg_agg          = { ^"avg" ~ "(" ~ variable ~ ")" }
+sum_agg          = { ^"sum" ~ "(" ~ variable ~ ")" }
+min_agg          = { ^"min" ~ "(" ~ variable ~ ")" }
+max_agg          = { ^"max" ~ "(" ~ variable ~ ")" }
+group_concat_agg = { ^"group_concat" ~ "(" ~ variable ~ ("," ~ string_literal)? ~ ")" }
 
 star = { "*" }
 
@@ -106,6 +107,8 @@ pattern_group = {
     | filter_constraint
     | bind_pattern
     | optional_pattern
+    | union_pattern
+    | minus_pattern
     | triple_pattern
 }
 
@@ -114,6 +117,10 @@ filter_constraint = { ^"filter" ~ "(" ~ expression ~ ")" }
 bind_pattern = { ^"bind" ~ "(" ~ expression ~ ^"as" ~ variable ~ ")" }
 
 optional_pattern = { ^"optional" ~ "{" ~ pattern_group+ ~ "}" }
+
+union_pattern = { "{" ~ pattern_group+ ~ "}" ~ ^"union" ~ "{" ~ pattern_group+ ~ "}" }
+
+minus_pattern = { ^"minus" ~ "{" ~ triple_pattern+ ~ "}" }
 
 stream_pattern_group = { ^"stream" ~ identifier ~ "{" ~ triple_pattern+ ~ "}" }
 

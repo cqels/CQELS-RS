@@ -4,23 +4,26 @@
 //! and execute the full pipeline when `execute()` is called.
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{FutureExt, Stream, StreamExt};
 
-use cqels_model::{BindingSet, Term, Value};
+use cqels_model::{BindingSet, Statement};
 
 use crate::expression::ast::Expression;
 use crate::expression::evaluator::ExpressionEvaluator;
 use crate::parser::ast::{
-    CqelsPatternGroup, CqelsQueryDefinition, CypherQueryDefinition, SortDirection,
+    CqelsPatternGroup, CqelsQueryDefinition, CypherQueryDefinition, SortDirection, WindowType,
 };
 use crate::query::{ContinuousQuery, QueryInputs, QueryType};
 use crate::stream::StreamElement;
+use crate::window::{SlidingWindow, TumblingCountWindow, TumblingWindow, Window};
 
 use super::pipeline::{
-    apply_binds, apply_distinct, apply_filters, apply_group_by_aggregates,
-    apply_order_and_limit, apply_projection, match_triple_pattern, PipelineAggregateSpec,
+    apply_binds, apply_distinct, apply_filters, apply_group_by_aggregates, apply_minus,
+    apply_optional, apply_order_and_limit, apply_projection, apply_union, match_cypher_pattern,
+    match_triple_pattern, PipelineAggregateSpec,
 };
 
 /// A compiled CqelsQL query ready for execution.
@@ -104,7 +107,7 @@ impl ContinuousQuery for CompiledCqelsQuery {
             .collect();
 
         // Collect optional pattern groups
-        let _optional_groups: Vec<Vec<CqelsPatternGroup>> = definition
+        let optional_groups: Vec<Vec<CqelsPatternGroup>> = definition
             .pattern_groups
             .iter()
             .filter_map(|pg| match pg {
@@ -113,21 +116,118 @@ impl ContinuousQuery for CompiledCqelsQuery {
             })
             .collect();
 
+        // Collect UNION blocks
+        let union_blocks: Vec<(Vec<CqelsPatternGroup>, Vec<CqelsPatternGroup>)> = definition
+            .pattern_groups
+            .iter()
+            .filter_map(|pg| match pg {
+                CqelsPatternGroup::Union { left, right } => {
+                    Some((left.clone(), right.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Collect MINUS blocks
+        let minus_blocks: Vec<Vec<crate::parser::ast::TriplePattern>> = definition
+            .pattern_groups
+            .iter()
+            .filter_map(|pg| match pg {
+                CqelsPatternGroup::Minus { patterns } => Some(patterns.clone()),
+                _ => None,
+            })
+            .collect();
+
         let prefixes = definition.prefixes.clone();
 
-        // Take the first available stream input
-        let stream_name = stream_patterns
-            .first()
-            .map(|(name, _)| name.clone())
-            .or_else(|| inputs.stream_names().next().map(|s| s.to_string()));
-
-        let input_stream = stream_name
-            .and_then(|name| inputs.take_stream(&name));
+        // Take input streams — merge multiple if available
+        let input_stream: Option<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> =
+            if stream_patterns.len() <= 1 {
+                // Single stream — use existing logic
+                let stream_name = stream_patterns
+                    .first()
+                    .map(|(name, _)| name.clone())
+                    .or_else(|| inputs.stream_names().next().map(|s| s.to_string()));
+                stream_name.and_then(|name| inputs.take_stream(&name))
+            } else {
+                // Multiple streams — merge all using select_all (round-robin fair interleaving)
+                let streams: Vec<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> =
+                    stream_patterns
+                        .iter()
+                        .filter_map(|(name, _)| inputs.take_stream(name))
+                        .collect();
+                if streams.is_empty() {
+                    None
+                } else if streams.len() == 1 {
+                    streams.into_iter().next()
+                } else {
+                    Some(Box::pin(futures::stream::select_all(streams)))
+                }
+            };
 
         let input_stream = match input_stream {
             Some(s) => s,
             None => return Box::pin(futures::stream::empty()),
         };
+
+        // Apply windowing from the first stream's window spec
+        let window_spec = definition.streams.first().map(|s| &s.window);
+        let input_stream: Pin<Box<dyn Stream<Item = StreamElement> + Send>> =
+            match window_spec.map(|w| &w.window_type) {
+                Some(WindowType::Now) => {
+                    // NOW: each element is its own "window" — pass through as-is
+                    input_stream
+                }
+                Some(WindowType::Range) => {
+                    let duration = window_spec
+                        .and_then(|w| w.duration)
+                        .unwrap_or(Duration::from_secs(0));
+                    if duration.is_zero() {
+                        input_stream
+                    } else {
+                        let window = TumblingWindow::new(duration);
+                        Box::pin(
+                            window
+                                .apply(input_stream)
+                                .flat_map(|batch| futures::stream::iter(batch.elements)),
+                        )
+                    }
+                }
+                Some(WindowType::Slide) => {
+                    let duration = window_spec
+                        .and_then(|w| w.duration)
+                        .unwrap_or(Duration::from_secs(0));
+                    let step = window_spec
+                        .and_then(|w| w.step)
+                        .unwrap_or(Duration::from_secs(0));
+                    if duration.is_zero() || step.is_zero() {
+                        input_stream
+                    } else {
+                        let window = SlidingWindow::new(duration, step);
+                        Box::pin(
+                            window
+                                .apply(input_stream)
+                                .flat_map(|batch| futures::stream::iter(batch.elements)),
+                        )
+                    }
+                }
+                Some(WindowType::Triples) => {
+                    let count = window_spec
+                        .and_then(|w| w.triple_count)
+                        .unwrap_or(1) as usize;
+                    if count == 0 {
+                        input_stream
+                    } else {
+                        let window = TumblingCountWindow::new(count);
+                        Box::pin(
+                            window
+                                .apply(input_stream)
+                                .flat_map(|batch| futures::stream::iter(batch.elements)),
+                        )
+                    }
+                }
+                None => input_stream,
+            };
 
         // All patterns (stream + default) for matching
         let all_patterns: Vec<crate::parser::ast::TriplePattern> = stream_patterns
@@ -181,6 +281,27 @@ impl ContinuousQuery for CompiledCqelsQuery {
             apply_binds(filtered, &bind_expressions, &evaluator)
         };
 
+        // Phase 3b: Apply OPTIONAL groups (left-outer-join)
+        let with_optionals = if optional_groups.is_empty() {
+            bound
+        } else {
+            apply_optional(bound, &optional_groups, &prefixes, &evaluator)
+        };
+
+        // Phase 3c: Apply UNION blocks
+        let with_unions = if union_blocks.is_empty() {
+            with_optionals
+        } else {
+            apply_union(with_optionals, &union_blocks, &prefixes, &evaluator)
+        };
+
+        // Phase 3d: Apply MINUS blocks (anti-join)
+        let with_minus = if minus_blocks.is_empty() {
+            with_unions
+        } else {
+            apply_minus(with_unions, &minus_blocks, &prefixes)
+        };
+
         // Phase 4: Collect, aggregate, order, limit, project
         let has_aggregates = !aggregate_specs.is_empty() || !group_by.is_empty();
         let has_order = !order_by_expressions.is_empty();
@@ -190,7 +311,7 @@ impl ContinuousQuery for CompiledCqelsQuery {
             // Collect all results for batch processing
             let evaluator2 = evaluator.clone();
 
-            let result_stream = bound.collect::<Vec<BindingSet>>().into_stream().flat_map(
+            let result_stream = with_minus.collect::<Vec<BindingSet>>().into_stream().flat_map(
                 move |elements| {
                     let mut results = elements;
 
@@ -243,9 +364,9 @@ impl ContinuousQuery for CompiledCqelsQuery {
         } else {
             // Streaming mode: no collection needed
             let projected = if select_vars.is_empty() {
-                bound
+                with_minus
             } else {
-                apply_projection(bound, &select_vars)
+                apply_projection(with_minus, &select_vars)
             };
 
             if distinct {
@@ -313,139 +434,113 @@ impl ContinuousQuery for CompiledCypherQuery {
         let limit = definition.limit;
         let group_by = definition.group_by_expressions.clone();
 
-        // Take the first available stream
-        let stream_name = definition
-            .streams
-            .first()
-            .map(|s| s.name.clone())
-            .or_else(|| inputs.stream_names().next().map(|s| s.to_string()));
-
-        let input_stream = stream_name.and_then(|name| inputs.take_stream(&name));
+        // Take input streams — merge multiple if available
+        let input_stream: Option<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> =
+            if definition.streams.len() <= 1 {
+                let stream_name = definition
+                    .streams
+                    .first()
+                    .map(|s| s.name.clone())
+                    .or_else(|| inputs.stream_names().next().map(|s| s.to_string()));
+                stream_name.and_then(|name| inputs.take_stream(&name))
+            } else {
+                let streams: Vec<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> = definition
+                    .streams
+                    .iter()
+                    .filter_map(|s| inputs.take_stream(&s.name))
+                    .collect();
+                if streams.is_empty() {
+                    None
+                } else if streams.len() == 1 {
+                    streams.into_iter().next()
+                } else {
+                    Some(Box::pin(futures::stream::select_all(streams)))
+                }
+            };
 
         let input_stream = match input_stream {
             Some(s) => s,
             None => return Box::pin(futures::stream::empty()),
         };
 
-        // Phase 1: Convert StreamElements to BindingSets using Cypher pattern matching
-        // For Cypher, we extract node/relationship properties from RDF statements
+        // Apply windowing from the first Cypher stream's window spec.
+        // For Cypher chain matching, we produce batches of elements (Vec<StreamElement>)
+        // so that match_cypher_pattern can match across multiple statements in a window.
+        let cypher_window_spec = definition.streams.first().map(|s| &s.window);
+        let batch_stream: Pin<Box<dyn Stream<Item = Vec<StreamElement>> + Send>> =
+            match cypher_window_spec.map(|w| &w.window_type) {
+                Some(WindowType::Now) => {
+                    // Each element is its own batch
+                    Box::pin(input_stream.map(|elem| vec![elem]))
+                }
+                Some(WindowType::Range) => {
+                    let duration = cypher_window_spec
+                        .and_then(|w| w.duration)
+                        .unwrap_or(Duration::from_secs(0));
+                    if duration.is_zero() {
+                        Box::pin(input_stream.map(|elem| vec![elem]))
+                    } else {
+                        let window = TumblingWindow::new(duration);
+                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
+                    }
+                }
+                Some(WindowType::Slide) => {
+                    let duration = cypher_window_spec
+                        .and_then(|w| w.duration)
+                        .unwrap_or(Duration::from_secs(0));
+                    let step = cypher_window_spec
+                        .and_then(|w| w.step)
+                        .unwrap_or(Duration::from_secs(0));
+                    if duration.is_zero() || step.is_zero() {
+                        Box::pin(input_stream.map(|elem| vec![elem]))
+                    } else {
+                        let window = SlidingWindow::new(duration, step);
+                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
+                    }
+                }
+                Some(WindowType::Triples) => {
+                    let count = cypher_window_spec
+                        .and_then(|w| w.triple_count)
+                        .unwrap_or(1) as usize;
+                    if count == 0 {
+                        Box::pin(input_stream.map(|elem| vec![elem]))
+                    } else {
+                        let window = TumblingCountWindow::new(count);
+                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
+                    }
+                }
+                None => {
+                    // No windowing — each element is its own batch
+                    Box::pin(input_stream.map(|elem| vec![elem]))
+                }
+            };
+
+        // Phase 1: Convert batches of StreamElements to BindingSets using Cypher pattern matching.
+        // Uses match_cypher_pattern for recursive chain matching across statements in each batch.
         let pattern_groups = definition.pattern_groups.clone();
         let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
-            Box::pin(input_stream.filter_map(move |elem| {
-                let timestamp = elem.timestamp();
-                let result = match &elem {
-                    StreamElement::Rdf(rdf) => {
-                        let stmt = &rdf.statement;
-                        let mut bs = BindingSet::new(timestamp);
-
-                        // Extract subject, predicate, object as bindings
-                        // Map to Cypher-style property access patterns
-                        for pg in &pattern_groups {
-                            for pattern in &pg.patterns {
-                                for (i, node) in pattern.nodes.iter().enumerate() {
-                                    if let Some(var) = &node.variable {
-                                        // Bind node variable to subject (first node) or object (second node)
-                                        if i == 0 {
-                                            let subj_str = match &stmt.subject {
-                                                Term::Iri(iri) => iri.as_str().to_string(),
-                                                Term::BlankNode(bn) => bn.id().to_string(),
-                                                Term::Literal(lit) => lit.value().to_string(),
-                                            };
-                                            bs.insert(var.as_str(), Value::String(subj_str));
-                                        } else {
-                                            let obj_val = match &stmt.object {
-                                                Term::Literal(lit) => {
-                                                    let v = lit.value();
-                                                    if let Ok(i) = v.parse::<i64>() {
-                                                        Value::Integer(i)
-                                                    } else if let Ok(f) = v.parse::<f64>() {
-                                                        Value::Float(f)
-                                                    } else {
-                                                        Value::String(v.to_string())
-                                                    }
-                                                }
-                                                Term::Iri(iri) => {
-                                                    Value::String(iri.as_str().to_string())
-                                                }
-                                                Term::BlankNode(bn) => {
-                                                    Value::String(bn.id().to_string())
-                                                }
-                                            };
-                                            bs.insert(var.as_str(), obj_val);
-                                        }
-                                    }
-                                }
-
-                                // Bind relationship variables
-                                for rel in &pattern.relationships {
-                                    if let Some(var) = &rel.variable {
-                                        bs.insert(
-                                            var.as_str(),
-                                            Value::String(stmt.predicate.as_str().to_string()),
-                                        );
-                                    }
-
-                                    // Check relationship type filter
-                                    if !rel.types.is_empty() {
-                                        let pred = stmt.predicate.as_str();
-                                        let type_matches = rel.types.iter().any(|t| {
-                                            pred.ends_with(t) || pred == t.as_str()
-                                        });
-                                        if !type_matches {
-                                            return futures::future::ready(None);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Also add property access keys: "var.property" style
-                        // Predicate becomes the property name
-                        let pred_str = stmt.predicate.as_str();
-                        let prop_name = pred_str
-                            .rsplit('/')
-                            .next()
-                            .or_else(|| pred_str.rsplit('#').next())
-                            .unwrap_or(pred_str);
-
-                        // For each bound node variable, create property access entries
-                        let node_vars: Vec<String> = pattern_groups
-                            .iter()
-                            .flat_map(|pg| &pg.patterns)
-                            .flat_map(|p| &p.nodes)
-                            .filter_map(|n| n.variable.clone())
-                            .collect();
-
-                        if let Some(first_var) = node_vars.first() {
-                            let obj_val = match &stmt.object {
-                                Term::Literal(lit) => {
-                                    let v = lit.value();
-                                    if let Ok(i) = v.parse::<i64>() {
-                                        Value::Integer(i)
-                                    } else if let Ok(f) = v.parse::<f64>() {
-                                        Value::Float(f)
-                                    } else {
-                                        Value::String(v.to_string())
-                                    }
-                                }
-                                Term::Iri(iri) => Value::String(iri.as_str().to_string()),
-                                Term::BlankNode(bn) => Value::String(bn.id().to_string()),
-                            };
-                            bs.insert(
-                                format!("{}.{}", first_var, prop_name),
-                                obj_val,
-                            );
-                        }
-
-                        if bs.is_empty() {
-                            None
-                        } else {
-                            Some(bs)
-                        }
+            Box::pin(batch_stream.flat_map(move |batch| {
+                // Collect all RDF statements and their timestamps from this batch
+                let mut stmts: Vec<Statement> = Vec::new();
+                let mut timestamp = 0i64;
+                for elem in &batch {
+                    timestamp = elem.timestamp();
+                    if let StreamElement::Rdf(rdf) = elem {
+                        stmts.push(rdf.statement.clone());
                     }
-                    _ => None,
-                };
-                futures::future::ready(result)
+                }
+
+                // Run chain matching for each pattern group and each pattern
+                let mut all_results: Vec<BindingSet> = Vec::new();
+                for pg in &pattern_groups {
+                    for pattern in &pg.patterns {
+                        let results =
+                            match_cypher_pattern(pattern, &stmts, timestamp);
+                        all_results.extend(results);
+                    }
+                }
+
+                futures::stream::iter(all_results)
             }));
 
         // Phase 2: Apply WHERE filter

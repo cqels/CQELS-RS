@@ -415,6 +415,7 @@ fn parse_aggregate(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression>
         Rule::avg_agg => AggregateExprFunction::Avg,
         Rule::min_agg => AggregateExprFunction::Min,
         Rule::max_agg => AggregateExprFunction::Max,
+        Rule::group_concat_agg => AggregateExprFunction::GroupConcat,
         _ => return Err(ParseError::Syntax(format!("unknown aggregate: {:?}", rule))),
     };
 

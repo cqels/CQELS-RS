@@ -362,6 +362,7 @@ fn parse_atom(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 "min" => Some(AggregateExprFunction::Min),
                 "max" => Some(AggregateExprFunction::Max),
                 "collect" => Some(AggregateExprFunction::Collect),
+                "group_concat" => Some(AggregateExprFunction::GroupConcat),
                 _ => None,
             };
 

@@ -172,6 +172,7 @@ fn parse_select_list(
 fn try_parse_aggregate(expr: &str, alias: &str) -> Option<AggregateSpec> {
     let upper = expr.trim().to_uppercase();
     let funcs = [
+        ("GROUP_CONCAT", AggregateFunction::GroupConcat),
         ("COUNT", AggregateFunction::Count),
         ("AVG", AggregateFunction::Avg),
         ("SUM", AggregateFunction::Sum),
@@ -492,6 +493,86 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPa
                     }
                 }
                 return Ok(CqelsPatternGroup::Optional { groups });
+            }
+            Rule::union_pattern => {
+                // union_pattern = { "{" ~ pattern_group+ ~ "}" ~ "UNION" ~ "{" ~ pattern_group+ ~ "}" }
+                // The pest rule captures two groups of pattern_groups separated by UNION keyword.
+                // We collect all pattern_groups and split them into left/right halves.
+                let all_groups: Vec<pest::iterators::Pair<Rule>> = inner
+                    .into_inner()
+                    .filter(|p| p.as_rule() == Rule::pattern_group)
+                    .collect();
+                // The grammar produces pattern_group+ UNION pattern_group+
+                // We need to find the split point. Since pest flattens, we parse
+                // the raw text to find where the split is.
+                // Actually, the pest grammar "{" ~ pattern_group+ ~ "}" ~ ^"union" ~ "{" ~ pattern_group+ ~ "}"
+                // will produce all pattern_groups in sequence. We need to split them.
+                // We'll use a different approach: track line positions.
+                // Simpler: parse the span to find "UNION" and split groups accordingly.
+                //
+                // Actually the simplest approach: since we know the structure is
+                // { left_groups } UNION { right_groups }, and pest will capture
+                // left_groups and right_groups in order, we can look at the spans
+                // to determine which groups are before/after UNION.
+                //
+                // But actually there's an even simpler way: reconstruct from the
+                // original pest pair structure. Let me use a state machine approach.
+                // Since all pattern_groups come in sequence and we can't easily
+                // distinguish left from right, let's split them evenly or use a
+                // different grammar approach.
+                //
+                // Better approach: Split at the midpoint where the "UNION" keyword
+                // appears in the source. The left groups have spans before UNION,
+                // right groups have spans after UNION.
+                if all_groups.is_empty() {
+                    return Err(ParseError::Syntax("empty UNION pattern".into()));
+                }
+                // Find where UNION appears in the source
+                // Each group's span position tells us which side it's on
+                // Since the grammar is { left+ } UNION { right+ }, we split
+                // at the first group whose start position is after the UNION keyword
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                let mut in_right = false;
+                // Count braces to detect the transition
+                // Actually, a simpler observation: the grammar defines
+                // two brace-delimited blocks. Pest parses pattern_groups
+                // from both blocks. We can detect the boundary by looking
+                // at span gaps between consecutive groups.
+                //
+                // Even simpler: just split in half if there are only 2 groups,
+                // or use the following heuristic: look at the source text
+                // between groups for the word "union".
+                for (i, pg) in all_groups.iter().enumerate() {
+                    if i > 0 && !in_right {
+                        let prev_end = all_groups[i - 1].as_span().end();
+                        let cur_start = pg.as_span().start();
+                        let between = &pg.as_span().get_input()[prev_end..cur_start];
+                        if between.to_uppercase().contains("UNION") {
+                            in_right = true;
+                        }
+                    }
+                    if in_right {
+                        right.push(parse_pattern_group(pg.clone())?);
+                    } else {
+                        left.push(parse_pattern_group(pg.clone())?);
+                    }
+                }
+                if right.is_empty() && left.len() >= 2 {
+                    // Fallback: split in half
+                    let mid = left.len() / 2;
+                    right = left.split_off(mid);
+                }
+                return Ok(CqelsPatternGroup::Union { left, right });
+            }
+            Rule::minus_pattern => {
+                let mut patterns = Vec::new();
+                for tp in inner.into_inner() {
+                    if tp.as_rule() == Rule::triple_pattern {
+                        patterns.extend(parse_triple_patterns(tp)?);
+                    }
+                }
+                return Ok(CqelsPatternGroup::Minus { patterns });
             }
             Rule::triple_pattern => {
                 let patterns = parse_triple_patterns(inner)?;

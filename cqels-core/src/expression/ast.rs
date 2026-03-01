@@ -172,6 +172,7 @@ pub enum AggregateExprFunction {
     Min,
     Max,
     Collect,
+    GroupConcat,
 }
 
 impl fmt::Display for AggregateExprFunction {
@@ -183,6 +184,7 @@ impl fmt::Display for AggregateExprFunction {
             AggregateExprFunction::Min => write!(f, "MIN"),
             AggregateExprFunction::Max => write!(f, "MAX"),
             AggregateExprFunction::Collect => write!(f, "COLLECT"),
+            AggregateExprFunction::GroupConcat => write!(f, "GROUP_CONCAT"),
         }
     }
 }
