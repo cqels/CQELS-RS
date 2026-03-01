@@ -1137,6 +1137,23 @@ pub(crate) fn hash_string(s: &str) -> u64 {
     hash
 }
 
+/// Joins two sets of binding sets using natural join semantics.
+///
+/// For each pair `(l, r)` where `l ∈ left` and `r ∈ right`, produces
+/// `l.join(r)` if compatible (shared variables have equal values).
+/// Returns all successful joins.
+pub fn join_binding_sets(left: &[BindingSet], right: &[BindingSet]) -> Vec<BindingSet> {
+    let mut results = Vec::new();
+    for l in left {
+        for r in right {
+            if let Some(joined) = l.join(r) {
+                results.push(joined);
+            }
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

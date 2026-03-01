@@ -4,6 +4,8 @@
 //! can be executed against input streams. Pre-parses all expression strings
 //! (filters, binds, order-by) into `Expression` trees at compile time.
 
+use std::sync::Arc;
+
 use crate::expression::ast::Expression;
 use crate::expression::evaluator::ExpressionEvaluator;
 use crate::expression::parser::ExpressionParser;
@@ -11,6 +13,7 @@ use crate::parser::ast::{
     CqelsPatternGroup, CqelsQueryDefinition, SelectElement,
 };
 use crate::parser::ParseResult;
+use crate::store::RdfStore;
 
 use super::compiled::CompiledCqelsQuery;
 use super::pipeline::{convert_aggregate_function, hash_string, PipelineAggregateSpec};
@@ -26,6 +29,16 @@ impl CqelsQueryCompiler {
     pub fn compile(
         query_string: &str,
         definition: CqelsQueryDefinition,
+    ) -> ParseResult<CompiledCqelsQuery> {
+        Self::compile_with_store(query_string, definition, None)
+    }
+
+    /// Compiles a CqelsQL query definition with an optional RDF store for
+    /// resolving `STATIC { ... }` and `GRAPH <uri> { ... }` patterns.
+    pub fn compile_with_store(
+        query_string: &str,
+        definition: CqelsQueryDefinition,
+        rdf_store: Option<Arc<dyn RdfStore>>,
     ) -> ParseResult<CompiledCqelsQuery> {
         let evaluator = ExpressionEvaluator::with_prefixes(definition.prefixes.clone());
 
@@ -127,6 +140,7 @@ impl CqelsQueryCompiler {
             aggregate_specs,
             evaluator,
             select_vars,
+            rdf_store,
         })
     }
 }

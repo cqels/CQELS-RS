@@ -4,6 +4,7 @@
 //! and execute the full pipeline when `execute()` is called.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,10 +21,12 @@ use crate::query::{ContinuousQuery, QueryInputs, QueryType};
 use crate::stream::StreamElement;
 use crate::window::{SlidingWindow, TumblingCountWindow, TumblingWindow, Window};
 
+use crate::store::RdfStore;
+
 use super::pipeline::{
     apply_binds, apply_distinct, apply_filters, apply_group_by_aggregates, apply_minus,
-    apply_optional, apply_order_and_limit, apply_projection, apply_union, match_cypher_pattern,
-    match_triple_pattern, PipelineAggregateSpec,
+    apply_optional, apply_order_and_limit, apply_projection, apply_union, join_binding_sets,
+    match_cypher_pattern, match_triple_pattern, PipelineAggregateSpec,
 };
 
 /// A compiled CqelsQL query ready for execution.
@@ -48,6 +51,8 @@ pub struct CompiledCqelsQuery {
     pub(crate) evaluator: ExpressionEvaluator,
     /// SELECT variable names for projection.
     pub(crate) select_vars: Vec<String>,
+    /// Optional RDF store for STATIC and GRAPH pattern lookups.
+    pub(crate) rdf_store: Option<Arc<dyn RdfStore>>,
 }
 
 #[async_trait]
@@ -94,17 +99,41 @@ impl ContinuousQuery for CompiledCqelsQuery {
             })
             .collect();
 
-        // Collect default/static patterns (for basic matching)
+        // Collect default patterns only (for stream matching)
         let default_patterns: Vec<crate::parser::ast::TriplePattern> = definition
             .pattern_groups
             .iter()
             .filter_map(|pg| match pg {
                 CqelsPatternGroup::Default { patterns } => Some(patterns.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        // Collect static patterns (for RDF store lookup)
+        let static_patterns: Vec<crate::parser::ast::TriplePattern> = definition
+            .pattern_groups
+            .iter()
+            .filter_map(|pg| match pg {
                 CqelsPatternGroup::Static { patterns } => Some(patterns.clone()),
                 _ => None,
             })
             .flatten()
             .collect();
+
+        // Collect named graph patterns (for RDF store lookup)
+        let named_graph_patterns: Vec<(String, Vec<crate::parser::ast::TriplePattern>)> =
+            definition
+                .pattern_groups
+                .iter()
+                .filter_map(|pg| match pg {
+                    CqelsPatternGroup::NamedGraph {
+                        graph_uri,
+                        patterns,
+                    } => Some((graph_uri.clone(), patterns.clone())),
+                    _ => None,
+                })
+                .collect();
 
         // Collect optional pattern groups
         let optional_groups: Vec<Vec<CqelsPatternGroup>> = definition
@@ -229,12 +258,45 @@ impl ContinuousQuery for CompiledCqelsQuery {
                 None => input_stream,
             };
 
-        // All patterns (stream + default) for matching
+        // All stream + default patterns for matching against streaming data
         let all_patterns: Vec<crate::parser::ast::TriplePattern> = stream_patterns
             .iter()
             .flat_map(|(_, patterns)| patterns.clone())
             .chain(default_patterns)
             .collect();
+
+        // Pre-compute static bindings from RDF store (if available)
+        let rdf_store = self.rdf_store.clone();
+        let static_bindings: Vec<BindingSet> = if let Some(store) = &rdf_store {
+            let mut accumulated: Vec<BindingSet> = Vec::new();
+
+            // Query each static pattern and progressively join results
+            for pattern in &static_patterns {
+                let pattern_results = store.query_pattern(pattern, &prefixes);
+                if accumulated.is_empty() {
+                    accumulated = pattern_results;
+                } else if !pattern_results.is_empty() {
+                    accumulated = join_binding_sets(&accumulated, &pattern_results);
+                }
+            }
+
+            // Query each named graph pattern and join with accumulated results
+            for (graph_uri, patterns) in &named_graph_patterns {
+                for pattern in patterns {
+                    let pattern_results =
+                        store.query_named_graph_pattern(graph_uri, pattern, &prefixes);
+                    if accumulated.is_empty() {
+                        accumulated = pattern_results;
+                    } else if !pattern_results.is_empty() {
+                        accumulated = join_binding_sets(&accumulated, &pattern_results);
+                    }
+                }
+            }
+
+            accumulated
+        } else {
+            vec![]
+        };
 
         // Phase 1: Pattern matching — convert StreamElements to BindingSets
         let prefixes_clone = prefixes.clone();
@@ -266,6 +328,21 @@ impl ContinuousQuery for CompiledCqelsQuery {
 
                 futures::future::ready(result)
             }));
+
+        // Phase 1b: Join stream bindings with static bindings from RDF store
+        let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
+            if !static_bindings.is_empty() {
+                Box::pin(binding_stream.flat_map(move |bs| {
+                    let joined: Vec<BindingSet> = static_bindings
+                        .iter()
+                        .filter_map(|static_bs| bs.join(static_bs))
+                        .collect();
+                    // If no joins succeed, pass through the original binding
+                    futures::stream::iter(if joined.is_empty() { vec![bs] } else { joined })
+                }))
+            } else {
+                binding_stream
+            };
 
         // Phase 2: Apply FILTER expressions
         let filtered = if filter_expressions.is_empty() {
@@ -690,6 +767,7 @@ mod tests {
             aggregate_specs: vec![],
             evaluator: ExpressionEvaluator::new(),
             select_vars: vec!["sensor".to_string(), "temp".to_string()],
+            rdf_store: None,
         };
 
         // Create test input stream

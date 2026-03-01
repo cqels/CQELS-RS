@@ -48,3 +48,4 @@ pub mod operator;
 pub mod parser;
 pub mod expression;
 pub mod compiler;
+pub mod store;

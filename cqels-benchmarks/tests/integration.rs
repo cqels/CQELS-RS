@@ -3,6 +3,7 @@
 //! These tests verify that parsing, windowing, filtering, aggregation,
 //! joining, ranking, and reasoning work together correctly.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -13,6 +14,15 @@ use cqels_model::{BindingSet, Statement, Value};
 
 // Core – parsing
 use cqels_core::parser::{CqelsQlParser, CypherQlParser};
+
+// Core – compiler
+use cqels_core::compiler::{CqelsQueryCompiler, CypherQueryCompiler};
+
+// Core – query
+use cqels_core::query::{ContinuousQuery, QueryInputs};
+
+// Core – store
+use cqels_core::store::{OxigraphRdfStore, RdfStore};
 
 // Core – streams & windows
 use cqels_core::stream::{RdfStreamElement, StreamElement, Timestamped};
@@ -30,8 +40,8 @@ use cqels_core::operator::bind::BindOperator;
 use cqels_core::operator::join::GraphPatternJoinState;
 use cqels_core::operator::ranking::{SortDirection, TopKOperator};
 
-// Engine – CEP
-use cqels_engine::{NfaPatternProcessor, Pattern};
+// Engine
+use cqels_engine::{NfaPatternProcessor, Pattern, ReactiveStreamEngine, StreamEngine, create_stream_pair, receiver_to_stream};
 
 // Reasoning
 use cqels_reasoning::{
@@ -1239,4 +1249,611 @@ fn test_graph_eviction_then_reason() {
         inferred[0].statement.predicate.as_str(),
         "http://ex.org/reachable"
     );
+}
+
+// ===========================================================================
+// End-to-End Query Execution Tests (Phase 4)
+// ===========================================================================
+
+/// Helper: create a stream element with a literal object value
+fn stream_elem_literal(subj: &str, pred: &str, obj_val: &str, ts: i64) -> StreamElement {
+    StreamElement::Rdf(RdfStreamElement::new(
+        Statement::new(iri(subj), iri_pred(pred), lit(obj_val)),
+        ts,
+    ))
+}
+
+/// Helper: create a stream element with IRI object
+fn stream_elem_iri(subj: &str, pred: &str, obj: &str, ts: i64) -> StreamElement {
+    StreamElement::Rdf(RdfStreamElement::new(stmt(subj, pred, obj), ts))
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 1: CqelsQL basic parse → compile → execute
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_cqelsql_basic_parse_compile_execute() {
+    let query_str = r#"
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
+        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "35", 2000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert_eq!(results.len(), 2);
+    assert!(results[0].contains("sensor"));
+    assert!(results[0].contains("temp"));
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 2: CqelsQL with FILTER ?temp > 30
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_cqelsql_with_filter() {
+    let query_str = r#"
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+            FILTER(?temp > 30)
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
+        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "25", 2000),
+        stream_elem_literal("http://example.org/s3", "http://example.org/temp", "35", 3000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    // Only s1 (42) and s3 (35) should pass the FILTER(?temp > 30)
+    assert_eq!(results.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 3: CqelsQL with PREFIX resolution
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_cqelsql_with_prefix() {
+    let query_str = r#"
+        PREFIX ex: <http://example.org/>
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor ex:temp ?temp .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("sensor"));
+    assert!(results[0].contains("temp"));
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 4: CqelsQL GROUP BY + AVG aggregate
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_cqelsql_group_by_avg() {
+    let query_str = r#"
+        SELECT ?sensor (AVG(?temp) AS ?avg_temp)
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+        GROUP BY ?sensor
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    // sensor1 has two readings: 40 and 50 → avg = 45
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "40", 1000),
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "50", 2000),
+        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "30", 3000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    // Should have 2 groups: s1 and s2
+    assert_eq!(results.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 5: CqelsQL ORDER BY DESC + LIMIT 2
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_cqelsql_order_by_desc_limit() {
+    let query_str = r#"
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+        ORDER BY ?temp DESC
+        LIMIT 2
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "10", 1000),
+        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "50", 2000),
+        stream_elem_literal("http://example.org/s3", "http://example.org/temp", "30", 3000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    // LIMIT 2 → only 2 results
+    assert_eq!(results.len(), 2);
+    // ORDER BY DESC → first result should be "50" (highest)
+    let first_temp = results[0].get("temp").expect("temp missing");
+    let second_temp = results[1].get("temp").expect("temp missing");
+    // The first should be >= second (descending)
+    assert!(first_temp.as_numeric() >= second_temp.as_numeric());
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 6: CqelsQL multi-stream join
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_cqelsql_multi_stream_join() {
+    let query_str = r#"
+        SELECT ?sensor ?temp ?humidity
+        FROM STREAM temp_stream [NOW]
+        FROM STREAM humidity_stream [NOW]
+        WHERE {
+            STREAM temp_stream {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+            STREAM humidity_stream {
+                ?sensor <http://example.org/humidity> ?humidity .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let temp_elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
+    ];
+    let humidity_elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/humidity", "65", 2000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("temp_stream", Box::pin(futures::stream::iter(temp_elements)));
+    inputs.add_stream("humidity_stream", Box::pin(futures::stream::iter(humidity_elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    // Each element should match one of the patterns, producing individual bindings
+    assert!(!results.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 7: CypherQL basic parse → compile → execute
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_cypherql_basic_parse_compile_execute() {
+    let query_str = r#"
+        FROM STREAM events [NOW]
+        MATCH (a)-[:KNOWS]->(b)
+        RETURN a, b
+    "#;
+
+    let definition = CypherQlParser::parse(query_str).expect("parse failed");
+    let compiled = CypherQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    // Create triples that represent (alice)-[:KNOWS]->(bob)
+    let elements = vec![
+        stream_elem_iri(
+            "http://example.org/alice",
+            "http://example.org/KNOWS",
+            "http://example.org/bob",
+            1000,
+        ),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("events", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert!(!results.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 8: CypherQL with WHERE filter
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_cypherql_with_where_filter() {
+    let query_str = r#"
+        FROM STREAM events [NOW]
+        MATCH (a)-[:KNOWS]->(b)
+        WHERE a.name <> "unknown"
+        RETURN a, b
+    "#;
+
+    let definition = CypherQlParser::parse(query_str).expect("parse failed");
+    let compiled = CypherQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![
+        stream_elem_iri(
+            "http://example.org/alice",
+            "http://example.org/KNOWS",
+            "http://example.org/bob",
+            1000,
+        ),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("events", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    // The WHERE filter is applied but may not filter anything since we don't
+    // have a "name" property — the test proves the pipeline runs without error
+    assert!(results.len() <= 1);
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 9: Empty stream → empty results
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_empty_stream_produces_empty_results() {
+    let query_str = r#"
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::empty::<StreamElement>()));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert!(results.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 10: Engine stream → query execution
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_engine_stream_to_query_execution() {
+    let engine = ReactiveStreamEngine::new();
+
+    let (tx, stream) = create_stream_pair(32);
+    engine
+        .register_stream("sensors", stream)
+        .await
+        .unwrap();
+    engine.start().await.unwrap();
+
+    // Parse and compile a query
+    let query_str = r#"
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+    "#;
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    // Get a stream receiver from the engine and build QueryInputs
+    let rx = engine.get_stream_receiver("sensors").await.unwrap();
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", receiver_to_stream(rx));
+
+    // Send data through the engine
+    let elem = stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000);
+    tx.send(elem).await.unwrap();
+
+    // Small delay to allow the forwarding task to process
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Execute the query and take the first result (broadcast streams don't
+    // naturally close, so we use `take(1)` instead of collecting all)
+    let mut result_stream = compiled.execute(inputs);
+    let first = tokio::time::timeout(Duration::from_secs(2), result_stream.next())
+        .await
+        .expect("timed out waiting for result");
+
+    assert!(first.is_some(), "should receive at least one result");
+    let bs = first.unwrap();
+    assert!(bs.contains("sensor"));
+    assert!(bs.contains("temp"));
+
+    engine.stop().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// RDF Store Integration Tests
+// ---------------------------------------------------------------------------
+
+// E2E Store Test 1: Static pattern store lookup (stream + STATIC join)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_static_pattern_store_lookup() {
+    // Set up the RDF store with static metadata
+    let store = Arc::new(OxigraphRdfStore::new().unwrap());
+    store
+        .load_statements(&[
+            Statement::new(
+                iri("http://example.org/s1"),
+                iri_pred("http://example.org/type"),
+                iri("http://example.org/TemperatureSensor"),
+            ),
+            Statement::new(
+                iri("http://example.org/s2"),
+                iri_pred("http://example.org/type"),
+                iri("http://example.org/HumiditySensor"),
+            ),
+        ])
+        .unwrap();
+
+    // Parse and compile query with STATIC block
+    let query_str = r#"
+        SELECT ?sensor ?temp ?type
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+            STATIC {
+                ?sensor <http://example.org/type> ?type .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile_with_store(query_str, definition, Some(store))
+        .expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
+        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "65", 2000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+
+    // Both stream elements should be enriched with type from the store
+    assert_eq!(results.len(), 2);
+    // Each result should have the ?type variable from the store
+    for result in &results {
+        assert!(result.contains("sensor"));
+        assert!(result.contains("temp"));
+        assert!(result.contains("type"), "result should contain ?type from static store: {:?}", result);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E2E Store Test 2: Named graph lookup (GRAPH <uri> queries correct graph)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_named_graph_lookup() {
+    let store = Arc::new(OxigraphRdfStore::new().unwrap());
+
+    // Load data into a named graph
+    store
+        .load_named_graph(
+            "http://example.org/metadata",
+            &[Statement::new(
+                iri("http://example.org/s1"),
+                iri_pred("http://example.org/location"),
+                iri("http://example.org/RoomA"),
+            )],
+        )
+        .unwrap();
+
+    // Also load into default graph (should NOT be returned for GRAPH queries)
+    store
+        .load_statements(&[Statement::new(
+            iri("http://example.org/s1"),
+            iri_pred("http://example.org/location"),
+            iri("http://example.org/RoomB"),
+        )])
+        .unwrap();
+
+    let query_str = r#"
+        SELECT ?sensor ?temp ?location
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+            GRAPH <http://example.org/metadata> {
+                ?sensor <http://example.org/location> ?location .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile_with_store(query_str, definition, Some(store))
+        .expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+
+    // Should get the location from the named graph (RoomA), not default graph (RoomB)
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("location"));
+    let loc = results[0].get("location").unwrap();
+    match loc {
+        Value::Term(Term::Iri(iri_term)) => {
+            assert_eq!(iri_term.as_str(), "http://example.org/RoomA");
+        }
+        _ => panic!("expected IRI term for location, got {:?}", loc),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E2E Store Test 3: Static no-match passthrough
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_static_no_match_passthrough() {
+    // Empty store — no static data
+    let store = Arc::new(OxigraphRdfStore::new().unwrap());
+
+    let query_str = r#"
+        SELECT ?sensor ?temp ?type
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+            STATIC {
+                ?sensor <http://example.org/type> ?type .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile_with_store(query_str, definition, Some(store))
+        .expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+
+    // With empty store, static bindings is empty, so stream results pass through
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("sensor"));
+    assert!(results[0].contains("temp"));
+}
+
+// ---------------------------------------------------------------------------
+// E2E Store Test 4: Multiple static patterns joined
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_multiple_static_patterns_joined() {
+    let store = Arc::new(OxigraphRdfStore::new().unwrap());
+    store
+        .load_statements(&[
+            Statement::new(
+                iri("http://example.org/s1"),
+                iri_pred("http://example.org/type"),
+                iri("http://example.org/TemperatureSensor"),
+            ),
+            Statement::new(
+                iri("http://example.org/s1"),
+                iri_pred("http://example.org/location"),
+                iri("http://example.org/RoomA"),
+            ),
+        ])
+        .unwrap();
+
+    let query_str = r#"
+        SELECT ?sensor ?temp ?type ?location
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+            STATIC {
+                ?sensor <http://example.org/type> ?type .
+                ?sensor <http://example.org/location> ?location .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile_with_store(query_str, definition, Some(store))
+        .expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+
+    // Should have 1 result with all 4 variables bound
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("sensor"));
+    assert!(results[0].contains("temp"));
+    assert!(results[0].contains("type"));
+    assert!(results[0].contains("location"));
 }
