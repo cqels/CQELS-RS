@@ -23,6 +23,9 @@ pub trait StreamEngine: Send + Sync {
         stream: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,
     ) -> Result<(), CqelsError>;
 
+    /// Removes a named stream and aborts its forwarding task.
+    async fn unregister_stream(&self, name: &str) -> Result<(), CqelsError>;
+
     /// Registers and executes a continuous query, returning a result stream.
     async fn register_query(
         &self,
@@ -182,6 +185,21 @@ impl StreamEngine for ReactiveStreamEngine {
         Ok(())
     }
 
+    async fn unregister_stream(&self, name: &str) -> Result<(), CqelsError> {
+        let mut streams = self.streams.lock().await;
+        if let Some(state) = streams.remove(name) {
+            if let Some(handle) = state._handle {
+                handle.abort();
+            }
+        }
+
+        // Also remove from pending if not yet activated
+        let mut pending = self.pending.lock().await;
+        pending.retain(|(n, _)| n != name);
+
+        Ok(())
+    }
+
     async fn stop(&self) -> Result<(), CqelsError> {
         if self
             .running
@@ -191,8 +209,13 @@ impl StreamEngine for ReactiveStreamEngine {
             return Ok(());
         }
 
+        // Abort all forwarding task handles before clearing
         let mut streams = self.streams.lock().await;
-        streams.clear();
+        for (_name, state) in streams.drain() {
+            if let Some(handle) = state._handle {
+                handle.abort();
+            }
+        }
 
         let mut pending = self.pending.lock().await;
         pending.clear();
@@ -293,6 +316,52 @@ mod tests {
 
         assert!(received.is_ok());
         assert!(received.unwrap().is_some());
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stop_aborts_handles() {
+        let engine = ReactiveStreamEngine::new();
+
+        let (tx, stream) = create_stream_pair(32);
+        engine.register_stream("test", stream).await.unwrap();
+        engine.start().await.unwrap();
+
+        // Send an element to ensure the forwarding task is running
+        let elem = make_rdf_element("http://s", "http://p", "val", 1);
+        let _ = tx.send(elem).await;
+
+        // Stop the engine — handles should be aborted
+        engine.stop().await.unwrap();
+        assert!(!engine.is_running());
+
+        // After stop, streams map should be empty
+        let streams = engine.streams.lock().await;
+        assert!(streams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_stream() {
+        let engine = ReactiveStreamEngine::new();
+
+        let (_tx1, stream1) = create_stream_pair(32);
+        let (_tx2, stream2) = create_stream_pair(32);
+
+        engine.register_stream("stream1", stream1).await.unwrap();
+        engine.register_stream("stream2", stream2).await.unwrap();
+        engine.start().await.unwrap();
+
+        // Both streams should be registered
+        assert!(engine.get_stream_receiver("stream1").await.is_some());
+        assert!(engine.get_stream_receiver("stream2").await.is_some());
+
+        // Unregister stream1
+        engine.unregister_stream("stream1").await.unwrap();
+
+        // stream1 should be gone, stream2 remains
+        assert!(engine.get_stream_receiver("stream1").await.is_none());
+        assert!(engine.get_stream_receiver("stream2").await.is_some());
 
         engine.stop().await.unwrap();
     }

@@ -73,14 +73,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Value {
         "string" | "xsd:string" => fn_str(args),
 
         // ── Hash ─────────────────────────────────────────────────────────
-        "md5" | "sha1" | "sha256" | "sha384" | "sha512" => {
-            // Stub: return string representation as placeholder
-            if let Some(s) = args.first().and_then(|v| v.as_string()) {
-                Value::String(format!("{}:{}", name.to_lowercase(), s))
-            } else {
-                Value::Null
-            }
-        }
+        "md5" => fn_hash::<md5::Md5>(args),
+        "sha1" => fn_hash::<sha1::Sha1>(args),
+        "sha256" => fn_hash::<sha2::Sha256>(args),
+        "sha384" => fn_hash::<sha2::Sha384>(args),
+        "sha512" => fn_hash::<sha2::Sha512>(args),
 
         // ── Coalesce ─────────────────────────────────────────────────────
         "coalesce" => {
@@ -577,6 +574,29 @@ fn fn_to_boolean(args: &[Value]) -> Value {
     }
 }
 
+// ── Hash functions ──────────────────────────────────────────────────────────
+
+use sha2::Digest;
+
+fn fn_hash<D: Digest>(args: &[Value]) -> Value {
+    match args.first().and_then(|v| v.as_string()) {
+        Some(s) => {
+            let hash = D::digest(s.as_bytes());
+            Value::String(bytes_to_hex(hash.as_slice()))
+        }
+        None => Value::Null,
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(hex, "{:02x}", byte).unwrap();
+    }
+    hex
+}
+
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 /// Converts a Value to a boolean for use in conditions.
@@ -816,6 +836,61 @@ mod tests {
     #[test]
     fn test_unknown_function() {
         assert_eq!(call_builtin("nonexistent", &[Value::Integer(1)]), Value::Null);
+    }
+
+    #[test]
+    fn test_md5_known_value() {
+        assert_eq!(
+            call_builtin("md5", &[Value::String("hello".into())]),
+            Value::String("5d41402abc4b2a76b9719d911017c592".into())
+        );
+    }
+
+    #[test]
+    fn test_sha1_known_value() {
+        assert_eq!(
+            call_builtin("sha1", &[Value::String("hello".into())]),
+            Value::String("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d".into())
+        );
+    }
+
+    #[test]
+    fn test_sha256_known_value() {
+        assert_eq!(
+            call_builtin("sha256", &[Value::String("hello".into())]),
+            Value::String("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into())
+        );
+    }
+
+    #[test]
+    fn test_sha384_known_value() {
+        assert_eq!(
+            call_builtin("sha384", &[Value::String("hello".into())]),
+            Value::String("59e1748777448c69de6b800d7a33bbfb9ff1b463e44354c3553bcdb9c666fa90125a3c79f90397bdf5f6a13de828684f".into())
+        );
+    }
+
+    #[test]
+    fn test_sha512_known_value() {
+        assert_eq!(
+            call_builtin("sha512", &[Value::String("hello".into())]),
+            Value::String("9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043".into())
+        );
+    }
+
+    #[test]
+    fn test_hash_null_input() {
+        assert_eq!(call_builtin("md5", &[Value::Null]), Value::Null);
+        assert_eq!(call_builtin("sha256", &[Value::Null]), Value::Null);
+    }
+
+    #[test]
+    fn test_hash_empty_string() {
+        // MD5 of "" = d41d8cd98f00b204e9800998ecf8427e
+        assert_eq!(
+            call_builtin("md5", &[Value::String(String::new())]),
+            Value::String("d41d8cd98f00b204e9800998ecf8427e".into())
+        );
     }
 
     #[test]

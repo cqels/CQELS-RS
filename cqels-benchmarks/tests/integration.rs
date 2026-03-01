@@ -810,7 +810,380 @@ async fn test_count_window_then_aggregate() {
 }
 
 // ---------------------------------------------------------------------------
-// 15. Graph eviction with windowed reasoning
+// 15. OPTIONAL left-outer-join via pipeline
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_optional_left_outer_join() {
+    use cqels_core::compiler::pipeline::apply_optional;
+    use cqels_core::expression::evaluator::ExpressionEvaluator;
+    use cqels_core::parser::ast::CqelsPatternGroup;
+
+    let evaluator = ExpressionEvaluator::new();
+    let prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    // Main binding: ?sensor is bound
+    let mut bs1 = BindingSet::new(100);
+    bs1.insert("sensor", Value::String("http://ex.org/s1".into()));
+
+    // Another binding: ?sensor is bound
+    let mut bs2 = BindingSet::new(200);
+    bs2.insert("sensor", Value::String("http://ex.org/s2".into()));
+
+    let stream = Box::pin(futures::stream::iter(vec![bs1.clone(), bs2.clone()]));
+
+    // OPTIONAL block references ?x, ?y, ?z — disconnected from main query's ?sensor
+    let optional_groups = vec![vec![CqelsPatternGroup::Default {
+        patterns: vec![cqels_core::parser::ast::TriplePattern {
+            subject: "?x".to_string(),
+            predicate: "?y".to_string(),
+            object: "?z".to_string(),
+        }],
+    }]];
+
+    let results: Vec<_> = apply_optional(stream, &optional_groups, &prefixes, &evaluator)
+        .collect()
+        .await;
+
+    // Both bindings should pass through unchanged (optional didn't match)
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].get("sensor"),
+        Some(&Value::String("http://ex.org/s1".into()))
+    );
+    assert_eq!(
+        results[1].get("sensor"),
+        Some(&Value::String("http://ex.org/s2".into()))
+    );
+    // Disconnected variables should NOT be added
+    assert!(results[0].get("x").is_none());
+    assert!(results[1].get("x").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// 16. UNION with two branches via pipeline
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_union_two_branches() {
+    use cqels_core::compiler::pipeline::apply_union;
+    use cqels_core::expression::evaluator::ExpressionEvaluator;
+    use cqels_core::parser::ast::CqelsPatternGroup;
+
+    let evaluator = ExpressionEvaluator::new();
+    let prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    // Binding with ?sensor
+    let mut bs = BindingSet::new(100);
+    bs.insert("sensor", Value::String("http://ex.org/s1".into()));
+
+    let stream = Box::pin(futures::stream::iter(vec![bs]));
+
+    // Both UNION branches share ?sensor with the binding
+    let union_blocks = vec![(
+        vec![CqelsPatternGroup::Default {
+            patterns: vec![cqels_core::parser::ast::TriplePattern {
+                subject: "?sensor".into(),
+                predicate: "<http://ex.org/temp>".into(),
+                object: "?temp".into(),
+            }],
+        }],
+        vec![CqelsPatternGroup::Default {
+            patterns: vec![cqels_core::parser::ast::TriplePattern {
+                subject: "?sensor".into(),
+                predicate: "<http://ex.org/humidity>".into(),
+                object: "?hum".into(),
+            }],
+        }],
+    )];
+
+    let results: Vec<_> = apply_union(stream, &union_blocks, &prefixes, &evaluator)
+        .collect()
+        .await;
+
+    // Both branches match (shared ?sensor) → 2 results
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        assert_eq!(
+            r.get("sensor"),
+            Some(&Value::String("http://ex.org/s1".into()))
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 17. MINUS anti-join via pipeline
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_minus_anti_join() {
+    use cqels_core::compiler::pipeline::apply_minus;
+
+    let prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    // Three bindings: one shares ?sensor with MINUS, two don't
+    let mut bs1 = BindingSet::new(100);
+    bs1.insert("sensor", Value::String("http://ex.org/s1".into()));
+    bs1.insert("temp", Value::Integer(42));
+
+    let mut bs2 = BindingSet::new(200);
+    bs2.insert("other", Value::String("http://ex.org/x".into()));
+
+    let mut bs3 = BindingSet::new(300);
+    bs3.insert("sensor", Value::String("http://ex.org/s2".into()));
+    bs3.insert("temp", Value::Integer(37));
+
+    let stream = Box::pin(futures::stream::iter(vec![bs1, bs2, bs3]));
+
+    // MINUS pattern shares ?sensor → filters out bs1 and bs3
+    let minus_blocks = vec![vec![cqels_core::parser::ast::TriplePattern {
+        subject: "?sensor".into(),
+        predicate: "<http://ex.org/badStatus>".into(),
+        object: "?status".into(),
+    }]];
+
+    let results: Vec<_> = apply_minus(stream, &minus_blocks, &prefixes)
+        .collect()
+        .await;
+
+    // Only bs2 survives (no shared ?sensor variable)
+    assert_eq!(results.len(), 1);
+    assert!(results[0].get("other").is_some());
+    assert!(results[0].get("sensor").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// 18. GROUP_CONCAT aggregate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_group_concat_aggregate() {
+    use cqels_core::compiler::pipeline::{apply_group_by_aggregates, PipelineAggregateSpec};
+    use cqels_core::expression::ast::{AggregateExprFunction, Expression};
+    use cqels_core::expression::evaluator::ExpressionEvaluator;
+
+    let evaluator = ExpressionEvaluator::new();
+
+    let elements = vec![
+        {
+            let mut bs = BindingSet::new(0);
+            bs.insert("city", Value::String("NYC".into()));
+            bs.insert("sensor", Value::String("s1".into()));
+            bs
+        },
+        {
+            let mut bs = BindingSet::new(0);
+            bs.insert("city", Value::String("NYC".into()));
+            bs.insert("sensor", Value::String("s2".into()));
+            bs
+        },
+        {
+            let mut bs = BindingSet::new(0);
+            bs.insert("city", Value::String("NYC".into()));
+            bs.insert("sensor", Value::String("s3".into()));
+            bs
+        },
+        {
+            let mut bs = BindingSet::new(0);
+            bs.insert("city", Value::String("LA".into()));
+            bs.insert("sensor", Value::String("s4".into()));
+            bs
+        },
+    ];
+
+    let group_by = vec!["city".to_string()];
+    let aggregates = vec![PipelineAggregateSpec {
+        function: AggregateExprFunction::GroupConcat,
+        argument: Expression::Variable("sensor".into()),
+        alias: "sensors".into(),
+        distinct: false,
+        separator: Some("; ".into()),
+    }];
+
+    let results = apply_group_by_aggregates(elements, &group_by, &aggregates, &evaluator);
+    assert_eq!(results.len(), 2);
+
+    for result in &results {
+        let city = result.get("city").unwrap().as_string().unwrap();
+        let sensors = result.get("sensors").unwrap().as_string().unwrap();
+        match city {
+            "NYC" => {
+                // 3 sensors concatenated with "; "
+                assert_eq!(sensors.matches("; ").count(), 2, "should have 2 separators for 3 items");
+                assert!(sensors.contains("s1"));
+                assert!(sensors.contains("s2"));
+                assert!(sensors.contains("s3"));
+            }
+            "LA" => {
+                assert_eq!(sensors, "s4");
+            }
+            _ => panic!("unexpected city: {}", city),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 19. Multi-stream merge: 2 input streams feeding the same engine
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_multi_stream_merge() {
+    use cqels_engine::{ReactiveStreamEngine, StreamEngine, create_stream_pair, receiver_to_stream};
+
+    let engine = ReactiveStreamEngine::new();
+
+    let (tx1, stream1) = create_stream_pair(32);
+    let (tx2, stream2) = create_stream_pair(32);
+
+    engine.register_stream("stream_a", stream1).await.unwrap();
+    engine.register_stream("stream_b", stream2).await.unwrap();
+    engine.start().await.unwrap();
+
+    // Subscribe to both streams
+    let rx_a = engine.get_stream_receiver("stream_a").await.unwrap();
+    let rx_b = engine.get_stream_receiver("stream_b").await.unwrap();
+    let mut sa = receiver_to_stream(rx_a);
+    let mut sb = receiver_to_stream(rx_b);
+
+    // Send one element to each stream
+    let elem_a = StreamElement::Rdf(make_rdf_element("http://ex.org/A", "http://ex.org/p", "http://ex.org/v1", 1000));
+    let elem_b = StreamElement::Rdf(make_rdf_element("http://ex.org/B", "http://ex.org/p", "http://ex.org/v2", 2000));
+
+    tx1.send(elem_a).await.unwrap();
+    tx2.send(elem_b).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let ra = tokio::time::timeout(std::time::Duration::from_millis(200), sa.next()).await;
+    let rb = tokio::time::timeout(std::time::Duration::from_millis(200), sb.next()).await;
+
+    assert!(ra.is_ok() && ra.unwrap().is_some(), "stream_a should receive");
+    assert!(rb.is_ok() && rb.unwrap().is_some(), "stream_b should receive");
+
+    engine.stop().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 20. Cypher chain matching: two-hop pattern
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cypher_chain_matching_integration() {
+    use cqels_core::compiler::pipeline::match_cypher_pattern;
+    use cqels_core::parser::ast::{CypherPattern, NodePattern, RelationshipPattern, RelDirection};
+
+    let pattern = CypherPattern {
+        nodes: vec![
+            NodePattern { variable: Some("a".into()), labels: vec![], properties: std::collections::HashMap::new() },
+            NodePattern { variable: Some("b".into()), labels: vec![], properties: std::collections::HashMap::new() },
+            NodePattern { variable: Some("c".into()), labels: vec![], properties: std::collections::HashMap::new() },
+        ],
+        relationships: vec![
+            RelationshipPattern {
+                variable: None,
+                types: vec!["KNOWS".into()],
+                direction: RelDirection::Outgoing,
+                properties: std::collections::HashMap::new(),
+                start_node: Some("a".into()),
+                end_node: Some("b".into()),
+                path_length: None,
+            },
+            RelationshipPattern {
+                variable: None,
+                types: vec!["LIKES".into()],
+                direction: RelDirection::Outgoing,
+                properties: std::collections::HashMap::new(),
+                start_node: Some("b".into()),
+                end_node: Some("c".into()),
+                path_length: None,
+            },
+        ],
+    };
+
+    let stmts = vec![
+        stmt("http://ex.org/Alice", "http://ex.org/KNOWS", "http://ex.org/Bob"),
+        stmt("http://ex.org/Bob", "http://ex.org/LIKES", "http://ex.org/Post1"),
+        stmt("http://ex.org/Carol", "http://ex.org/KNOWS", "http://ex.org/Dave"),
+    ];
+
+    let results = match_cypher_pattern(&pattern, &stmts, 1000);
+
+    // Should find: Alice->Bob->Post1
+    assert_eq!(results.len(), 1);
+    assert!(results[0].get("a").is_some());
+    assert!(results[0].get("b").is_some());
+    assert!(results[0].get("c").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// 21. Cypher node property matching
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cypher_node_property_matching_integration() {
+    use cqels_core::compiler::pipeline::match_cypher_pattern;
+    use cqels_core::parser::ast::{CypherPattern, NodePattern, RelationshipPattern, RelDirection};
+
+    // Pattern: (a {location: "NYC"})-[:MEASURES]->(b)
+    let mut props = std::collections::HashMap::new();
+    props.insert("location".into(), "\"NYC\"".into());
+
+    let pattern = CypherPattern {
+        nodes: vec![
+            NodePattern {
+                variable: Some("a".into()),
+                labels: vec![],
+                properties: props,
+            },
+            NodePattern {
+                variable: Some("b".into()),
+                labels: vec![],
+                properties: std::collections::HashMap::new(),
+            },
+        ],
+        relationships: vec![RelationshipPattern {
+            variable: None,
+            types: vec!["MEASURES".into()],
+            direction: RelDirection::Outgoing,
+            properties: std::collections::HashMap::new(),
+            start_node: Some("a".into()),
+            end_node: Some("b".into()),
+            path_length: None,
+        }],
+    };
+
+    let stmts = vec![
+        // Sensor1 in NYC
+        stmt("http://ex.org/Sensor1", "http://ex.org/MEASURES", "http://ex.org/Temp42"),
+        stmt("http://ex.org/Sensor1", "http://ex.org/location", "NYC"),
+        // Sensor2 in LA
+        stmt("http://ex.org/Sensor2", "http://ex.org/MEASURES", "http://ex.org/Temp37"),
+        stmt("http://ex.org/Sensor2", "http://ex.org/location", "LA"),
+    ];
+
+    let results = match_cypher_pattern(&pattern, &stmts, 1000);
+
+    // Only Sensor1 (NYC) should match the property constraint
+    // Note: property matching depends on the property being extracted first
+    // The match_cypher_pattern extracts properties via extract_node_properties
+    let nyc_results: Vec<_> = results
+        .iter()
+        .filter(|bs| {
+            bs.get("a.location")
+                .and_then(|v| v.as_string())
+                .map(|s| s == "NYC")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert!(
+        !nyc_results.is_empty(),
+        "should find at least one result with NYC property"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (original) 15. Graph eviction with windowed reasoning
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -311,27 +311,34 @@ fn try_match_optional_block(
 }
 
 /// Checks if a triple pattern can be satisfied from existing bindings.
-/// If variables in the pattern are already bound, checks consistency.
-/// If new variables appear, this returns true (they'll remain unbound in optional context).
+///
+/// Returns `true` only when at least one variable in the pattern is already
+/// bound in the binding set (i.e. the optional pattern is "connected" to the
+/// main query via a shared variable).  Disconnected optional patterns (no
+/// shared variables) return `false`, which causes the caller to pass through
+/// the original bindings unchanged — correct left-outer-join semantics.
 fn try_satisfy_pattern_from_bindings(
     pattern: &TriplePattern,
     bs: &BindingSet,
     _prefixes: &HashMap<String, String>,
 ) -> bool {
     let components = [&pattern.subject, &pattern.predicate, &pattern.object];
+    let mut has_shared_variable = false;
+
     for comp in &components {
         if is_variable(comp) {
             let var_name = comp
                 .strip_prefix('?')
                 .or_else(|| comp.strip_prefix('$'))
                 .unwrap_or(comp);
-            // If the variable is already bound, that's fine — it will be used for joining.
-            // If not bound, that's also fine — it stays unbound (optional).
-            let _ = bs.get(var_name);
+            if bs.get(var_name).is_some() {
+                has_shared_variable = true;
+            }
         }
         // Constants are checked during actual pattern matching, not here
     }
-    true
+
+    has_shared_variable
 }
 
 /// Applies UNION blocks to a stream.
@@ -424,36 +431,35 @@ fn try_match_pattern_groups(
     if has_patterns { Some(result) } else { None }
 }
 
-/// Checks that bound variables in a pattern are consistent with bindings.
+/// Checks that a pattern is connected to the current bindings.
+///
+/// Returns `true` only when the pattern shares at least one bound variable
+/// with the binding set.  This ensures UNION branches only "match" when
+/// they are connected to the main query's bindings.
+///
+/// Note: in streaming mode without a separate dataset, we cannot verify
+/// constant values against actual data — we only check variable overlap.
 fn check_pattern_consistency(
     pattern: &TriplePattern,
     bs: &BindingSet,
-    prefixes: &HashMap<String, String>,
+    _prefixes: &HashMap<String, String>,
 ) -> bool {
-    let components = [
-        (&pattern.subject, None::<&str>),
-        (&pattern.predicate, None),
-        (&pattern.object, None),
-    ];
+    let components = [&pattern.subject, &pattern.predicate, &pattern.object];
+    let mut has_shared_variable = false;
 
-    for (comp, _) in &components {
+    for comp in &components {
         if is_variable(comp) {
             let var_name = comp
                 .strip_prefix('?')
                 .or_else(|| comp.strip_prefix('$'))
                 .unwrap_or(comp);
-            // If bound, check consistency (variable already has a value)
             if bs.get(var_name).is_some() {
-                // Variable is already bound — consistent
+                has_shared_variable = true;
             }
-            // If not bound — that's fine, it just won't be constrained
-        } else {
-            // Constant — we can't verify against a statement here
-            // (since we don't have a statement), so we just accept
-            let _ = resolve_term(comp, prefixes);
         }
     }
-    true
+
+    has_shared_variable
 }
 
 /// Applies MINUS blocks to a stream (anti-join semantics).
@@ -479,18 +485,30 @@ pub fn apply_minus(
 
 /// Checks if MINUS patterns match against a binding set.
 ///
-/// A MINUS block matches if all variables in the patterns that are already
-/// bound in the binding set have compatible values. This implements
-/// SPARQL MINUS semantics: remove solutions where shared variables match.
+/// In streaming MINUS (without a separate dataset to join against), the
+/// semantic is: a MINUS block "matches" when the binding set shares at
+/// least one variable with the MINUS pattern.  This causes the binding
+/// to be excluded — any solution that is "compatible" with the MINUS
+/// pattern (i.e. has overlapping variable names) is filtered out.
+///
+/// When no variables are shared the MINUS block does not apply and the
+/// binding passes through, which is correct per SPARQL semantics (MINUS
+/// only removes solutions where shared variables have compatible values,
+/// and with no shared variables there is nothing to compare).
 fn minus_patterns_match(
     patterns: &[TriplePattern],
     bs: &BindingSet,
-    prefixes: &HashMap<String, String>,
+    _prefixes: &HashMap<String, String>,
 ) -> bool {
     for pattern in patterns {
         let components = [&pattern.subject, &pattern.predicate, &pattern.object];
         let mut has_shared_variable = false;
-        let all_shared_match = true;
+        // Track whether all shared variables are compatible.
+        // Currently always true in streaming mode (presence = compatibility),
+        // but kept mutable for future multi-dataset MINUS support where
+        // actual value comparison would set this to false on mismatch.
+        #[allow(unused_mut)]
+        let mut all_shared_match = true;
 
         for comp in &components {
             if is_variable(comp) {
@@ -498,21 +516,19 @@ fn minus_patterns_match(
                     .strip_prefix('?')
                     .or_else(|| comp.strip_prefix('$'))
                     .unwrap_or(comp);
-                if let Some(val) = bs.get(var_name) {
+                if bs.get(var_name).is_some() {
                     has_shared_variable = true;
-                    // Variable is bound — for MINUS to match, it must be compatible
-                    // Since we don't have a separate "minus dataset", we check if
-                    // the binding exists (shared variable exists)
-                    let _ = val; // The variable is present — matches
+                    // In streaming mode the variable is present — that counts
+                    // as compatible. With a separate MINUS dataset, we would
+                    // compare the bound value against the dataset value here
+                    // and set `all_shared_match = false` on mismatch.
                 }
-            } else {
-                // Constant in minus pattern — check if there's a matching bound variable
-                let resolved = resolve_term(comp, prefixes);
-                let _ = resolved;
             }
+            // Constants in the MINUS pattern are not compared against bound
+            // variables in streaming mode — they describe the MINUS dataset
+            // which is not materialised here.
         }
 
-        // MINUS matches only if there are shared variables and they all match
         if has_shared_variable && all_shared_match {
             return true;
         }
@@ -541,8 +557,7 @@ pub fn match_cypher_pattern(
             let mut bs = BindingSet::new(timestamp);
             if let Some(node) = pattern.nodes.first() {
                 if let Some(var) = &node.variable {
-                    let subj_str = term_to_string(&stmt.subject);
-                    bs.insert(var.as_str(), Value::String(subj_str));
+                    bs.insert(var.as_str(), term_to_value(&stmt.subject));
                     // Check node property constraints
                     if check_node_properties(node, &bs) {
                         results.push(bs);
@@ -621,20 +636,20 @@ fn match_chain_recursive(
             RelDirection::Incoming => (&stmt.object, &stmt.subject),
         };
 
-        // Bind start node variable
+        // Bind start node variable (use term_to_value for consistency with end-node binding)
         let start_var = rel
             .start_node
             .as_ref()
             .or_else(|| nodes.get(rel_idx).and_then(|n| n.variable.as_ref()));
         if let Some(start_v) = start_var {
-            let start_str = term_to_string(start_term);
+            let start_val = term_to_value(start_term);
             if let Some(existing) = bs.get(start_v) {
                 // Already bound — must match
-                if existing.to_string() != start_str {
+                if *existing != start_val {
                     continue;
                 }
             } else {
-                bs.insert(start_v.as_str(), Value::String(start_str));
+                bs.insert(start_v.as_str(), start_val);
             }
         }
 
@@ -774,7 +789,9 @@ fn extract_node_properties(
 ) {
     for (var, _node) in node_map {
         if let Some(node_val) = bs.get(var.as_str()) {
-            let node_str = node_val.to_string();
+            // Extract a comparable string from the node value, regardless of
+            // whether it's stored as Value::Term or Value::String.
+            let node_str = value_to_node_string(node_val);
             for stmt in stmts {
                 let subj_str = term_to_string(&stmt.subject);
                 if subj_str == node_str {
@@ -789,6 +806,17 @@ fn extract_node_properties(
                 }
             }
         }
+    }
+}
+
+/// Extracts a bare string from a Value for node comparison.
+/// Works consistently regardless of whether the value was stored as
+/// `Value::Term(Term::Iri(...))` or `Value::String(...)`.
+fn value_to_node_string(val: &Value) -> String {
+    match val {
+        Value::Term(t) => term_to_string(t),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -1322,5 +1350,368 @@ mod tests {
             resolve_term("a", &prefixes),
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
         );
+    }
+
+    // ── Phase 2 unit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_minus_patterns_match_shared_variable() {
+        // MINUS pattern shares ?s with the binding set → match (exclude)
+        let pattern = make_triple_pattern("?s", "?p", "?o");
+        let mut bs = BindingSet::new(0);
+        bs.insert("s", Value::String("http://example.org/sensor1".into()));
+        let prefixes = HashMap::new();
+        assert!(minus_patterns_match(&[pattern], &bs, &prefixes));
+    }
+
+    #[test]
+    fn test_minus_patterns_match_no_shared_variable() {
+        // MINUS pattern has ?x, ?y, ?z but binding has ?s → no shared → no match
+        let pattern = make_triple_pattern("?x", "?y", "?z");
+        let mut bs = BindingSet::new(0);
+        bs.insert("s", Value::String("http://example.org/sensor1".into()));
+        let prefixes = HashMap::new();
+        assert!(!minus_patterns_match(&[pattern], &bs, &prefixes));
+    }
+
+    #[test]
+    fn test_minus_patterns_match_constants_only() {
+        // MINUS pattern has only constants — no shared variables → no match
+        let pattern = make_triple_pattern(
+            "<http://example.org/s>",
+            "<http://example.org/p>",
+            "<http://example.org/o>",
+        );
+        let mut bs = BindingSet::new(0);
+        bs.insert("s", Value::String("something".into()));
+        let prefixes = HashMap::new();
+        assert!(!minus_patterns_match(&[pattern], &bs, &prefixes));
+    }
+
+    #[test]
+    fn test_try_satisfy_pattern_bound_variable() {
+        // Pattern has ?s which is bound in bs → connected → true
+        let pattern = make_triple_pattern("?s", "<http://example.org/p>", "?o");
+        let mut bs = BindingSet::new(0);
+        bs.insert("s", Value::String("http://example.org/sensor1".into()));
+        let prefixes = HashMap::new();
+        assert!(try_satisfy_pattern_from_bindings(&pattern, &bs, &prefixes));
+    }
+
+    #[test]
+    fn test_try_satisfy_pattern_unbound_variable() {
+        // Pattern has ?x, ?y, ?z but binding has ?s → disconnected → false
+        let pattern = make_triple_pattern("?x", "?y", "?z");
+        let mut bs = BindingSet::new(0);
+        bs.insert("s", Value::String("http://example.org/sensor1".into()));
+        let prefixes = HashMap::new();
+        assert!(!try_satisfy_pattern_from_bindings(&pattern, &bs, &prefixes));
+    }
+
+    #[test]
+    fn test_check_pattern_consistency_shared() {
+        // Pattern ?s matches binding with ?s → consistent
+        let pattern = make_triple_pattern("?s", "?p", "?o");
+        let mut bs = BindingSet::new(0);
+        bs.insert("s", Value::String("http://example.org/sensor1".into()));
+        let prefixes = HashMap::new();
+        assert!(check_pattern_consistency(&pattern, &bs, &prefixes));
+    }
+
+    #[test]
+    fn test_check_pattern_consistency_no_shared() {
+        // Pattern ?x, ?y, ?z — no overlap with binding ?s → false
+        let pattern = make_triple_pattern("?x", "?y", "?z");
+        let mut bs = BindingSet::new(0);
+        bs.insert("s", Value::String("val".into()));
+        let prefixes = HashMap::new();
+        assert!(!check_pattern_consistency(&pattern, &bs, &prefixes));
+    }
+
+    #[tokio::test]
+    async fn test_apply_optional_passes_through_unmatched() {
+        use crate::parser::ast::CqelsPatternGroup;
+
+        let evaluator = ExpressionEvaluator::new();
+        let prefixes = HashMap::new();
+
+        let mut bs = BindingSet::new(100);
+        bs.insert("s", Value::String("http://example.org/sensor1".into()));
+
+        let stream = Box::pin(futures::stream::iter(vec![bs.clone()]));
+
+        // Optional block with disconnected variables — should pass through unchanged
+        let optional_groups = vec![vec![CqelsPatternGroup::Default {
+            patterns: vec![make_triple_pattern("?x", "?y", "?z")],
+        }]];
+
+        let result: Vec<_> = apply_optional(stream, &optional_groups, &prefixes, &evaluator)
+            .collect()
+            .await;
+
+        assert_eq!(result.len(), 1);
+        // Original bindings preserved unchanged
+        assert_eq!(
+            result[0].get("s"),
+            Some(&Value::String("http://example.org/sensor1".into()))
+        );
+        // Disconnected variables NOT added
+        assert!(result[0].get("x").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_apply_union_both_branches() {
+        use crate::parser::ast::CqelsPatternGroup;
+
+        let evaluator = ExpressionEvaluator::new();
+        let prefixes = HashMap::new();
+
+        let mut bs = BindingSet::new(100);
+        bs.insert("s", Value::String("http://example.org/sensor1".into()));
+
+        let stream = Box::pin(futures::stream::iter(vec![bs.clone()]));
+
+        // Both branches share ?s with the binding → both match
+        let union_blocks = vec![(
+            vec![CqelsPatternGroup::Default {
+                patterns: vec![make_triple_pattern("?s", "?p1", "?o1")],
+            }],
+            vec![CqelsPatternGroup::Default {
+                patterns: vec![make_triple_pattern("?s", "?p2", "?o2")],
+            }],
+        )];
+
+        let result: Vec<_> = apply_union(stream, &union_blocks, &prefixes, &evaluator)
+            .collect()
+            .await;
+
+        // Both branches match → 2 results
+        assert_eq!(result.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_apply_minus_filters_shared() {
+        let prefixes = HashMap::new();
+
+        let mut bs1 = BindingSet::new(100);
+        bs1.insert("s", Value::String("http://example.org/sensor1".into()));
+
+        let mut bs2 = BindingSet::new(200);
+        bs2.insert("x", Value::String("http://example.org/other".into()));
+
+        let stream = Box::pin(futures::stream::iter(vec![bs1, bs2]));
+
+        // MINUS pattern shares ?s → filters out bs1, keeps bs2
+        let minus_blocks = vec![vec![make_triple_pattern("?s", "?p", "?o")]];
+
+        let result: Vec<_> = apply_minus(stream, &minus_blocks, &prefixes)
+            .collect()
+            .await;
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].get("x").is_some());
+        assert!(result[0].get("s").is_none());
+    }
+
+    #[test]
+    fn test_compute_aggregate_group_concat_default_separator() {
+        let values = vec![
+            Value::String("a".into()),
+            Value::String("b".into()),
+            Value::String("c".into()),
+        ];
+        let result = compute_aggregate(AggregateExprFunction::GroupConcat, &values, None);
+        assert_eq!(result, Value::String("a,b,c".into()));
+    }
+
+    #[test]
+    fn test_compute_aggregate_group_concat_custom_separator() {
+        let values = vec![
+            Value::String("x".into()),
+            Value::String("y".into()),
+            Value::String("z".into()),
+        ];
+        let result = compute_aggregate(AggregateExprFunction::GroupConcat, &values, Some("; "));
+        assert_eq!(result, Value::String("x; y; z".into()));
+    }
+
+    #[test]
+    fn test_compute_aggregate_group_concat_empty() {
+        let values: Vec<Value> = vec![];
+        let result = compute_aggregate(AggregateExprFunction::GroupConcat, &values, None);
+        assert_eq!(result, Value::String(String::new()));
+    }
+
+    #[test]
+    fn test_match_cypher_pattern_single_relationship() {
+        let pattern = CypherPattern {
+            nodes: vec![
+                NodePattern {
+                    variable: Some("a".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+                NodePattern {
+                    variable: Some("b".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+            ],
+            relationships: vec![crate::parser::ast::RelationshipPattern {
+                variable: None,
+                types: vec!["KNOWS".into()],
+                direction: RelDirection::Outgoing,
+                properties: HashMap::new(),
+                start_node: Some("a".into()),
+                end_node: Some("b".into()),
+                path_length: None,
+            }],
+        };
+
+        let stmts = vec![Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/Alice")),
+            IriTerm::new("http://ex.org/KNOWS"),
+            Term::Iri(IriTerm::new("http://ex.org/Bob")),
+        )];
+
+        let results = match_cypher_pattern(&pattern, &stmts, 1000);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].get("a").is_some());
+        assert!(results[0].get("b").is_some());
+    }
+
+    #[test]
+    fn test_match_cypher_pattern_chain() {
+        // (a)-[:KNOWS]->(b)-[:LIKES]->(c)
+        let pattern = CypherPattern {
+            nodes: vec![
+                NodePattern {
+                    variable: Some("a".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+                NodePattern {
+                    variable: Some("b".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+                NodePattern {
+                    variable: Some("c".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+            ],
+            relationships: vec![
+                crate::parser::ast::RelationshipPattern {
+                    variable: None,
+                    types: vec!["KNOWS".into()],
+                    direction: RelDirection::Outgoing,
+                    properties: HashMap::new(),
+                    start_node: Some("a".into()),
+                    end_node: Some("b".into()),
+                    path_length: None,
+                },
+                crate::parser::ast::RelationshipPattern {
+                    variable: None,
+                    types: vec!["LIKES".into()],
+                    direction: RelDirection::Outgoing,
+                    properties: HashMap::new(),
+                    start_node: Some("b".into()),
+                    end_node: Some("c".into()),
+                    path_length: None,
+                },
+            ],
+        };
+
+        let stmts = vec![
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/Alice")),
+                IriTerm::new("http://ex.org/KNOWS"),
+                Term::Iri(IriTerm::new("http://ex.org/Bob")),
+            ),
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/Bob")),
+                IriTerm::new("http://ex.org/LIKES"),
+                Term::Iri(IriTerm::new("http://ex.org/Post1")),
+            ),
+        ];
+
+        let results = match_cypher_pattern(&pattern, &stmts, 1000);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].get("a").is_some());
+        assert!(results[0].get("b").is_some());
+        assert!(results[0].get("c").is_some());
+    }
+
+    #[test]
+    fn test_match_cypher_pattern_no_match() {
+        let pattern = CypherPattern {
+            nodes: vec![
+                NodePattern {
+                    variable: Some("a".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+                NodePattern {
+                    variable: Some("b".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+            ],
+            relationships: vec![crate::parser::ast::RelationshipPattern {
+                variable: None,
+                types: vec!["FOLLOWS".into()],
+                direction: RelDirection::Outgoing,
+                properties: HashMap::new(),
+                start_node: Some("a".into()),
+                end_node: Some("b".into()),
+                path_length: None,
+            }],
+        };
+
+        let stmts = vec![Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/Alice")),
+            IriTerm::new("http://ex.org/KNOWS"),
+            Term::Iri(IriTerm::new("http://ex.org/Bob")),
+        )];
+
+        let results = match_cypher_pattern(&pattern, &stmts, 1000);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_check_node_properties_matching() {
+        let mut props = HashMap::new();
+        props.insert("location".into(), "\"NYC\"".into());
+
+        let node = NodePattern {
+            variable: Some("n".into()),
+            labels: vec![],
+            properties: props,
+        };
+
+        let mut bs = BindingSet::new(0);
+        bs.insert("n", Value::String("http://ex.org/Sensor1".into()));
+        bs.insert("n.location", Value::String("NYC".into()));
+
+        assert!(check_node_properties(&node, &bs));
+    }
+
+    #[test]
+    fn test_check_node_properties_non_matching() {
+        let mut props = HashMap::new();
+        props.insert("location".into(), "\"NYC\"".into());
+
+        let node = NodePattern {
+            variable: Some("n".into()),
+            labels: vec![],
+            properties: props,
+        };
+
+        let mut bs = BindingSet::new(0);
+        bs.insert("n", Value::String("http://ex.org/Sensor1".into()));
+        bs.insert("n.location", Value::String("LA".into()));
+
+        assert!(!check_node_properties(&node, &bs));
     }
 }
