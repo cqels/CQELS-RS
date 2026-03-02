@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 
 use cqels_core::query::{ContinuousQuery, QueryInputs};
 use cqels_core::stream::StreamElement;
-use cqels_model::CqelsError;
+use cqels_model::{BindingSet, CqelsError};
 
 /// Core stream engine trait.
 ///
@@ -110,6 +110,18 @@ impl ReactiveStreamEngine {
         }
 
         inputs
+    }
+
+    /// Registers and executes a continuous query that produces BindingSets.
+    ///
+    /// This bridges the type gap between compiled queries (which produce
+    /// `BindingSet`) and the engine's stream infrastructure.
+    pub async fn register_binding_query(
+        &self,
+        query: Box<dyn ContinuousQuery<Result = BindingSet>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
+        let inputs = self.build_query_inputs().await;
+        Ok(query.execute(inputs))
     }
 
     async fn activate_pending(&self) {

@@ -1857,3 +1857,245 @@ async fn test_e2e_multiple_static_patterns_joined() {
     assert!(results[0].contains("type"));
     assert!(results[0].contains("location"));
 }
+
+// ===========================================================================
+// Phase 5: Engine Multi-Query & Runtime Integration Tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// P5.1: register_binding_query — engine can execute BindingSet-producing queries
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_engine_register_binding_query() {
+    let engine = ReactiveStreamEngine::new();
+    let (tx, stream) = create_stream_pair(32);
+    engine
+        .register_stream("sensors", stream)
+        .await
+        .unwrap();
+    engine.start().await.unwrap();
+
+    let query_str = r#"
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+    "#;
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let mut result_stream = engine
+        .register_binding_query(Box::new(compiled))
+        .await
+        .unwrap();
+
+    // Send data
+    let elem = stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000);
+    tx.send(elem).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let first = tokio::time::timeout(Duration::from_secs(2), result_stream.next())
+        .await
+        .expect("timed out");
+    assert!(first.is_some());
+    let bs = first.unwrap();
+    assert!(bs.contains("sensor"));
+    assert!(bs.contains("temp"));
+
+    engine.stop().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// P5.2: CqelsRuntime — high-level API end-to-end
+// ---------------------------------------------------------------------------
+
+use cqels_engine::CqelsRuntime;
+
+#[tokio::test]
+async fn test_runtime_cqelsql_query() {
+    let runtime = CqelsRuntime::new();
+    let (tx, stream) = create_stream_pair(32);
+
+    runtime.register_stream("sensors", stream).await.unwrap();
+    runtime.start().await.unwrap();
+
+    let query_str = r#"
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+    "#;
+
+    let mut result_stream = runtime
+        .register_cqelsql_query(query_str)
+        .await
+        .unwrap();
+
+    let elem = stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000);
+    tx.send(elem).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let first = tokio::time::timeout(Duration::from_secs(2), result_stream.next())
+        .await
+        .expect("timed out");
+    assert!(first.is_some());
+    let bs = first.unwrap();
+    assert!(bs.contains("sensor"));
+    assert!(bs.contains("temp"));
+
+    runtime.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_runtime_with_static_store() {
+    use cqels_model::term::IriTerm;
+
+    let runtime = CqelsRuntime::new();
+
+    // Load static data
+    runtime
+        .load_statements(&[Statement::new(
+            Term::Iri(IriTerm::new("http://example.org/s1")),
+            IriTerm::new("http://example.org/type"),
+            Term::Iri(IriTerm::new("http://example.org/TemperatureSensor")),
+        )])
+        .unwrap();
+
+    let (tx, stream) = create_stream_pair(32);
+    runtime.register_stream("sensors", stream).await.unwrap();
+    runtime.start().await.unwrap();
+
+    let query_str = r#"
+        SELECT ?sensor ?temp ?type
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+            STATIC {
+                ?sensor <http://example.org/type> ?type .
+            }
+        }
+    "#;
+
+    let mut result_stream = runtime
+        .register_cqelsql_query(query_str)
+        .await
+        .unwrap();
+
+    let elem = stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000);
+    tx.send(elem).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let first = tokio::time::timeout(Duration::from_secs(2), result_stream.next())
+        .await
+        .expect("timed out");
+    assert!(first.is_some());
+    let bs = first.unwrap();
+    assert!(bs.contains("sensor"));
+    assert!(bs.contains("temp"));
+    assert!(bs.contains("type"));
+
+    runtime.stop().await.unwrap();
+}
+
+// ===========================================================================
+// Phase 6: Reasoning Stream Adapter & SessionWindow Final Flush Tests
+// ===========================================================================
+
+use cqels_reasoning::ReteStreamOperator;
+
+#[tokio::test]
+async fn test_rete_stream_operator_integration() {
+    let rule = Rule::builder()
+        .id("type-to-human")
+        .pattern(TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(Term::Iri(cqels_model::term::IriTerm::new(
+                "http://ex.org/type",
+            ))),
+            PatternTerm::constant(Term::Iri(cqels_model::term::IriTerm::new(
+                "http://ex.org/Person",
+            ))),
+        ))
+        .template(TripleTemplate::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(Term::Iri(cqels_model::term::IriTerm::new(
+                "http://ex.org/is",
+            ))),
+            PatternTerm::constant(Term::Iri(cqels_model::term::IriTerm::new(
+                "http://ex.org/Human",
+            ))),
+        ))
+        .build();
+
+    let rule_set = RuleSet::new(vec![rule]);
+    let config = ReasoningConfig::builder()
+        .rule_set(rule_set)
+        .default_window(Duration::from_secs(600))
+        .build();
+
+    let operator = ReteStreamOperator::new(config);
+
+    let input = vec![StreamElement::Rdf(RdfStreamElement::new(
+        Statement::new(
+            Term::Iri(cqels_model::term::IriTerm::new("http://ex.org/alice")),
+            cqels_model::term::IriTerm::new("http://ex.org/type"),
+            Term::Iri(cqels_model::term::IriTerm::new("http://ex.org/Person")),
+        ),
+        1000,
+    ))];
+
+    let input_stream = Box::pin(futures::stream::iter(input));
+    let results: Vec<StreamElement> = operator.apply(input_stream).collect().await;
+
+    // Should have original + 1 inferred = 2
+    assert_eq!(results.len(), 2);
+
+    // Verify the inferred element
+    if let StreamElement::Rdf(rdf) = &results[1] {
+        assert_eq!(rdf.statement.predicate.as_str(), "http://ex.org/is");
+    } else {
+        panic!("expected RDF element");
+    }
+}
+
+#[tokio::test]
+async fn test_session_window_final_flush() {
+    use cqels_core::stream::TimestampedValue;
+
+    // Create elements in a single session (no gap between them)
+    let elements: Vec<TimestampedValue<i64>> = vec![
+        TimestampedValue::new(100, 100),
+        TimestampedValue::new(200, 200),
+        TimestampedValue::new(300, 300),
+    ];
+
+    let stream = Box::pin(futures::stream::iter(elements));
+    let window = SessionWindow::new(Duration::from_secs(1));
+    let batches: Vec<_> = window.apply(stream).collect().await;
+
+    // With final flush, the single session should be emitted when stream ends
+    assert_eq!(batches.len(), 1, "single session should be flushed on stream end");
+    assert_eq!(batches[0].elements.len(), 3);
+}
+
+#[tokio::test]
+async fn test_session_window_empty_stream_no_flush() {
+    use cqels_core::stream::TimestampedValue;
+
+    let elements: Vec<TimestampedValue<i64>> = vec![];
+    let stream = Box::pin(futures::stream::iter(elements));
+    let window = SessionWindow::new(Duration::from_secs(1));
+    let batches: Vec<_> = window.apply(stream).collect().await;
+
+    // Empty stream should produce no batches
+    assert_eq!(batches.len(), 0);
+}

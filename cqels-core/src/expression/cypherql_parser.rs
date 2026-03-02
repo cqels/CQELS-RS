@@ -55,7 +55,9 @@ fn parse_or(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         .collect();
 
     let mut iter = operands.into_iter();
-    let mut result = parse_and(iter.next().unwrap())?;
+    let first = iter.next()
+        .ok_or_else(|| ParseError::Syntax("missing OR operand".into()))?;
+    let mut result = parse_and(first)?;
 
     for child in iter {
         let right = parse_and(child)?;
@@ -80,7 +82,9 @@ fn parse_and(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         .collect();
 
     let mut iter = operands.into_iter();
-    let mut result = parse_not(iter.next().unwrap())?;
+    let first = iter.next()
+        .ok_or_else(|| ParseError::Syntax("missing AND operand".into()))?;
+    let mut result = parse_not(first)?;
 
     for child in iter {
         let right = parse_not(child)?;
@@ -124,7 +128,9 @@ fn parse_comparison(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
     }
 
     let mut iter = children.into_iter();
-    let left = parse_add(iter.next().unwrap())?;
+    let first = iter.next()
+        .ok_or_else(|| ParseError::Syntax("missing comparison operand".into()))?;
+    let left = parse_add(first)?;
 
     if let Some(op_pair) = iter.next() {
         let op = parse_comparison_op(op_pair)?;
@@ -185,7 +191,9 @@ fn parse_add(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     }
 
     let mut iter = children.into_iter();
-    let mut result = parse_multiply(iter.next().unwrap())?;
+    let first = iter.next()
+        .ok_or_else(|| ParseError::Syntax("missing add operand".into()))?;
+    let mut result = parse_multiply(first)?;
 
     while let Some(next) = iter.next() {
         let text = next.as_str();
@@ -224,7 +232,9 @@ fn parse_multiply(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> 
     }
 
     let mut iter = children.into_iter();
-    let mut result = parse_power(iter.next().unwrap())?;
+    let first = iter.next()
+        .ok_or_else(|| ParseError::Syntax("missing multiply operand".into()))?;
+    let mut result = parse_power(first)?;
 
     while let Some(next) = iter.next() {
         let text = next.as_str();
@@ -262,7 +272,8 @@ fn parse_power(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     if children.is_empty() {
         return Err(ParseError::Syntax("empty power expression".into()));
     }
-    let base = parse_unary(children.remove(0))?;
+    let first = children.remove(0);
+    let base = parse_unary(first)?;
     // If there's a "^" and a right operand, emit as a power() function call
     if children.len() >= 2 {
         // Skip the "^" token
@@ -287,14 +298,18 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
 
     let first_text = children[0].as_str();
     if first_text == "-" && children.len() > 1 {
-        let operand = parse_atom(children.into_iter().last().unwrap())?;
+        let operand_pair = children.into_iter().last()
+            .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
+        let operand = parse_atom(operand_pair)?;
         return Ok(Expression::UnaryOp {
             op: UnaryOp::Negate,
             operand: Box::new(operand),
         });
     }
     if first_text == "+" && children.len() > 1 {
-        let operand = parse_atom(children.into_iter().last().unwrap())?;
+        let operand_pair = children.into_iter().last()
+            .ok_or_else(|| ParseError::Syntax("missing unary plus operand".into()))?;
+        let operand = parse_atom(operand_pair)?;
         return Ok(Expression::UnaryOp {
             op: UnaryOp::UnaryPlus,
             operand: Box::new(operand),
@@ -302,14 +317,18 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     }
 
     if text.starts_with('-') && children.len() == 1 {
-        let operand = parse_atom(children.into_iter().next().unwrap())?;
+        let operand_pair = children.into_iter().next()
+            .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
+        let operand = parse_atom(operand_pair)?;
         return Ok(Expression::UnaryOp {
             op: UnaryOp::Negate,
             operand: Box::new(operand),
         });
     }
 
-    parse_atom(children.into_iter().next().unwrap())
+    let first = children.into_iter().next()
+        .ok_or_else(|| ParseError::Syntax("missing unary operand".into()))?;
+    parse_atom(first)
 }
 
 fn parse_atom(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
@@ -340,7 +359,8 @@ fn parse_atom(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 return Ok(Expression::Variable(variable));
             }
 
-            let first = children.into_iter().next().unwrap();
+            let first = children.into_iter().next()
+                .ok_or_else(|| ParseError::Syntax("empty atom".into()))?;
             parse_atom(first)
         }
 

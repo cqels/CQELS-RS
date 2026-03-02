@@ -121,7 +121,9 @@ fn parse_additive(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> 
     }
 
     let mut iter = children.into_iter();
-    let mut result = parse_multiplicative(iter.next().unwrap())?;
+    let first = iter.next()
+        .ok_or_else(|| ParseError::Syntax("missing additive operand".into()))?;
+    let mut result = parse_multiplicative(first)?;
 
     while let Some(next) = iter.next() {
         let text = next.as_str();
@@ -160,7 +162,9 @@ fn parse_multiplicative(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expres
     }
 
     let mut iter = children.into_iter();
-    let mut result = parse_unary(iter.next().unwrap())?;
+    let first = iter.next()
+        .ok_or_else(|| ParseError::Syntax("missing multiplicative operand".into()))?;
+    let mut result = parse_unary(first)?;
 
     while let Some(next) = iter.next() {
         let text = next.as_str();
@@ -202,21 +206,27 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
 
     let first_text = children[0].as_str();
     if first_text == "!" && children.len() > 1 {
-        let operand = parse_primary(children.into_iter().last().unwrap())?;
+        let operand_pair = children.into_iter().last()
+            .ok_or_else(|| ParseError::Syntax("missing NOT operand".into()))?;
+        let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
             op: UnaryOp::Not,
             operand: Box::new(operand),
         });
     }
     if first_text == "-" && children.len() > 1 {
-        let operand = parse_primary(children.into_iter().last().unwrap())?;
+        let operand_pair = children.into_iter().last()
+            .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
+        let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
             op: UnaryOp::Negate,
             operand: Box::new(operand),
         });
     }
     if first_text == "+" && children.len() > 1 {
-        let operand = parse_primary(children.into_iter().last().unwrap())?;
+        let operand_pair = children.into_iter().last()
+            .ok_or_else(|| ParseError::Syntax("missing unary plus operand".into()))?;
+        let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
             op: UnaryOp::UnaryPlus,
             operand: Box::new(operand),
@@ -224,21 +234,27 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     }
 
     if text.starts_with('!') && children.len() == 1 {
-        let operand = parse_primary(children.into_iter().next().unwrap())?;
+        let operand_pair = children.into_iter().next()
+            .ok_or_else(|| ParseError::Syntax("missing NOT operand".into()))?;
+        let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
             op: UnaryOp::Not,
             operand: Box::new(operand),
         });
     }
     if text.starts_with('-') && children.len() == 1 {
-        let operand = parse_primary(children.into_iter().next().unwrap())?;
+        let operand_pair = children.into_iter().next()
+            .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
+        let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
             op: UnaryOp::Negate,
             operand: Box::new(operand),
         });
     }
 
-    parse_primary(children.into_iter().next().unwrap())
+    let first = children.into_iter().next()
+        .ok_or_else(|| ParseError::Syntax("missing unary operand".into()))?;
+    parse_primary(first)
 }
 
 fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {

@@ -57,6 +57,7 @@ mod production;
 mod conflict;
 mod network;
 mod config;
+pub mod stream_adapter;
 
 pub use pattern::{PatternTerm, TriplePattern, TripleTemplate};
 pub use rule::{Rule, RuleCondition, RuleConsequent, RuleSet};
@@ -67,3 +68,4 @@ pub use production::Activation;
 pub use conflict::{ConflictResolution, ConflictResolver};
 pub use network::{InferredRdfStreamElement, ReteNetwork};
 pub use config::ReasoningConfig;
+pub use stream_adapter::ReteStreamOperator;

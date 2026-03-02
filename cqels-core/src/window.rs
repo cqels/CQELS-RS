@@ -302,6 +302,8 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SessionWindow {
         stream: Pin<Box<dyn Stream<Item = T> + Send>>,
     ) -> Pin<Box<dyn Stream<Item = WindowedBatch<T>> + Send>> {
         use futures::StreamExt;
+        use std::sync::{Arc, Mutex};
+
         let gap_ms = self.gap.as_millis() as i64;
 
         struct SessionState<T> {
@@ -309,6 +311,10 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SessionWindow {
             last_ts: i64,
             start_ts: i64,
         }
+
+        // Shared state to flush the final session when the stream ends
+        let final_state: Arc<Mutex<Option<SessionState<T>>>> = Arc::new(Mutex::new(None));
+        let final_state_writer = final_state.clone();
 
         let stream = stream
             .scan(
@@ -338,12 +344,41 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SessionWindow {
                     };
                     state.current.push(elem);
                     state.last_ts = ts;
+
+                    // Snapshot state for final flush
+                    {
+                        let mut guard = final_state_writer.lock().unwrap();
+                        *guard = Some(SessionState {
+                            current: state.current.clone(),
+                            last_ts: state.last_ts,
+                            start_ts: state.start_ts,
+                        });
+                    }
+
                     futures::future::ready(Some(completed))
                 },
             )
             .filter_map(futures::future::ready);
 
-        Box::pin(stream)
+        // Chain the final session flush
+        let final_flush = futures::stream::once(async move {
+            let guard = final_state.lock().unwrap();
+            guard.as_ref().and_then(|state| {
+                if state.current.is_empty() {
+                    None
+                } else {
+                    Some(WindowedBatch::new(
+                        state.current.clone(),
+                        state.start_ts,
+                        state.last_ts + gap_ms,
+                        WindowType::Session,
+                    ))
+                }
+            })
+        })
+        .filter_map(futures::future::ready);
+
+        Box::pin(stream.chain(final_flush))
     }
 
     fn window_type(&self) -> WindowType {
@@ -496,9 +531,10 @@ mod tests {
         let batches: Vec<_> = window.apply(stream).collect().await;
 
         // Session 1: [1000, 2000, 3000] (gap from 3000 to 8000 is > 2000ms)
-        // Session 2: [8000, 9000] (will be flushed when stream ends... but our impl emits on gap detection)
-        assert_eq!(batches.len(), 1); // Only the completed session is emitted
+        // Session 2: [8000, 9000] (flushed when stream ends)
+        assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].elements.len(), 3);
+        assert_eq!(batches[1].elements.len(), 2);
     }
 
     #[tokio::test]
@@ -587,10 +623,11 @@ mod tests {
         let stream = Box::pin(futures::stream::iter(elements));
         let window = SessionWindow::new(Duration::from_millis(500));
         let batches: Vec<_> = window.apply(stream).collect().await;
-        // Two completed sessions; last session doesn't close (no subsequent gap)
-        assert_eq!(batches.len(), 2);
+        // Three sessions: [100,200,300], [2000,2100,2200], [4000,4100] (final flush)
+        assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].elements.len(), 3);
         assert_eq!(batches[1].elements.len(), 3);
+        assert_eq!(batches[2].elements.len(), 2);
     }
 
     #[tokio::test]
