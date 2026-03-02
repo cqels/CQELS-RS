@@ -1,10 +1,13 @@
-//! High-level runtime facade combining engine, store, parser, and compiler.
+//! High-level runtime facade combining engine, store, parser, compiler,
+//! reasoning, and CEP.
 //!
 //! [`CqelsRuntime`] provides a single entry point for:
 //! - Registering input streams
 //! - Loading static RDF data
 //! - Submitting SPARQL/Cypher query strings
-//! - Receiving result streams of [`BindingSet`]
+//! - Enabling RETE-based reasoning on streams
+//! - Registering CEP patterns
+//! - Receiving result streams of [`BindingSet`] or [`PatternMatch`]
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -14,21 +17,24 @@ use futures::Stream;
 use cqels_core::compiler::{CqelsQueryCompiler, CypherQueryCompiler};
 use cqels_core::parser::{CqelsQlParser, CypherQlParser};
 use cqels_core::store::RdfStore;
-use cqels_core::stream::StreamElement;
+use cqels_core::stream::{StreamElement, Timestamped};
 use cqels_model::{BindingSet, CqelsError, Statement};
 
+use crate::cep::{NfaPatternProcessor, Pattern, PatternMatch};
 use crate::engine::{ReactiveStreamEngine, StreamEngine};
 
-/// High-level runtime combining engine, store, parser, and compiler.
+/// High-level runtime combining engine, store, parser, compiler, reasoning,
+/// and CEP into a unified API.
 ///
 /// Provides a simplified API for common CQELS workflows:
 /// 1. Create a runtime
 /// 2. Register input streams
-/// 3. (Optionally) load static RDF data
-/// 4. Submit query strings and collect results
+/// 3. (Optionally) load static RDF data and/or enable reasoning
+/// 4. Submit query strings or CEP patterns and collect results
 pub struct CqelsRuntime {
     engine: ReactiveStreamEngine,
     store: Arc<dyn RdfStore>,
+    reasoning_operator: Option<cqels_reasoning::ReteStreamOperator>,
 }
 
 impl Default for CqelsRuntime {
@@ -44,6 +50,7 @@ impl CqelsRuntime {
             engine: ReactiveStreamEngine::new(),
             store: cqels_core::store::create_rdf_store()
                 .expect("failed to create default RDF store"),
+            reasoning_operator: None,
         }
     }
 
@@ -52,6 +59,7 @@ impl CqelsRuntime {
         Self {
             engine: ReactiveStreamEngine::with_capacity(broadcast_capacity),
             store,
+            reasoning_operator: None,
         }
     }
 
@@ -65,12 +73,34 @@ impl CqelsRuntime {
         &self.store
     }
 
+    /// Enables RETE-based reasoning on all subsequently registered streams.
+    ///
+    /// When reasoning is enabled, each input stream element is processed
+    /// through the RETE network before being fed to queries. Inferred
+    /// triples are injected into the stream alongside original data.
+    pub fn enable_reasoning(&mut self, config: cqels_reasoning::ReasoningConfig) {
+        self.reasoning_operator = Some(cqels_reasoning::ReteStreamOperator::new(config));
+    }
+
+    /// Returns whether reasoning is currently enabled.
+    pub fn has_reasoning(&self) -> bool {
+        self.reasoning_operator.is_some()
+    }
+
     /// Registers a named input stream.
+    ///
+    /// If reasoning is enabled, the stream is automatically wrapped with
+    /// the RETE reasoning operator so inferred triples flow into queries.
     pub async fn register_stream(
         &self,
         name: &str,
         stream: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,
     ) -> Result<(), CqelsError> {
+        let stream = if let Some(operator) = &self.reasoning_operator {
+            operator.apply(stream)
+        } else {
+            stream
+        };
         self.engine.register_stream(name, stream).await
     }
 
@@ -100,6 +130,9 @@ impl CqelsRuntime {
 
     /// Parses, compiles, and registers a CqelsQL (SPARQL-style) query.
     ///
+    /// The runtime's RDF store is automatically passed to the compiler
+    /// for resolving `STATIC { ... }` and `GRAPH <uri> { ... }` patterns.
+    ///
     /// Returns a stream of [`BindingSet`] results.
     pub async fn register_cqelsql_query(
         &self,
@@ -119,6 +152,9 @@ impl CqelsRuntime {
 
     /// Parses, compiles, and registers a CypherQL query.
     ///
+    /// The runtime's RDF store is automatically passed to the compiler
+    /// for resolving static and named graph patterns.
+    ///
     /// Returns a stream of [`BindingSet`] results.
     pub async fn register_cypherql_query(
         &self,
@@ -127,12 +163,72 @@ impl CqelsRuntime {
         let definition = CypherQlParser::parse(query_string)
             .map_err(|e| CqelsError::Evaluation { message: format!("Parse error: {e}") })?;
 
-        let compiled = CypherQueryCompiler::compile(query_string, definition)
-            .map_err(|e| CqelsError::Evaluation { message: format!("Compile error: {e}") })?;
+        let compiled =
+            CypherQueryCompiler::compile_with_store(query_string, definition, Some(self.store.clone()))
+                .map_err(|e| CqelsError::Evaluation { message: format!("Compile error: {e}") })?;
 
         self.engine
             .register_binding_query(Box::new(compiled))
             .await
+    }
+
+    /// Registers a CEP pattern against a named stream.
+    ///
+    /// Returns a stream of [`PatternMatch`] results. The pattern is compiled
+    /// into an NFA and evaluated against the named stream's elements.
+    pub async fn register_cep_pattern<T>(
+        &self,
+        stream_name: &str,
+        pattern: Pattern<T>,
+    ) -> Result<Pin<Box<dyn Stream<Item = PatternMatch<T>> + Send>>, CqelsError>
+    where
+        T: Clone + Send + Sync + Timestamped + 'static,
+    {
+        let rx = self
+            .engine
+            .get_stream_receiver(stream_name)
+            .await
+            .ok_or_else(|| CqelsError::Stream {
+                message: format!("stream '{}' not registered", stream_name),
+            })?;
+
+        // Convert broadcast receiver into a typed stream
+        let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
+        let typed_stream: Pin<Box<dyn Stream<Item = T> + Send>> = Box::pin(
+            futures::StreamExt::filter_map(stream, |result| {
+                futures::future::ready(result.ok().and_then(|elem| {
+                    // Try to downcast — this works when T = StreamElement
+                    // For other T types, the caller should use process() directly
+                    let any: Box<dyn std::any::Any> = Box::new(elem);
+                    any.downcast::<T>().ok().map(|t| *t)
+                }))
+            }),
+        );
+
+        let processor = NfaPatternProcessor::new(pattern);
+        Ok(processor.process(typed_stream))
+    }
+
+    /// Registers a CEP pattern directly on a `StreamElement` stream.
+    ///
+    /// This is the most common CEP use case — matching patterns over
+    /// the engine's RDF stream elements.
+    pub async fn register_stream_cep_pattern(
+        &self,
+        stream_name: &str,
+        pattern: Pattern<StreamElement>,
+    ) -> Result<Pin<Box<dyn Stream<Item = PatternMatch<StreamElement>> + Send>>, CqelsError> {
+        let rx = self
+            .engine
+            .get_stream_receiver(stream_name)
+            .await
+            .ok_or_else(|| CqelsError::Stream {
+                message: format!("stream '{}' not registered", stream_name),
+            })?;
+
+        let stream = crate::engine::receiver_to_stream(rx);
+        let processor = NfaPatternProcessor::new(pattern);
+        Ok(processor.process(stream))
     }
 }
 
@@ -144,6 +240,7 @@ mod tests {
     async fn test_runtime_creation() {
         let runtime = CqelsRuntime::new();
         assert!(!runtime.engine().is_running());
+        assert!(!runtime.has_reasoning());
     }
 
     #[tokio::test]
@@ -167,5 +264,17 @@ mod tests {
         )];
         let result = runtime.load_statements(&stmts);
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_enable_reasoning() {
+        use cqels_reasoning::{ReasoningConfig, RuleSet};
+
+        let mut runtime = CqelsRuntime::new();
+        assert!(!runtime.has_reasoning());
+
+        let config = ReasoningConfig::default_config(RuleSet::new(vec![]));
+        runtime.enable_reasoning(config);
+        assert!(runtime.has_reasoning());
     }
 }

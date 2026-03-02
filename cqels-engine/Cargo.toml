@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 cqels-model.workspace = true
 cqels-core.workspace = true
+cqels-reasoning.workspace = true
 oxigraph.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

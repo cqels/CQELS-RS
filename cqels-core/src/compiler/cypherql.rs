@@ -4,11 +4,14 @@
 //! can be executed against input streams. Pre-parses all expression strings
 //! (WHERE, HAVING, ORDER BY, RETURN) into `Expression` trees at compile time.
 
+use std::sync::Arc;
+
 use crate::expression::ast::Expression;
 use crate::expression::evaluator::ExpressionEvaluator;
 use crate::expression::parser::ExpressionParser;
 use crate::parser::ast::CypherQueryDefinition;
 use crate::parser::ParseResult;
+use crate::store::RdfStore;
 
 use super::compiled::CompiledCypherQuery;
 use super::pipeline::{convert_aggregate_function, hash_string, PipelineAggregateSpec};
@@ -24,6 +27,16 @@ impl CypherQueryCompiler {
     pub fn compile(
         query_string: &str,
         definition: CypherQueryDefinition,
+    ) -> ParseResult<CompiledCypherQuery> {
+        Self::compile_with_store(query_string, definition, None)
+    }
+
+    /// Compiles a CypherQL query definition with an optional RDF store for
+    /// resolving static and named graph patterns.
+    pub fn compile_with_store(
+        query_string: &str,
+        definition: CypherQueryDefinition,
+        rdf_store: Option<Arc<dyn RdfStore>>,
     ) -> ParseResult<CompiledCypherQuery> {
         let evaluator = ExpressionEvaluator::new();
 
@@ -123,6 +136,7 @@ impl CypherQueryCompiler {
             aggregate_specs,
             select_vars,
             evaluator,
+            rdf_store,
         })
     }
 }

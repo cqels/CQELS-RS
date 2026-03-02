@@ -2099,3 +2099,140 @@ async fn test_session_window_empty_stream_no_flush() {
     // Empty stream should produce no batches
     assert_eq!(batches.len(), 0);
 }
+
+// ===========================================================================
+// Phase 8: Runtime Unification — Reasoning, CEP, CypherQL Store
+// ===========================================================================
+
+#[tokio::test]
+async fn test_runtime_reasoning_integration() {
+    // Enable reasoning on the runtime so inferred triples flow into queries
+    let mut runtime = CqelsRuntime::new();
+
+    let rule = Rule::builder()
+        .id("type-to-human")
+        .pattern(TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(Term::Iri(IriTerm::new("http://ex.org/type"))),
+            PatternTerm::constant(Term::Iri(IriTerm::new("http://ex.org/Person"))),
+        ))
+        .template(TripleTemplate::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(Term::Iri(IriTerm::new("http://ex.org/is"))),
+            PatternTerm::constant(Term::Iri(IriTerm::new("http://ex.org/Human"))),
+        ))
+        .build();
+
+    let rule_set = RuleSet::new(vec![rule]);
+    let config = ReasoningConfig::builder()
+        .rule_set(rule_set)
+        .default_window(Duration::from_secs(600))
+        .build();
+
+    runtime.enable_reasoning(config);
+    assert!(runtime.has_reasoning());
+
+    let (tx, stream) = create_stream_pair(32);
+    runtime.register_stream("events", stream).await.unwrap();
+    runtime.start().await.unwrap();
+
+    // Query that matches the INFERRED triple (http://ex.org/is)
+    let query_str = r#"
+        SELECT ?s ?o
+        FROM STREAM events [NOW]
+        WHERE {
+            STREAM events {
+                ?s <http://ex.org/is> ?o .
+            }
+        }
+    "#;
+
+    let mut result_stream = runtime
+        .register_cqelsql_query(query_str)
+        .await
+        .unwrap();
+
+    // Send the original triple — reasoning should infer the "is Human" triple
+    let elem = StreamElement::Rdf(RdfStreamElement::new(
+        Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/alice")),
+            IriTerm::new("http://ex.org/type"),
+            Term::Iri(IriTerm::new("http://ex.org/Person")),
+        ),
+        1000,
+    ));
+    tx.send(elem).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let first = tokio::time::timeout(Duration::from_secs(2), result_stream.next())
+        .await
+        .expect("timed out waiting for inferred result");
+
+    assert!(first.is_some(), "should receive inferred triple via reasoning");
+    let bs = first.unwrap();
+    assert!(bs.contains("s"));
+    assert!(bs.contains("o"));
+
+    runtime.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_runtime_cep_pattern() {
+    let runtime = CqelsRuntime::new();
+    let (tx, stream) = create_stream_pair(32);
+    runtime.register_stream("events", stream).await.unwrap();
+    runtime.start().await.unwrap();
+
+    // Define a CEP pattern: detect two consecutive events
+    let pattern = Pattern::<StreamElement>::begin("first")
+        .where_cond(|_| true)
+        .followed_by("second")
+        .where_cond(|_| true);
+
+    let mut match_stream = runtime
+        .register_stream_cep_pattern("events", pattern)
+        .await
+        .unwrap();
+
+    // Send two events
+    let elem1 = stream_elem_literal("http://ex.org/s1", "http://ex.org/p", "v1", 1000);
+    let elem2 = stream_elem_literal("http://ex.org/s2", "http://ex.org/p", "v2", 2000);
+    tx.send(elem1).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tx.send(elem2).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let first_match = tokio::time::timeout(Duration::from_secs(2), match_stream.next())
+        .await
+        .expect("timed out waiting for CEP match");
+
+    assert!(first_match.is_some(), "should detect the two-event pattern");
+    let pm = first_match.unwrap();
+    assert_eq!(pm.events().len(), 2);
+
+    runtime.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_runtime_cypherql_with_store() {
+    // This verifies the CypherQL compiler now passes the store through
+    let runtime = CqelsRuntime::new();
+    let (tx, stream) = create_stream_pair(32);
+    runtime.register_stream("events", stream).await.unwrap();
+    runtime.start().await.unwrap();
+
+    // A basic CypherQL query (no static patterns, just verify store is wired)
+    let query_str = r#"
+        FROM STREAM events [NOW]
+        MATCH (n)-[r:temp]->(m)
+        RETURN n, m
+    "#;
+
+    let result = runtime.register_cypherql_query(query_str).await;
+    // The query should parse and compile successfully (store wired but unused)
+    assert!(result.is_ok(), "CypherQL query with store should compile: {:?}", result.err());
+
+    drop(tx); // suppress unused warning
+
+    runtime.stop().await.unwrap();
+}

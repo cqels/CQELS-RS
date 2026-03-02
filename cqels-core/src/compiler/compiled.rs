@@ -477,6 +477,8 @@ pub struct CompiledCypherQuery {
     pub(crate) select_vars: Vec<String>,
     /// Expression evaluator.
     pub(crate) evaluator: ExpressionEvaluator,
+    /// Optional RDF store for static graph pattern lookups.
+    pub(crate) rdf_store: Option<Arc<dyn RdfStore>>,
 }
 
 #[async_trait]
@@ -510,6 +512,60 @@ impl ContinuousQuery for CompiledCypherQuery {
         let distinct = definition.distinct;
         let limit = definition.limit;
         let group_by = definition.group_by_expressions.clone();
+
+        // Pre-compute static bindings from RDF store for Cypher static/named-graph patterns
+        let rdf_store = self.rdf_store.clone();
+        let static_bindings: Vec<BindingSet> =
+            if let Some(store) = &rdf_store {
+                use crate::parser::ast::PatternSource;
+                let mut accumulated: Vec<BindingSet> = Vec::new();
+
+                for pg in &definition.pattern_groups {
+                    if pg.source == PatternSource::Static || pg.source == PatternSource::Graph {
+                        // Convert Cypher patterns to triple pattern lookups via the store
+                        for cypher_pattern in &pg.patterns {
+                            // For each relationship in the pattern, query the store
+                            for rel in &cypher_pattern.relationships {
+                                let subj_var = rel.start_node.as_deref().unwrap_or("_s");
+                                let obj_var = rel.end_node.as_deref().unwrap_or("_o");
+
+                                // Build a triple pattern from the relationship
+                                let predicate_str = rel.types.first()
+                                    .map(|t| format!("<{t}>"))
+                                    .unwrap_or_else(|| "?_p".to_string());
+
+                                let triple_pattern = crate::parser::ast::TriplePattern {
+                                    subject: format!("?{subj_var}"),
+                                    predicate: predicate_str,
+                                    object: format!("?{obj_var}"),
+                                };
+
+                                let prefixes = std::collections::HashMap::new();
+                                let pattern_results = if pg.source == PatternSource::Graph {
+                                    let graph_uri = pg.source_name.as_deref().unwrap_or("");
+                                    store.query_named_graph_pattern(
+                                        graph_uri,
+                                        &triple_pattern,
+                                        &prefixes,
+                                    )
+                                } else {
+                                    store.query_pattern(&triple_pattern, &prefixes)
+                                };
+
+                                if accumulated.is_empty() {
+                                    accumulated = pattern_results;
+                                } else if !pattern_results.is_empty() {
+                                    accumulated =
+                                        join_binding_sets(&accumulated, &pattern_results);
+                                }
+                            }
+                        }
+                    }
+                }
+                accumulated
+            } else {
+                vec![]
+            };
 
         // Take input streams — merge multiple if available
         let input_stream: Option<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> =
@@ -619,6 +675,20 @@ impl ContinuousQuery for CompiledCypherQuery {
 
                 futures::stream::iter(all_results)
             }));
+
+        // Phase 1b: Join stream bindings with static bindings from RDF store
+        let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
+            if !static_bindings.is_empty() {
+                Box::pin(binding_stream.flat_map(move |bs| {
+                    let joined: Vec<BindingSet> = static_bindings
+                        .iter()
+                        .filter_map(|static_bs| bs.join(static_bs))
+                        .collect();
+                    futures::stream::iter(if joined.is_empty() { vec![bs] } else { joined })
+                }))
+            } else {
+                binding_stream
+            };
 
         // Phase 2: Apply WHERE filter
         let evaluator2 = evaluator.clone();
