@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::Stream;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
 use cqels_core::query::{ContinuousQuery, QueryInputs};
 use cqels_core::stream::StreamElement;
@@ -32,6 +32,11 @@ pub trait StreamEngine: Send + Sync {
         query: Box<dyn ContinuousQuery<Result = StreamElement>>,
     ) -> Result<Pin<Box<dyn Stream<Item = StreamElement> + Send>>, CqelsError>;
 
+    /// Cancels and removes a previously registered query.
+    ///
+    /// The query's output stream will terminate on its next item yield.
+    async fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError>;
+
     /// Starts the engine, activating all registered streams.
     async fn start(&self) -> Result<(), CqelsError>;
 
@@ -48,12 +53,19 @@ struct StreamState {
     _handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Tracked state for a registered continuous query.
+struct QueryState {
+    /// Sending `true` on this channel cancels the query's output stream.
+    cancel_tx: watch::Sender<bool>,
+}
+
 /// Reactive stream engine implementation using tokio channels.
 ///
 /// Maps to Java's `ReactiveStreamEngine`.
 ///
 /// Each registered stream is bridged to a `broadcast::Sender`, enabling multiple
-/// subscribers (queries) to receive all events. Queries are executed as spawned tasks.
+/// subscribers (queries) to receive all events. Queries are tracked in a registry
+/// and can be individually cancelled via [`unregister_query`](StreamEngine::unregister_query).
 type PendingStream = (String, Pin<Box<dyn Stream<Item = StreamElement> + Send>>);
 
 pub struct ReactiveStreamEngine {
@@ -61,6 +73,8 @@ pub struct ReactiveStreamEngine {
     pending: Arc<Mutex<Vec<PendingStream>>>,
     running: AtomicBool,
     broadcast_capacity: usize,
+    /// Registry of active queries, keyed by query_id.
+    queries: Arc<Mutex<HashMap<String, QueryState>>>,
 }
 
 impl Default for ReactiveStreamEngine {
@@ -76,6 +90,7 @@ impl ReactiveStreamEngine {
             pending: Arc::new(Mutex::new(Vec::new())),
             running: AtomicBool::new(false),
             broadcast_capacity: 4096,
+            queries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -115,13 +130,65 @@ impl ReactiveStreamEngine {
     /// Registers and executes a continuous query that produces BindingSets.
     ///
     /// This bridges the type gap between compiled queries (which produce
-    /// `BindingSet`) and the engine's stream infrastructure.
+    /// `BindingSet`) and the engine's stream infrastructure. The query is
+    /// tracked in the registry and can be cancelled via [`unregister_query`].
     pub async fn register_binding_query(
         &self,
         query: Box<dyn ContinuousQuery<Result = BindingSet>>,
     ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
+        let query_id = query.query_id().to_string();
         let inputs = self.build_query_inputs().await;
-        Ok(query.execute(inputs))
+        let raw_stream = query.execute(inputs);
+        self.wrap_with_cancellation(query_id, raw_stream).await
+    }
+
+    /// Wraps a query output stream with cancellation and registers it.
+    async fn wrap_with_cancellation<T: Send + 'static>(
+        &self,
+        query_id: String,
+        raw_stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = T> + Send>>, CqelsError> {
+        use futures::StreamExt;
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+
+        let mut queries = self.queries.lock().await;
+        if queries.contains_key(&query_id) {
+            return Err(CqelsError::Stream {
+                message: format!("query '{}' is already registered", query_id),
+            });
+        }
+        queries.insert(query_id, QueryState { cancel_tx });
+        drop(queries);
+
+        let wrapped = raw_stream.take_while(move |_| {
+            let cancelled = *cancel_rx.borrow();
+            futures::future::ready(!cancelled)
+        });
+
+        Ok(Box::pin(wrapped))
+    }
+
+    /// Cancels and removes a previously registered query.
+    ///
+    /// The query's output stream will terminate on its next item yield.
+    pub async fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
+        let mut queries = self.queries.lock().await;
+        match queries.remove(query_id) {
+            Some(state) => {
+                let _ = state.cancel_tx.send(true);
+                Ok(())
+            }
+            None => Err(CqelsError::Stream {
+                message: format!("query '{}' not found", query_id),
+            }),
+        }
+    }
+
+    /// Returns the IDs of all currently registered queries.
+    pub async fn registered_query_ids(&self) -> Vec<String> {
+        let queries = self.queries.lock().await;
+        queries.keys().cloned().collect()
     }
 
     async fn activate_pending(&self) {
@@ -135,9 +202,16 @@ impl ReactiveStreamEngine {
         for (name, mut input_stream) in streams_to_activate {
             if let Some(state) = streams.get_mut(&name) {
                 let tx = state.sender.clone();
+                let stream_name = name.clone();
                 let handle = tokio::spawn(async move {
                     while let Some(element) = input_stream.next().await {
-                        let _ = tx.send(element);
+                        if tx.send(element).is_err() {
+                            tracing::warn!(
+                                stream = %stream_name,
+                                "broadcast send failed: all receivers dropped, stopping forwarding"
+                            );
+                            break;
+                        }
                     }
                 });
                 state._handle = Some(handle);
@@ -180,8 +254,15 @@ impl StreamEngine for ReactiveStreamEngine {
         &self,
         query: Box<dyn ContinuousQuery<Result = StreamElement>>,
     ) -> Result<Pin<Box<dyn Stream<Item = StreamElement> + Send>>, CqelsError> {
+        let query_id = query.query_id().to_string();
         let inputs = self.build_query_inputs().await;
-        Ok(query.execute(inputs))
+        let raw_stream = query.execute(inputs);
+        self.wrap_with_cancellation(query_id, raw_stream).await
+    }
+
+    async fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
+        // Delegate to the inherent method
+        ReactiveStreamEngine::unregister_query(self, query_id).await
     }
 
     async fn start(&self) -> Result<(), CqelsError> {
@@ -219,6 +300,14 @@ impl StreamEngine for ReactiveStreamEngine {
             .is_err()
         {
             return Ok(());
+        }
+
+        // Cancel all registered queries
+        {
+            let mut queries = self.queries.lock().await;
+            for (_id, state) in queries.drain() {
+                let _ = state.cancel_tx.send(true);
+            }
         }
 
         // Abort all forwarding task handles before clearing
@@ -404,5 +493,209 @@ mod tests {
         assert!(r2.is_ok() && r2.unwrap().is_some());
 
         engine.stop().await.unwrap();
+    }
+
+    // -- Mock query for query lifecycle tests --
+
+    use cqels_core::query::QueryType;
+    use cqels_core::stream::StreamRecord;
+
+    struct MockContinuousQuery {
+        id: String,
+    }
+
+    impl MockContinuousQuery {
+        fn new(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ContinuousQuery for MockContinuousQuery {
+        type Result = StreamElement;
+
+        fn query_id(&self) -> &str {
+            &self.id
+        }
+
+        fn query_string(&self) -> &str {
+            "MOCK QUERY"
+        }
+
+        fn query_type(&self) -> QueryType {
+            QueryType::Custom
+        }
+
+        fn execute(
+            &self,
+            _inputs: QueryInputs,
+        ) -> Pin<Box<dyn Stream<Item = StreamElement> + Send>> {
+            Box::pin(futures::stream::unfold(0i64, |ts| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let elem = StreamElement::Record(StreamRecord::new("mock", ts));
+                Some((elem, ts + 1))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_registration_and_unregistration() {
+        let engine = ReactiveStreamEngine::new();
+        engine.start().await.unwrap();
+
+        let query = MockContinuousQuery::new("test-query-1");
+        let _result_stream = engine.register_query(Box::new(query)).await.unwrap();
+
+        let ids = engine.registered_query_ids().await;
+        assert_eq!(ids, vec!["test-query-1"]);
+
+        engine.unregister_query("test-query-1").await.unwrap();
+
+        let ids = engine.registered_query_ids().await;
+        assert!(ids.is_empty());
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_query_cancellation_terminates_stream() {
+        let engine = ReactiveStreamEngine::new();
+        engine.start().await.unwrap();
+
+        let query = MockContinuousQuery::new("cancel-test");
+        let mut result_stream = engine.register_query(Box::new(query)).await.unwrap();
+
+        // Should get at least one item
+        let first = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            result_stream.next(),
+        )
+        .await;
+        assert!(first.is_ok());
+        assert!(first.unwrap().is_some());
+
+        // Cancel the query
+        engine.unregister_query("cancel-test").await.unwrap();
+
+        // Stream should terminate (return None) on next item
+        let after_cancel = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            result_stream.next(),
+        )
+        .await;
+        assert!(after_cancel.is_ok());
+        assert!(after_cancel.unwrap().is_none());
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_query_id_rejected() {
+        let engine = ReactiveStreamEngine::new();
+        engine.start().await.unwrap();
+
+        let q1 = MockContinuousQuery::new("dup-id");
+        let q2 = MockContinuousQuery::new("dup-id");
+
+        let _s1 = engine.register_query(Box::new(q1)).await.unwrap();
+        let result = engine.register_query(Box::new(q2)).await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match err {
+            CqelsError::Stream { message } => {
+                assert!(message.contains("already registered"));
+            }
+            other => panic!("expected Stream error, got: {other:?}"),
+        }
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unregister_nonexistent_query() {
+        let engine = ReactiveStreamEngine::new();
+        let result = engine.unregister_query("nonexistent").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CqelsError::Stream { message } => {
+                assert!(message.contains("not found"));
+            }
+            other => panic!("expected Stream error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_cancels_all_queries() {
+        let engine = ReactiveStreamEngine::new();
+        engine.start().await.unwrap();
+
+        let q1 = MockContinuousQuery::new("q1");
+        let q2 = MockContinuousQuery::new("q2");
+        let mut s1 = engine.register_query(Box::new(q1)).await.unwrap();
+        let mut s2 = engine.register_query(Box::new(q2)).await.unwrap();
+
+        let ids = engine.registered_query_ids().await;
+        assert_eq!(ids.len(), 2);
+
+        engine.stop().await.unwrap();
+
+        // Both streams should terminate
+        let r1 = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            s1.next(),
+        )
+        .await;
+        let r2 = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            s2.next(),
+        )
+        .await;
+
+        assert!(r1.is_ok() && r1.unwrap().is_none());
+        assert!(r2.is_ok() && r2.unwrap().is_none());
+
+        let ids = engine.registered_query_ids().await;
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_register_unregister() {
+        let engine = Arc::new(ReactiveStreamEngine::new());
+        let (tx, stream) = create_stream_pair(32);
+        engine.register_stream("s1", stream).await.unwrap();
+        engine.start().await.unwrap();
+
+        // Spawn a producer
+        let producer = tokio::spawn(async move {
+            for i in 0..20 {
+                let elem = make_rdf_element("http://s", "http://p", &format!("v{i}"), i);
+                if tx.send(elem).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+
+        // Register and unregister queries concurrently
+        let engine2 = Arc::clone(&engine);
+        let register_task = tokio::spawn(async move {
+            for i in 0..5 {
+                let id = format!("concurrent-q{i}");
+                let query = MockContinuousQuery::new(&id);
+                let _stream = engine2.register_query(Box::new(query)).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                engine2.unregister_query(&id).await.unwrap();
+            }
+        });
+
+        register_task.await.unwrap();
+        producer.abort();
+        engine.stop().await.unwrap();
+
+        let ids = engine.registered_query_ids().await;
+        assert!(ids.is_empty());
     }
 }

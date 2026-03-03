@@ -120,9 +120,21 @@ impl CqelsRuntime {
         self.engine.start().await
     }
 
-    /// Stops the engine.
+    /// Stops the engine, cancelling all registered queries and streams.
     pub async fn stop(&self) -> Result<(), CqelsError> {
         self.engine.stop().await
+    }
+
+    /// Cancels and removes a previously registered query by its ID.
+    ///
+    /// The query's output stream will terminate on its next item yield.
+    pub async fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
+        self.engine.unregister_query(query_id).await
+    }
+
+    /// Returns the IDs of all currently registered queries.
+    pub async fn registered_query_ids(&self) -> Vec<String> {
+        self.engine.registered_query_ids().await
     }
 
     /// Loads RDF statements into the default graph of the store.
@@ -342,5 +354,23 @@ mod tests {
         )];
         let result = runtime.load_named_graph("http://ex.org/graph1", &stmts);
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_unregister_query() {
+        let runtime = CqelsRuntime::new();
+        runtime.start().await.unwrap();
+
+        let result = runtime.unregister_query("nonexistent").await;
+        assert!(result.is_err());
+
+        runtime.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_runtime_registered_query_ids() {
+        let runtime = CqelsRuntime::new();
+        let ids = runtime.registered_query_ids().await;
+        assert!(ids.is_empty());
     }
 }
