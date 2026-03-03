@@ -646,6 +646,11 @@ fn process_event<T: Clone + Send + Sync + Timestamped>(
 
     // State explosion guard
     if new_active.len() > state_explosion_limit {
+        tracing::warn!(
+            active = new_active.len(),
+            limit = state_explosion_limit,
+            "CEP state explosion: truncating partial matches"
+        );
         new_active.sort_by(|a, b| b.state_index.cmp(&a.state_index));
         new_active.truncate(state_explosion_limit);
     }

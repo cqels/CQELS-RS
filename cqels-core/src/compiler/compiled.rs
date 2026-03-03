@@ -30,27 +30,31 @@ use super::pipeline::{
 };
 
 /// A compiled CqelsQL query ready for execution.
+///
+/// Immutable query data is wrapped in `Arc` so that `execute()` can
+/// cheaply share references with async closures instead of deep-cloning
+/// expression trees and definitions on every call.
 pub struct CompiledCqelsQuery {
     /// Original query string.
     pub(crate) query_string: String,
     /// Query name/ID.
     pub(crate) query_id: String,
     /// The parsed query definition.
-    pub(crate) definition: CqelsQueryDefinition,
+    pub(crate) definition: Arc<CqelsQueryDefinition>,
     /// Pre-parsed FILTER expressions.
-    pub(crate) filter_expressions: Vec<Expression>,
+    pub(crate) filter_expressions: Arc<Vec<Expression>>,
     /// Pre-parsed BIND expressions with target variable.
-    pub(crate) bind_expressions: Vec<(Expression, String)>,
+    pub(crate) bind_expressions: Arc<Vec<(Expression, String)>>,
     /// Pre-parsed ORDER BY expressions with sort direction.
-    pub(crate) order_by_expressions: Vec<(Expression, SortDirection)>,
+    pub(crate) order_by_expressions: Arc<Vec<(Expression, SortDirection)>>,
     /// Pre-parsed HAVING expressions.
-    pub(crate) having_expressions: Vec<Expression>,
+    pub(crate) having_expressions: Arc<Vec<Expression>>,
     /// Aggregate specifications.
-    pub(crate) aggregate_specs: Vec<PipelineAggregateSpec>,
+    pub(crate) aggregate_specs: Arc<Vec<PipelineAggregateSpec>>,
     /// Expression evaluator with prefix mappings.
-    pub(crate) evaluator: ExpressionEvaluator,
+    pub(crate) evaluator: Arc<ExpressionEvaluator>,
     /// SELECT variable names for projection.
-    pub(crate) select_vars: Vec<String>,
+    pub(crate) select_vars: Arc<Vec<String>>,
     /// Optional RDF store for STATIC and GRAPH pattern lookups.
     pub(crate) rdf_store: Option<Arc<dyn RdfStore>>,
 }
@@ -75,14 +79,14 @@ impl ContinuousQuery for CompiledCqelsQuery {
         &self,
         mut inputs: QueryInputs,
     ) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
-        let definition = self.definition.clone();
-        let filter_expressions = self.filter_expressions.clone();
-        let bind_expressions = self.bind_expressions.clone();
-        let order_by_expressions = self.order_by_expressions.clone();
-        let having_expressions = self.having_expressions.clone();
-        let aggregate_specs = self.aggregate_specs.clone();
-        let evaluator = self.evaluator.clone();
-        let select_vars = self.select_vars.clone();
+        let definition = Arc::clone(&self.definition);
+        let filter_expressions = Arc::clone(&self.filter_expressions);
+        let bind_expressions = Arc::clone(&self.bind_expressions);
+        let order_by_expressions = Arc::clone(&self.order_by_expressions);
+        let having_expressions = Arc::clone(&self.having_expressions);
+        let aggregate_specs = Arc::clone(&self.aggregate_specs);
+        let evaluator = Arc::clone(&self.evaluator);
+        let select_vars = Arc::clone(&self.select_vars);
         let distinct = definition.distinct;
         let limit = definition.limit;
         let group_by = definition.group_by_variables.clone();
@@ -456,27 +460,30 @@ impl ContinuousQuery for CompiledCqelsQuery {
 }
 
 /// A compiled CypherQL query ready for execution.
+///
+/// Immutable query data is wrapped in `Arc` for cheap sharing with
+/// async closures in `execute()`.
 pub struct CompiledCypherQuery {
     /// Original query string.
     pub(crate) query_string: String,
     /// Query name/ID.
     pub(crate) query_id: String,
     /// The parsed query definition.
-    pub(crate) definition: CypherQueryDefinition,
+    pub(crate) definition: Arc<CypherQueryDefinition>,
     /// Pre-parsed WHERE expression.
-    pub(crate) where_expression: Option<Expression>,
+    pub(crate) where_expression: Arc<Option<Expression>>,
     /// Pre-parsed HAVING expressions.
-    pub(crate) having_expressions: Vec<Expression>,
+    pub(crate) having_expressions: Arc<Vec<Expression>>,
     /// Pre-parsed ORDER BY expressions with sort direction.
-    pub(crate) order_by_expressions: Vec<(Expression, SortDirection)>,
+    pub(crate) order_by_expressions: Arc<Vec<(Expression, SortDirection)>>,
     /// Pre-parsed RETURN expressions.
-    pub(crate) return_expressions: Vec<(Expression, String)>,
+    pub(crate) return_expressions: Arc<Vec<(Expression, String)>>,
     /// Aggregate specifications.
-    pub(crate) aggregate_specs: Vec<PipelineAggregateSpec>,
+    pub(crate) aggregate_specs: Arc<Vec<PipelineAggregateSpec>>,
     /// RETURN column aliases for projection.
-    pub(crate) select_vars: Vec<String>,
+    pub(crate) select_vars: Arc<Vec<String>>,
     /// Expression evaluator.
-    pub(crate) evaluator: ExpressionEvaluator,
+    pub(crate) evaluator: Arc<ExpressionEvaluator>,
     /// Optional RDF store for static graph pattern lookups.
     pub(crate) rdf_store: Option<Arc<dyn RdfStore>>,
 }
@@ -501,14 +508,14 @@ impl ContinuousQuery for CompiledCypherQuery {
         &self,
         mut inputs: QueryInputs,
     ) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
-        let definition = self.definition.clone();
-        let where_expression = self.where_expression.clone();
-        let having_expressions = self.having_expressions.clone();
-        let order_by_expressions = self.order_by_expressions.clone();
-        let return_expressions = self.return_expressions.clone();
-        let aggregate_specs = self.aggregate_specs.clone();
-        let select_vars = self.select_vars.clone();
-        let evaluator = self.evaluator.clone();
+        let definition = Arc::clone(&self.definition);
+        let where_expression = Arc::clone(&self.where_expression);
+        let having_expressions = Arc::clone(&self.having_expressions);
+        let order_by_expressions = Arc::clone(&self.order_by_expressions);
+        let return_expressions = Arc::clone(&self.return_expressions);
+        let aggregate_specs = Arc::clone(&self.aggregate_specs);
+        let select_vars = Arc::clone(&self.select_vars);
+        let evaluator = Arc::clone(&self.evaluator);
         let distinct = definition.distinct;
         let limit = definition.limit;
         let group_by = definition.group_by_expressions.clone();
@@ -693,8 +700,8 @@ impl ContinuousQuery for CompiledCypherQuery {
         // Phase 2: Apply WHERE filter
         let evaluator2 = evaluator.clone();
         let filtered: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
-            if let Some(where_expr) = where_expression {
-                apply_filters(binding_stream, &[where_expr], &evaluator)
+            if let Some(where_expr) = where_expression.as_ref() {
+                apply_filters(binding_stream, &[where_expr.clone()], &evaluator)
             } else {
                 binding_stream
             };
@@ -829,14 +836,14 @@ mod tests {
         let query = CompiledCqelsQuery {
             query_string: "SELECT ?sensor ?temp FROM STREAM sensors [NOW] WHERE { STREAM sensors { ?sensor <http://example.org/temp> ?temp . } }".to_string(),
             query_id: "test".to_string(),
-            definition,
-            filter_expressions: vec![],
-            bind_expressions: vec![],
-            order_by_expressions: vec![],
-            having_expressions: vec![],
-            aggregate_specs: vec![],
-            evaluator: ExpressionEvaluator::new(),
-            select_vars: vec!["sensor".to_string(), "temp".to_string()],
+            definition: Arc::new(definition),
+            filter_expressions: Arc::new(vec![]),
+            bind_expressions: Arc::new(vec![]),
+            order_by_expressions: Arc::new(vec![]),
+            having_expressions: Arc::new(vec![]),
+            aggregate_specs: Arc::new(vec![]),
+            evaluator: Arc::new(ExpressionEvaluator::new()),
+            select_vars: Arc::new(vec!["sensor".to_string(), "temp".to_string()]),
             rdf_store: None,
         };
 

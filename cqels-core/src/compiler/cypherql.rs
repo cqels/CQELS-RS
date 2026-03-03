@@ -128,14 +128,14 @@ impl CypherQueryCompiler {
         Ok(CompiledCypherQuery {
             query_string: query_string.to_string(),
             query_id,
-            definition,
-            where_expression,
-            having_expressions,
-            order_by_expressions,
-            return_expressions,
-            aggregate_specs,
-            select_vars,
-            evaluator,
+            definition: Arc::new(definition),
+            where_expression: Arc::new(where_expression),
+            having_expressions: Arc::new(having_expressions),
+            order_by_expressions: Arc::new(order_by_expressions),
+            return_expressions: Arc::new(return_expressions),
+            aggregate_specs: Arc::new(aggregate_specs),
+            select_vars: Arc::new(select_vars),
+            evaluator: Arc::new(evaluator),
             rdf_store,
         })
     }

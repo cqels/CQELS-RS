@@ -39,19 +39,30 @@ pub struct CqelsRuntime {
 
 impl Default for CqelsRuntime {
     fn default() -> Self {
-        Self::new()
+        Self::try_new().expect("failed to create default RDF store")
     }
 }
 
 impl CqelsRuntime {
     /// Creates a new runtime with an in-memory oxigraph store.
-    pub fn new() -> Self {
-        Self {
+    ///
+    /// Returns an error if the default RDF store cannot be created.
+    pub fn try_new() -> Result<Self, CqelsError> {
+        let store = cqels_core::store::create_rdf_store()
+            .map_err(|e| CqelsError::Evaluation { message: format!("RDF store creation failed: {e}") })?;
+        Ok(Self {
             engine: ReactiveStreamEngine::new(),
-            store: cqels_core::store::create_rdf_store()
-                .expect("failed to create default RDF store"),
+            store,
             reasoning_operator: None,
-        }
+        })
+    }
+
+    /// Creates a new runtime with an in-memory oxigraph store.
+    ///
+    /// Panics if the default RDF store cannot be created. Prefer
+    /// [`try_new()`](Self::try_new) if you need error handling.
+    pub fn new() -> Self {
+        Self::try_new().expect("failed to create default RDF store")
     }
 
     /// Creates a runtime with a custom store and broadcast capacity.
@@ -276,5 +287,60 @@ mod tests {
         let config = ReasoningConfig::default_config(RuleSet::new(vec![]));
         runtime.enable_reasoning(config);
         assert!(runtime.has_reasoning());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_try_new() {
+        let result = CqelsRuntime::try_new();
+        assert!(result.is_ok());
+        let runtime = result.unwrap();
+        assert!(!runtime.engine().is_running());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_default() {
+        let runtime = CqelsRuntime::default();
+        assert!(!runtime.engine().is_running());
+        assert!(!runtime.has_reasoning());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_with_config() {
+        let store = cqels_core::store::create_rdf_store().unwrap();
+        let runtime = CqelsRuntime::with_config(store, 64);
+        assert!(!runtime.engine().is_running());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_register_stream() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+
+        let runtime = CqelsRuntime::new();
+        let elem = StreamElement::Rdf(RdfStreamElement::new(
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/s")),
+                IriTerm::new("http://ex.org/p"),
+                Term::Literal(LiteralTerm::new("v")),
+            ),
+            1000,
+        ));
+        let stream = Box::pin(futures::stream::iter(vec![elem]));
+        let result = runtime.register_stream("test", stream).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_load_named_graph() {
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+
+        let runtime = CqelsRuntime::new();
+        let stmts = vec![Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/s")),
+            IriTerm::new("http://ex.org/p"),
+            Term::Literal(LiteralTerm::new("value")),
+        )];
+        let result = runtime.load_named_graph("http://ex.org/graph1", &stmts);
+        assert!(result.is_ok());
     }
 }

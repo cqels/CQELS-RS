@@ -132,14 +132,14 @@ impl CqelsQueryCompiler {
         Ok(CompiledCqelsQuery {
             query_string: query_string.to_string(),
             query_id,
-            definition,
-            filter_expressions,
-            bind_expressions,
-            order_by_expressions,
-            having_expressions: vec![], // CqelsQL doesn't have HAVING in the grammar
-            aggregate_specs,
-            evaluator,
-            select_vars,
+            definition: Arc::new(definition),
+            filter_expressions: Arc::new(filter_expressions),
+            bind_expressions: Arc::new(bind_expressions),
+            order_by_expressions: Arc::new(order_by_expressions),
+            having_expressions: Arc::new(vec![]), // CqelsQL doesn't have HAVING in the grammar
+            aggregate_specs: Arc::new(aggregate_specs),
+            evaluator: Arc::new(evaluator),
+            select_vars: Arc::new(select_vars),
             rdf_store,
         })
     }
