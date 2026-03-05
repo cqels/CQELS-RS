@@ -170,14 +170,9 @@ impl From<StreamRecord> for StreamElement {
 #[non_exhaustive]
 pub enum StreamEvent<T: Clone> {
     /// A data record with a value and timestamp.
-    Record {
-        value: T,
-        timestamp: i64,
-    },
+    Record { value: T, timestamp: i64 },
     /// A watermark indicating that all events up to this timestamp have been received.
-    Watermark {
-        timestamp: i64,
-    },
+    Watermark { timestamp: i64 },
 }
 
 impl<T: Clone> StreamEvent<T> {

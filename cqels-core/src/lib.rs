@@ -41,19 +41,21 @@
 //! let window = TumblingWindow::new(Duration::from_secs(5));
 //! ```
 
-pub mod stream;
-pub mod window;
-pub mod query;
+pub mod compiler;
+pub mod expression;
 pub mod operator;
 pub mod parser;
-pub mod expression;
-pub mod compiler;
+pub mod query;
 pub mod store;
+pub mod stream;
+pub mod window;
 
 // Convenience re-exports for common types.
-pub use compiler::{CompiledCqelsQuery, CompiledCypherQuery, CqelsQueryCompiler, CypherQueryCompiler};
+pub use compiler::{
+    CompiledCqelsQuery, CompiledCypherQuery, CqelsQueryCompiler, CypherQueryCompiler,
+};
 pub use expression::{Expression, ExpressionEvaluator};
 pub use parser::{CqelsQlParser, CypherQlParser, ParseError, ParseResult};
 pub use query::{ContinuousQuery, QueryInputs, QueryType};
-pub use store::{RdfStore, create_rdf_store};
+pub use store::{create_rdf_store, RdfStore};
 pub use stream::{RdfStreamElement, StreamElement, StreamRecord, Timestamped};

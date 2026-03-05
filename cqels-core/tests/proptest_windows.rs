@@ -12,9 +12,7 @@ use futures::StreamExt;
 use proptest::prelude::*;
 
 use cqels_core::stream::Timestamped;
-use cqels_core::window::{
-    SlidingWindow, TumblingCountWindow, TumblingWindow, Window,
-};
+use cqels_core::window::{SlidingWindow, TumblingCountWindow, TumblingWindow, Window};
 
 /// Simple timestamped element for testing.
 #[derive(Debug, Clone)]

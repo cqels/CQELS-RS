@@ -260,40 +260,30 @@ pub enum CqelsPatternGroup {
         patterns: Vec<TriplePattern>,
     },
     /// Patterns from static data.
-    Static {
-        patterns: Vec<TriplePattern>,
-    },
+    Static { patterns: Vec<TriplePattern> },
     /// Patterns from a named graph.
     NamedGraph {
         graph_uri: String,
         patterns: Vec<TriplePattern>,
     },
     /// Default (unscoped) triple patterns.
-    Default {
-        patterns: Vec<TriplePattern>,
-    },
+    Default { patterns: Vec<TriplePattern> },
     /// FILTER constraint.
-    Filter {
-        expression: String,
-    },
+    Filter { expression: String },
     /// BIND expression.
     Bind {
         expression: String,
         variable: String,
     },
     /// OPTIONAL pattern group.
-    Optional {
-        groups: Vec<CqelsPatternGroup>,
-    },
+    Optional { groups: Vec<CqelsPatternGroup> },
     /// UNION — two alternative pattern groups, either may match.
     Union {
         left: Vec<CqelsPatternGroup>,
         right: Vec<CqelsPatternGroup>,
     },
     /// MINUS — anti-join: filter out results where patterns match.
-    Minus {
-        patterns: Vec<TriplePattern>,
-    },
+    Minus { patterns: Vec<TriplePattern> },
 }
 
 /// Operator execution hints for CqelsQL.

@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use cqels_benchmarks::generate_sensor_readings;
 use cqels_core::parser::CqelsQlParser;
+use cqels_model::term::{IriTerm, Term};
 use cqels_reasoning::{
     PatternTerm, ReasoningConfig, ReteNetwork, Rule, RuleSet, TriplePattern, TripleTemplate,
 };
-use cqels_model::term::{IriTerm, Term};
 
 fn main() {
     println!("=== CQELS Sensor Stream Example ===\n");
@@ -36,7 +36,14 @@ fn main() {
     let query_def = CqelsQlParser::parse(query_str).expect("failed to parse query");
     println!("   Query name: {:?}", query_def.name);
     println!("   Query type: {:?}", query_def.query_type);
-    println!("   Streams: {:?}", query_def.streams.iter().map(|s| &s.name).collect::<Vec<_>>());
+    println!(
+        "   Streams: {:?}",
+        query_def
+            .streams
+            .iter()
+            .map(|s| &s.name)
+            .collect::<Vec<_>>()
+    );
     println!("   Select elements: {}", query_def.select_elements.len());
     println!("   Has ORDER BY: {}", query_def.has_order_by());
     println!("   Limit: {:?}", query_def.limit);
@@ -57,7 +64,9 @@ fn main() {
         .template(TripleTemplate::new(
             PatternTerm::Variable("sensor".into()),
             PatternTerm::Constant(Term::Iri(IriTerm::new("http://example.org/hasAlert"))),
-            PatternTerm::Constant(Term::Iri(IriTerm::new("http://example.org/HighTemperature"))),
+            PatternTerm::Constant(Term::Iri(IriTerm::new(
+                "http://example.org/HighTemperature",
+            ))),
         ))
         .build();
 
@@ -77,7 +86,9 @@ fn main() {
         ))
         .template(TripleTemplate::new(
             PatternTerm::Variable("sensor".into()),
-            PatternTerm::Constant(Term::Iri(IriTerm::new("http://example.org/hasCompleteReading"))),
+            PatternTerm::Constant(Term::Iri(IriTerm::new(
+                "http://example.org/hasCompleteReading",
+            ))),
             PatternTerm::Constant(Term::Iri(IriTerm::new("http://example.org/Complete"))),
         ))
         .build();
@@ -125,7 +136,10 @@ fn main() {
     println!("   Total inferred triples: {total_inferred}");
     println!("   High temperature alerts: {alert_count}");
     println!("   Complete readings: {complete_count}");
-    println!("   Working memory size: {}", network.working_memory().size());
+    println!(
+        "   Working memory size: {}",
+        network.working_memory().size()
+    );
     println!();
 
     println!("=== Done ===");

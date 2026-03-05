@@ -117,10 +117,7 @@ impl<T, F: Fn(&T) -> f64> TopKOperator<T, F> {
     {
         let mut elements: Vec<_> = self.heap.iter().collect();
         elements.sort_by(|a, b| {
-            let cmp = a
-                .score
-                .partial_cmp(&b.score)
-                .unwrap_or(Ordering::Equal);
+            let cmp = a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal);
             match self.direction {
                 SortDirection::Descending => cmp.reverse(), // highest first
                 SortDirection::Ascending => cmp,            // lowest first

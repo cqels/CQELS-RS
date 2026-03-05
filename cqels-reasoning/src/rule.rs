@@ -133,7 +133,11 @@ impl fmt::Debug for Rule {
 
 impl fmt::Display for Rule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Rule[id={}, name={}, priority={}]", self.id, self.name, self.priority)
+        write!(
+            f,
+            "Rule[id={}, name={}, priority={}]",
+            self.id, self.name, self.priority
+        )
     }
 }
 
@@ -394,7 +398,11 @@ mod tests {
         );
 
         let r1 = Rule::builder().id("r1").pattern(p1.clone()).build();
-        let r2 = Rule::builder().id("r2").pattern(p2.clone()).pattern(p1.clone()).build();
+        let r2 = Rule::builder()
+            .id("r2")
+            .pattern(p2.clone())
+            .pattern(p1.clone())
+            .build();
 
         let ruleset = RuleSet::new(vec![r1, r2]);
         let patterns = ruleset.all_patterns();

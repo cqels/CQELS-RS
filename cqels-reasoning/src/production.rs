@@ -64,7 +64,6 @@ impl fmt::Debug for Activation {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

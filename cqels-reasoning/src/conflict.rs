@@ -34,11 +34,7 @@ impl ConflictResolver {
     /// Resolves activations according to the strategy.
     ///
     /// Returns the filtered/ordered list of activations that should fire.
-    pub fn resolve(
-        &self,
-        mut activations: Vec<Activation>,
-        rule_set: &RuleSet,
-    ) -> Vec<Activation> {
+    pub fn resolve(&self, mut activations: Vec<Activation>, rule_set: &RuleSet) -> Vec<Activation> {
         match self.strategy {
             ConflictResolution::All => activations,
             ConflictResolution::Priority => {

@@ -164,9 +164,7 @@ impl PartialOrd for Value {
             (Value::String(a), Value::String(b)) => a.partial_cmp(b),
 
             // Term comparison (IRI string comparison)
-            (Value::Term(a), Value::Term(b)) => {
-                a.to_string().partial_cmp(&b.to_string())
-            }
+            (Value::Term(a), Value::Term(b)) => a.to_string().partial_cmp(&b.to_string()),
 
             // Null is not comparable
             (Value::Null, _) | (_, Value::Null) => None,

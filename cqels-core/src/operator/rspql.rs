@@ -83,26 +83,23 @@ impl RStreamOperator {
     pub fn apply<T: Clone + Eq + Hash + Send + 'static>(
         stream: Pin<Box<dyn Stream<Item = WindowUpdate<T>> + Send>>,
     ) -> Pin<Box<dyn Stream<Item = WindowSnapshot<T>> + Send>> {
-        let stream = stream.scan(
-            HashSet::<T>::new(),
-            |state, update| {
-                // Add new elements
-                for elem in &update.added {
-                    state.insert(elem.clone());
-                }
-                // Remove expired elements
-                for elem in &update.removed {
-                    state.remove(elem);
-                }
-                let snapshot = WindowSnapshot {
-                    contents: state.iter().cloned().collect(),
-                    window_start: update.window_start,
-                    window_end: update.window_end,
-                    timestamp: update.timestamp,
-                };
-                futures::future::ready(Some(snapshot))
-            },
-        );
+        let stream = stream.scan(HashSet::<T>::new(), |state, update| {
+            // Add new elements
+            for elem in &update.added {
+                state.insert(elem.clone());
+            }
+            // Remove expired elements
+            for elem in &update.removed {
+                state.remove(elem);
+            }
+            let snapshot = WindowSnapshot {
+                contents: state.iter().cloned().collect(),
+                window_start: update.window_start,
+                window_end: update.window_end,
+                timestamp: update.timestamp,
+            };
+            futures::future::ready(Some(snapshot))
+        });
         Box::pin(stream)
     }
 }

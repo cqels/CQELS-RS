@@ -102,7 +102,9 @@ impl<T, F: Fn(&T) -> f64> SumAggregate<T, F> {
     }
 }
 
-impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for SumAggregate<T, F> {
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64>
+    for SumAggregate<T, F>
+{
     fn create_accumulator(&self) -> f64 {
         0.0
     }
@@ -180,8 +182,8 @@ impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, AvgAcc
     }
 }
 
-impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> RetractableAggregateFunction<T, AvgAccumulator, f64>
-    for AvgAggregate<T, F>
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync>
+    RetractableAggregateFunction<T, AvgAccumulator, f64> for AvgAggregate<T, F>
 {
     fn retract(&self, element: &T, mut acc: AvgAccumulator) -> AvgAccumulator {
         acc.sum -= (self.extractor)(element);
@@ -209,7 +211,9 @@ impl<T, F: Fn(&T) -> f64> MinAggregate<T, F> {
     }
 }
 
-impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for MinAggregate<T, F> {
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64>
+    for MinAggregate<T, F>
+{
     fn create_accumulator(&self) -> f64 {
         f64::MAX
     }
@@ -242,7 +246,9 @@ impl<T, F: Fn(&T) -> f64> MaxAggregate<T, F> {
     }
 }
 
-impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64> for MaxAggregate<T, F> {
+impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> AggregateFunction<T, f64, f64>
+    for MaxAggregate<T, F>
+{
     fn create_accumulator(&self) -> f64 {
         f64::MIN
     }

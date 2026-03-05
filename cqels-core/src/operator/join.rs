@@ -390,11 +390,7 @@ impl VariableLengthPathOperator {
     }
 
     /// Finds all paths from `start` in the graph state.
-    pub fn find_paths(
-        &self,
-        start: &str,
-        graph: &GraphPatternJoinState,
-    ) -> Vec<Vec<String>> {
+    pub fn find_paths(&self, start: &str, graph: &GraphPatternJoinState) -> Vec<Vec<String>> {
         let mut results = Vec::new();
         let mut visited = HashSet::new();
         let mut path = vec![start.to_string()];
@@ -471,8 +467,7 @@ mod tests {
 
     #[test]
     fn test_windowed_join() {
-        let mut state: WindowedJoinState<i32, i32> =
-            WindowedJoinState::new(Duration::from_secs(5));
+        let mut state: WindowedJoinState<i32, i32> = WindowedJoinState::new(Duration::from_secs(5));
         let join_fn = |l: &i32, r: &i32| Some(l + r);
 
         // Add left at t=1000
@@ -552,8 +547,7 @@ mod tests {
         state.add_statement(&make_stmt("http://b", "http://link", "http://c"), 0);
         state.add_statement(&make_stmt("http://c", "http://link", "http://d"), 0);
 
-        let op = VariableLengthPathOperator::new(1, 3)
-            .with_relationship_type("<http://link>");
+        let op = VariableLengthPathOperator::new(1, 3).with_relationship_type("<http://link>");
 
         let paths = op.find_paths("<http://a>", &state);
         // Should find paths of length 1, 2, 3

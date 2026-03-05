@@ -10,13 +10,13 @@
 
 use std::time::Duration;
 
+use cqels_core::operator::aggregate::{
+    AggregateFunction, AvgAggregate, CountAggregate, GroupKey, MaxAggregate, MinAggregate,
+    SumAggregate, WindowedAggregateOperator,
+};
 use cqels_core::stream::Timestamped;
 use cqels_core::window::{
-    SlidingWindow, TumblingCountWindow, TumblingWindow, SessionWindow, Window, WindowedBatch,
-};
-use cqels_core::operator::aggregate::{
-    AggregateFunction, AvgAggregate, CountAggregate, MaxAggregate, MinAggregate,
-    SumAggregate, WindowedAggregateOperator, GroupKey,
+    SessionWindow, SlidingWindow, TumblingCountWindow, TumblingWindow, Window, WindowedBatch,
 };
 use futures::StreamExt;
 
@@ -84,7 +84,11 @@ async fn main() {
     let window = TumblingWindow::new(Duration::from_secs(10));
     let stream = Box::pin(futures::stream::iter(readings.clone()));
     let batches: Vec<_> = window.apply(stream).collect().await;
-    println!("  Input: {} readings -> {} batches", readings.len(), batches.len());
+    println!(
+        "  Input: {} readings -> {} batches",
+        readings.len(),
+        batches.len()
+    );
     print_batches(&batches);
     println!();
 
@@ -154,7 +158,10 @@ async fn main() {
     for (i, batch) in batches.iter().enumerate() {
         let results = count_op.process_batch(&batch.elements);
         for res in &results {
-            let group = res.group_key.as_ref().map_or("all".to_string(), |k| k.to_string());
+            let group = res
+                .group_key
+                .as_ref()
+                .map_or("all".to_string(), |k| k.to_string());
             println!(
                 "    Window {}: sensor={}, count={}",
                 i + 1,

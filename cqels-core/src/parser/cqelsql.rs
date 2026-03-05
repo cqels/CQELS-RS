@@ -329,7 +329,10 @@ fn parse_window_spec(pair: pest::iterators::Pair<Rule>) -> ParseResult<WindowSpe
                     return Ok(WindowSpec::slide(durations[0], durations[1]));
                 }
                 return Ok(WindowSpec::range(
-                    durations.into_iter().next().unwrap_or(Duration::from_secs(0)),
+                    durations
+                        .into_iter()
+                        .next()
+                        .unwrap_or(Duration::from_secs(0)),
                 ));
             }
             Rule::window_triples => {
@@ -584,9 +587,7 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPa
     Err(ParseError::Syntax("invalid pattern group".into()))
 }
 
-fn parse_triple_patterns(
-    pair: pest::iterators::Pair<Rule>,
-) -> ParseResult<Vec<TriplePattern>> {
+fn parse_triple_patterns(pair: pest::iterators::Pair<Rule>) -> ParseResult<Vec<TriplePattern>> {
     let mut results = Vec::new();
     let mut subject = String::new();
     let mut pred_obj_lists = Vec::new();
@@ -613,8 +614,7 @@ fn parse_triple_patterns(
                     // Handle 'a' as rdf:type shorthand
                     let pred_text = inner.as_str().trim();
                     if pred_text == "a" {
-                        predicate =
-                            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string();
+                        predicate = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string();
                     } else {
                         predicate = pred_text.to_string();
                     }
@@ -739,11 +739,11 @@ mod tests {
 
         let result = CqelsQlParser::parse(query).unwrap();
         assert!(result.prefixes.contains_key("ex"));
+        assert_eq!(result.prefixes["ex"], "http://example.org/");
         assert_eq!(
-            result.prefixes["ex"],
-            "http://example.org/"
+            result.streams[0].window,
+            WindowSpec::range(Duration::from_secs(10))
         );
-        assert_eq!(result.streams[0].window, WindowSpec::range(Duration::from_secs(10)));
     }
 
     #[test]
@@ -770,7 +770,10 @@ mod tests {
             WHERE { ?x <http://ex.org/p> ?y . }
         "#;
         let result = CqelsQlParser::parse(query).unwrap();
-        assert_eq!(result.streams[0].window, WindowSpec::range(Duration::from_secs(30)));
+        assert_eq!(
+            result.streams[0].window,
+            WindowSpec::range(Duration::from_secs(30))
+        );
 
         // Test TRIPLES
         let query = r#"
@@ -934,9 +937,8 @@ mod tests {
 
     #[test]
     fn test_parse_error_incomplete_window() {
-        let result = CqelsQlParser::parse(
-            "SELECT ?x FROM STREAM s [] WHERE { ?x <http://ex.org/p> ?y . }",
-        );
+        let result =
+            CqelsQlParser::parse("SELECT ?x FROM STREAM s [] WHERE { ?x <http://ex.org/p> ?y . }");
         assert!(result.is_err());
     }
 
@@ -959,17 +961,26 @@ mod tests {
         // Milliseconds
         let q = r#"SELECT ?x FROM STREAM s [RANGE 500ms] WHERE { ?x <http://p> ?y . }"#;
         let r = CqelsQlParser::parse(q).unwrap();
-        assert_eq!(r.streams[0].window, WindowSpec::range(Duration::from_millis(500)));
+        assert_eq!(
+            r.streams[0].window,
+            WindowSpec::range(Duration::from_millis(500))
+        );
 
         // Minutes
         let q = r#"SELECT ?x FROM STREAM s [RANGE 2m] WHERE { ?x <http://p> ?y . }"#;
         let r = CqelsQlParser::parse(q).unwrap();
-        assert_eq!(r.streams[0].window, WindowSpec::range(Duration::from_secs(120)));
+        assert_eq!(
+            r.streams[0].window,
+            WindowSpec::range(Duration::from_secs(120))
+        );
 
         // Hours
         let q = r#"SELECT ?x FROM STREAM s [RANGE 1h] WHERE { ?x <http://p> ?y . }"#;
         let r = CqelsQlParser::parse(q).unwrap();
-        assert_eq!(r.streams[0].window, WindowSpec::range(Duration::from_secs(3600)));
+        assert_eq!(
+            r.streams[0].window,
+            WindowSpec::range(Duration::from_secs(3600))
+        );
     }
 
     #[test]
@@ -1020,7 +1031,10 @@ mod tests {
             ORDER BY ?x ASC
         "#;
         let result = CqelsQlParser::parse(query).unwrap();
-        assert_eq!(result.order_by_conditions[0].direction, SortDirection::Ascending);
+        assert_eq!(
+            result.order_by_conditions[0].direction,
+            SortDirection::Ascending
+        );
     }
 
     #[test]
@@ -1033,8 +1047,14 @@ mod tests {
         "#;
         let result = CqelsQlParser::parse(query).unwrap();
         assert_eq!(result.order_by_conditions.len(), 2);
-        assert_eq!(result.order_by_conditions[0].direction, SortDirection::Ascending);
-        assert_eq!(result.order_by_conditions[1].direction, SortDirection::Descending);
+        assert_eq!(
+            result.order_by_conditions[0].direction,
+            SortDirection::Ascending
+        );
+        assert_eq!(
+            result.order_by_conditions[1].direction,
+            SortDirection::Descending
+        );
     }
 
     #[test]

@@ -226,22 +226,29 @@ impl TryFrom<&Term> for oxrdf::Term {
     fn try_from(term: &Term) -> Result<Self, Self::Error> {
         match term {
             Term::Iri(iri) => {
-                let nn = NamedNode::new(iri.as_str())
-                    .map_err(|e| crate::CqelsError::InvalidTerm { detail: e.to_string() })?;
+                let nn =
+                    NamedNode::new(iri.as_str()).map_err(|e| crate::CqelsError::InvalidTerm {
+                        detail: e.to_string(),
+                    })?;
                 Ok(oxrdf::Term::NamedNode(nn))
             }
             Term::BlankNode(bn) => {
-                let b = BlankNode::new(bn.id())
-                    .map_err(|e| crate::CqelsError::InvalidTerm { detail: e.to_string() })?;
+                let b = BlankNode::new(bn.id()).map_err(|e| crate::CqelsError::InvalidTerm {
+                    detail: e.to_string(),
+                })?;
                 Ok(oxrdf::Term::BlankNode(b))
             }
             Term::Literal(lit) => {
                 let l = if let Some(lang) = lit.language() {
-                    Literal::new_language_tagged_literal(lit.value(), lang)
-                        .map_err(|e| crate::CqelsError::InvalidTerm { detail: e.to_string() })?
+                    Literal::new_language_tagged_literal(lit.value(), lang).map_err(|e| {
+                        crate::CqelsError::InvalidTerm {
+                            detail: e.to_string(),
+                        }
+                    })?
                 } else if let Some(dt) = lit.datatype() {
-                    let dt_nn = NamedNode::new(dt)
-                        .map_err(|e| crate::CqelsError::InvalidTerm { detail: e.to_string() })?;
+                    let dt_nn = NamedNode::new(dt).map_err(|e| crate::CqelsError::InvalidTerm {
+                        detail: e.to_string(),
+                    })?;
                     Literal::new_typed_literal(lit.value(), dt_nn)
                 } else {
                     Literal::new_simple_literal(lit.value())
@@ -487,7 +494,9 @@ mod tests {
         let bn = Term::BlankNode(BlankNodeTerm::new("x1"));
         assert_eq!(bn.to_string(), "_:x1");
 
-        let lit = Term::Literal(LiteralTerm::new("42").with_datatype("http://www.w3.org/2001/XMLSchema#integer"));
+        let lit = Term::Literal(
+            LiteralTerm::new("42").with_datatype("http://www.w3.org/2001/XMLSchema#integer"),
+        );
         assert!(lit.to_string().contains("42"));
     }
 
@@ -502,8 +511,7 @@ mod tests {
     #[test]
     fn test_roundtrip_typed_literal() {
         let original = Term::Literal(
-            LiteralTerm::new("3.14")
-                .with_datatype("http://www.w3.org/2001/XMLSchema#double"),
+            LiteralTerm::new("3.14").with_datatype("http://www.w3.org/2001/XMLSchema#double"),
         );
         let ox_term: oxrdf::Term = (&original).try_into().unwrap();
         let back = Term::from(ox_term);
@@ -514,7 +522,10 @@ mod tests {
     fn test_different_term_types_not_equal() {
         let iri = Term::Iri(IriTerm::new("b0"));
         let bn = Term::BlankNode(BlankNodeTerm::new("b0"));
-        assert_ne!(iri, bn, "IRI and BlankNode should not be equal even with same string");
+        assert_ne!(
+            iri, bn,
+            "IRI and BlankNode should not be equal even with same string"
+        );
     }
 
     #[test]

@@ -122,8 +122,15 @@ mod tests {
     #[test]
     fn test_filter_compound_conditions() {
         let filter = FilterOperator::new(|bs: &BindingSet| {
-            let age_ok = bs.get("age").and_then(|v| v.as_integer()).map(|i| i >= 18).unwrap_or(false);
-            let active = bs.get("active").and_then(|v| v.as_boolean()).unwrap_or(false);
+            let age_ok = bs
+                .get("age")
+                .and_then(|v| v.as_integer())
+                .map(|i| i >= 18)
+                .unwrap_or(false);
+            let active = bs
+                .get("active")
+                .and_then(|v| v.as_boolean())
+                .unwrap_or(false);
             age_ok && active
         });
 

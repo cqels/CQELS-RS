@@ -35,13 +35,16 @@ use cqels_core::operator::aggregate::{
     AggregateFunction, AvgAggregate, CountAggregate, GroupKey, MaxAggregate, MinAggregate,
     SumAggregate, WindowedAggregateOperator,
 };
-use cqels_core::operator::filter::FilterOperator;
 use cqels_core::operator::bind::BindOperator;
+use cqels_core::operator::filter::FilterOperator;
 use cqels_core::operator::join::GraphPatternJoinState;
 use cqels_core::operator::ranking::{SortDirection, TopKOperator};
 
 // Engine
-use cqels_engine::{NfaPatternProcessor, Pattern, ReactiveStreamEngine, StreamEngine, create_stream_pair, receiver_to_stream};
+use cqels_engine::{
+    create_stream_pair, receiver_to_stream, NfaPatternProcessor, Pattern, ReactiveStreamEngine,
+    StreamEngine,
+};
 
 // Reasoning
 use cqels_reasoning::{
@@ -76,10 +79,7 @@ fn make_rdf_element(subj: &str, pred: &str, obj: &str, ts: i64) -> RdfStreamElem
 }
 
 fn make_rdf_literal_element(subj: &str, pred: &str, obj_val: &str, ts: i64) -> RdfStreamElement {
-    RdfStreamElement::new(
-        Statement::new(iri(subj), iri_pred(pred), lit(obj_val)),
-        ts,
-    )
+    RdfStreamElement::new(Statement::new(iri(subj), iri_pred(pred), lit(obj_val)), ts)
 }
 
 fn term_as_str(t: &Term) -> &str {
@@ -121,7 +121,10 @@ async fn test_parse_then_window_then_aggregate() {
     let window = TumblingWindow::new(Duration::from_secs(10));
     let batches: Vec<_> = window.apply(stream).collect().await;
 
-    assert!(!batches.is_empty(), "should produce at least one window batch");
+    assert!(
+        !batches.is_empty(),
+        "should produce at least one window batch"
+    );
 
     // Step 3: Apply aggregation to each window batch
     let count_op = WindowedAggregateOperator::new(
@@ -134,11 +137,17 @@ async fn test_parse_then_window_then_aggregate() {
     for batch in &batches {
         let results = count_op.process_batch(&batch.elements);
         for res in &results {
-            assert!(res.value > 0, "each window should have at least one element");
+            assert!(
+                res.value > 0,
+                "each window should have at least one element"
+            );
             total_elements += res.value;
         }
     }
-    assert_eq!(total_elements, 100, "all 100 readings should be accounted for");
+    assert_eq!(
+        total_elements, 100,
+        "all 100 readings should be accounted for"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -277,9 +286,30 @@ fn test_parse_cypher_then_graph_pattern_join() {
     // Step 2: Build a graph from RDF statements
     let mut graph = GraphPatternJoinState::new();
 
-    graph.add_statement(&stmt("http://ex.org/Alice", "http://ex.org/follows", "http://ex.org/Bob"), 100);
-    graph.add_statement(&stmt("http://ex.org/Bob", "http://ex.org/follows", "http://ex.org/Carol"), 200);
-    graph.add_statement(&stmt("http://ex.org/Bob", "http://ex.org/likes", "http://ex.org/Post1"), 300);
+    graph.add_statement(
+        &stmt(
+            "http://ex.org/Alice",
+            "http://ex.org/follows",
+            "http://ex.org/Bob",
+        ),
+        100,
+    );
+    graph.add_statement(
+        &stmt(
+            "http://ex.org/Bob",
+            "http://ex.org/follows",
+            "http://ex.org/Carol",
+        ),
+        200,
+    );
+    graph.add_statement(
+        &stmt(
+            "http://ex.org/Bob",
+            "http://ex.org/likes",
+            "http://ex.org/Post1",
+        ),
+        300,
+    );
 
     // Note: GraphPatternJoinState stores keys using Display format, so IRIs are wrapped in <...>
     // Step 3: Verify graph structure matches the parsed query's pattern
@@ -386,18 +416,41 @@ async fn test_cep_then_reason() {
         .within(Duration::from_secs(10));
 
     let events = vec![
-        TempEvent { sensor: "s1".into(), value: 25.0, timestamp: 1000 },
-        TempEvent { sensor: "s1".into(), value: 35.0, timestamp: 2000 },
-        TempEvent { sensor: "s1".into(), value: 40.0, timestamp: 3000 },
-        TempEvent { sensor: "s1".into(), value: 55.0, timestamp: 4000 },
-        TempEvent { sensor: "s2".into(), value: 60.0, timestamp: 5000 },
+        TempEvent {
+            sensor: "s1".into(),
+            value: 25.0,
+            timestamp: 1000,
+        },
+        TempEvent {
+            sensor: "s1".into(),
+            value: 35.0,
+            timestamp: 2000,
+        },
+        TempEvent {
+            sensor: "s1".into(),
+            value: 40.0,
+            timestamp: 3000,
+        },
+        TempEvent {
+            sensor: "s1".into(),
+            value: 55.0,
+            timestamp: 4000,
+        },
+        TempEvent {
+            sensor: "s2".into(),
+            value: 60.0,
+            timestamp: 5000,
+        },
     ];
 
     let processor = NfaPatternProcessor::new(pattern);
     let stream = Box::pin(futures::stream::iter(events));
     let matches: Vec<_> = processor.process(stream).collect().await;
 
-    assert!(!matches.is_empty(), "should detect rising temperature pattern");
+    assert!(
+        !matches.is_empty(),
+        "should detect rising temperature pattern"
+    );
 
     // Step 2: For each match, create an RDF event and run through reasoning
     let alert_rule = Rule::builder()
@@ -438,7 +491,10 @@ async fn test_cep_then_reason() {
         }
     }
 
-    assert!(critical_alerts > 0, "reasoning should produce critical alerts from CEP matches");
+    assert!(
+        critical_alerts > 0,
+        "reasoning should produce critical alerts from CEP matches"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -458,15 +514,16 @@ async fn test_window_grouped_aggregate_then_rank() {
     // Step 2: Aggregate count per predicate per window
     let count_op = WindowedAggregateOperator::new(
         CountAggregate,
-        |e: &RdfStreamElement| {
-            Some(GroupKey::single(e.statement.predicate.as_str().to_string()))
-        },
+        |e: &RdfStreamElement| Some(GroupKey::single(e.statement.predicate.as_str().to_string())),
         10_000,
     );
 
     for batch in &batches {
         let results = count_op.process_batch(&batch.elements);
-        assert!(!results.is_empty(), "each window should have aggregate results");
+        assert!(
+            !results.is_empty(),
+            "each window should have aggregate results"
+        );
 
         // Step 3: Rank aggregation results by count descending
         let mut ranked: Vec<_> = results.iter().collect();
@@ -643,7 +700,9 @@ async fn test_full_cqelsql_pipeline() {
     let count_op = WindowedAggregateOperator::new(
         CountAggregate,
         |e: &RdfStreamElement| {
-            Some(GroupKey::single(term_as_str(&e.statement.subject).to_string()))
+            Some(GroupKey::single(
+                term_as_str(&e.statement.subject).to_string(),
+            ))
         },
         10_000,
     );
@@ -703,12 +762,16 @@ fn test_cypher_parse_then_variable_length_path() {
 
     // Find paths from Alice with 1..3 hops
     // Note: GraphPatternJoinState stores keys in Display format (<...> for IRIs)
-    let path_op = VariableLengthPathOperator::new(1, 3)
-        .with_relationship_type("<http://ex.org/follows>");
+    let path_op =
+        VariableLengthPathOperator::new(1, 3).with_relationship_type("<http://ex.org/follows>");
     let paths = path_op.find_paths("<http://ex.org/Alice>", &graph);
 
     // Should find: Alice→Bob (1), Alice→Bob→Carol (2), Alice→Bob→Carol→Dave (3)
-    assert!(paths.len() >= 3, "should find paths of length 1, 2, and 3; got {}", paths.len());
+    assert!(
+        paths.len() >= 3,
+        "should find paths of length 1, 2, and 3; got {}",
+        paths.len()
+    );
 
     let one_hop: Vec<_> = paths.iter().filter(|p| p.len() == 2).collect();
     assert!(!one_hop.is_empty(), "should have 1-hop path");
@@ -733,7 +796,10 @@ async fn test_sliding_window_overlap_consistency() {
     let sliding = SlidingWindow::new(Duration::from_secs(15), Duration::from_secs(5));
     let batches: Vec<_> = sliding.apply(stream).collect().await;
 
-    assert!(batches.len() > 1, "sliding window should produce multiple batches");
+    assert!(
+        batches.len() > 1,
+        "sliding window should produce multiple batches"
+    );
 
     let total_in_windows: usize = batches.iter().map(|b| b.size()).sum();
     assert!(
@@ -795,7 +861,11 @@ async fn test_count_window_then_aggregate() {
     assert_eq!(batches.len(), 5, "50 elements / 10 per batch = 5 batches");
 
     for batch in &batches {
-        assert_eq!(batch.size(), 10, "each count-window batch should have exactly 10 elements");
+        assert_eq!(
+            batch.size(),
+            10,
+            "each count-window batch should have exactly 10 elements"
+        );
     }
 
     let min_agg = MinAggregate::new(|e: &RdfStreamElement| e.timestamp() as f64);
@@ -1020,7 +1090,11 @@ fn test_group_concat_aggregate() {
         match city {
             "NYC" => {
                 // 3 sensors concatenated with "; "
-                assert_eq!(sensors.matches("; ").count(), 2, "should have 2 separators for 3 items");
+                assert_eq!(
+                    sensors.matches("; ").count(),
+                    2,
+                    "should have 2 separators for 3 items"
+                );
                 assert!(sensors.contains("s1"));
                 assert!(sensors.contains("s2"));
                 assert!(sensors.contains("s3"));
@@ -1039,7 +1113,9 @@ fn test_group_concat_aggregate() {
 
 #[tokio::test]
 async fn test_multi_stream_merge() {
-    use cqels_engine::{ReactiveStreamEngine, StreamEngine, create_stream_pair, receiver_to_stream};
+    use cqels_engine::{
+        create_stream_pair, receiver_to_stream, ReactiveStreamEngine, StreamEngine,
+    };
 
     let engine = ReactiveStreamEngine::new();
 
@@ -1057,8 +1133,18 @@ async fn test_multi_stream_merge() {
     let mut sb = receiver_to_stream(rx_b);
 
     // Send one element to each stream
-    let elem_a = StreamElement::Rdf(make_rdf_element("http://ex.org/A", "http://ex.org/p", "http://ex.org/v1", 1000));
-    let elem_b = StreamElement::Rdf(make_rdf_element("http://ex.org/B", "http://ex.org/p", "http://ex.org/v2", 2000));
+    let elem_a = StreamElement::Rdf(make_rdf_element(
+        "http://ex.org/A",
+        "http://ex.org/p",
+        "http://ex.org/v1",
+        1000,
+    ));
+    let elem_b = StreamElement::Rdf(make_rdf_element(
+        "http://ex.org/B",
+        "http://ex.org/p",
+        "http://ex.org/v2",
+        2000,
+    ));
 
     tx1.send(elem_a).await.unwrap();
     tx2.send(elem_b).await.unwrap();
@@ -1068,8 +1154,14 @@ async fn test_multi_stream_merge() {
     let ra = tokio::time::timeout(std::time::Duration::from_millis(200), sa.next()).await;
     let rb = tokio::time::timeout(std::time::Duration::from_millis(200), sb.next()).await;
 
-    assert!(ra.is_ok() && ra.unwrap().is_some(), "stream_a should receive");
-    assert!(rb.is_ok() && rb.unwrap().is_some(), "stream_b should receive");
+    assert!(
+        ra.is_ok() && ra.unwrap().is_some(),
+        "stream_a should receive"
+    );
+    assert!(
+        rb.is_ok() && rb.unwrap().is_some(),
+        "stream_b should receive"
+    );
 
     engine.stop().await.unwrap();
 }
@@ -1081,13 +1173,25 @@ async fn test_multi_stream_merge() {
 #[test]
 fn test_cypher_chain_matching_integration() {
     use cqels_core::compiler::pipeline::match_cypher_pattern;
-    use cqels_core::parser::ast::{CypherPattern, NodePattern, RelationshipPattern, RelDirection};
+    use cqels_core::parser::ast::{CypherPattern, NodePattern, RelDirection, RelationshipPattern};
 
     let pattern = CypherPattern {
         nodes: vec![
-            NodePattern { variable: Some("a".into()), labels: vec![], properties: std::collections::HashMap::new() },
-            NodePattern { variable: Some("b".into()), labels: vec![], properties: std::collections::HashMap::new() },
-            NodePattern { variable: Some("c".into()), labels: vec![], properties: std::collections::HashMap::new() },
+            NodePattern {
+                variable: Some("a".into()),
+                labels: vec![],
+                properties: std::collections::HashMap::new(),
+            },
+            NodePattern {
+                variable: Some("b".into()),
+                labels: vec![],
+                properties: std::collections::HashMap::new(),
+            },
+            NodePattern {
+                variable: Some("c".into()),
+                labels: vec![],
+                properties: std::collections::HashMap::new(),
+            },
         ],
         relationships: vec![
             RelationshipPattern {
@@ -1112,9 +1216,21 @@ fn test_cypher_chain_matching_integration() {
     };
 
     let stmts = vec![
-        stmt("http://ex.org/Alice", "http://ex.org/KNOWS", "http://ex.org/Bob"),
-        stmt("http://ex.org/Bob", "http://ex.org/LIKES", "http://ex.org/Post1"),
-        stmt("http://ex.org/Carol", "http://ex.org/KNOWS", "http://ex.org/Dave"),
+        stmt(
+            "http://ex.org/Alice",
+            "http://ex.org/KNOWS",
+            "http://ex.org/Bob",
+        ),
+        stmt(
+            "http://ex.org/Bob",
+            "http://ex.org/LIKES",
+            "http://ex.org/Post1",
+        ),
+        stmt(
+            "http://ex.org/Carol",
+            "http://ex.org/KNOWS",
+            "http://ex.org/Dave",
+        ),
     ];
 
     let results = match_cypher_pattern(&pattern, &stmts, 1000);
@@ -1133,7 +1249,7 @@ fn test_cypher_chain_matching_integration() {
 #[test]
 fn test_cypher_node_property_matching_integration() {
     use cqels_core::compiler::pipeline::match_cypher_pattern;
-    use cqels_core::parser::ast::{CypherPattern, NodePattern, RelationshipPattern, RelDirection};
+    use cqels_core::parser::ast::{CypherPattern, NodePattern, RelDirection, RelationshipPattern};
 
     // Pattern: (a {location: "NYC"})-[:MEASURES]->(b)
     let mut props = std::collections::HashMap::new();
@@ -1165,10 +1281,18 @@ fn test_cypher_node_property_matching_integration() {
 
     let stmts = vec![
         // Sensor1 in NYC
-        stmt("http://ex.org/Sensor1", "http://ex.org/MEASURES", "http://ex.org/Temp42"),
+        stmt(
+            "http://ex.org/Sensor1",
+            "http://ex.org/MEASURES",
+            "http://ex.org/Temp42",
+        ),
         stmt("http://ex.org/Sensor1", "http://ex.org/location", "NYC"),
         // Sensor2 in LA
-        stmt("http://ex.org/Sensor2", "http://ex.org/MEASURES", "http://ex.org/Temp37"),
+        stmt(
+            "http://ex.org/Sensor2",
+            "http://ex.org/MEASURES",
+            "http://ex.org/Temp37",
+        ),
         stmt("http://ex.org/Sensor2", "http://ex.org/location", "LA"),
     ];
 
@@ -1202,10 +1326,16 @@ fn test_graph_eviction_then_reason() {
     let mut graph = GraphPatternJoinState::new();
 
     // Old edge (timestamp 100)
-    graph.add_statement(&stmt("http://ex.org/A", "http://ex.org/knows", "http://ex.org/B"), 100);
+    graph.add_statement(
+        &stmt("http://ex.org/A", "http://ex.org/knows", "http://ex.org/B"),
+        100,
+    );
 
     // Recent edge (timestamp 5000)
-    graph.add_statement(&stmt("http://ex.org/C", "http://ex.org/knows", "http://ex.org/D"), 5000);
+    graph.add_statement(
+        &stmt("http://ex.org/C", "http://ex.org/knows", "http://ex.org/D"),
+        5000,
+    );
 
     // Note: GraphPatternJoinState stores keys in Display format (<...> for IRIs)
     assert!(graph.has_edge("<http://ex.org/A>", "<http://ex.org/knows>"));
@@ -1242,7 +1372,12 @@ fn test_graph_eviction_then_reason() {
     let config = ReasoningConfig::default_config(rule_set);
     let mut network = ReteNetwork::compile(config);
 
-    let recent_elem = make_rdf_element("http://ex.org/C", "http://ex.org/knows", "http://ex.org/D", 5000);
+    let recent_elem = make_rdf_element(
+        "http://ex.org/C",
+        "http://ex.org/knows",
+        "http://ex.org/D",
+        5000,
+    );
     let inferred = network.process_element(&recent_elem);
 
     assert!(!inferred.is_empty(), "should infer from recent data");
@@ -1289,8 +1424,18 @@ async fn test_e2e_cqelsql_basic_parse_compile_execute() {
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
     let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
-        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "35", 2000),
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "42",
+            1000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s2",
+            "http://example.org/temp",
+            "35",
+            2000,
+        ),
     ];
 
     let mut inputs = QueryInputs::new();
@@ -1323,9 +1468,24 @@ async fn test_e2e_cqelsql_with_filter() {
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
     let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
-        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "25", 2000),
-        stream_elem_literal("http://example.org/s3", "http://example.org/temp", "35", 3000),
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "42",
+            1000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s2",
+            "http://example.org/temp",
+            "25",
+            2000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s3",
+            "http://example.org/temp",
+            "35",
+            3000,
+        ),
     ];
 
     let mut inputs = QueryInputs::new();
@@ -1356,9 +1516,12 @@ async fn test_e2e_cqelsql_with_prefix() {
     let definition = CqelsQlParser::parse(query_str).expect("parse failed");
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
-    let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
-    ];
+    let elements = vec![stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    )];
 
     let mut inputs = QueryInputs::new();
     inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
@@ -1391,9 +1554,24 @@ async fn test_e2e_cqelsql_group_by_avg() {
 
     // sensor1 has two readings: 40 and 50 → avg = 45
     let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "40", 1000),
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "50", 2000),
-        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "30", 3000),
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "40",
+            1000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "50",
+            2000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s2",
+            "http://example.org/temp",
+            "30",
+            3000,
+        ),
     ];
 
     let mut inputs = QueryInputs::new();
@@ -1426,9 +1604,24 @@ async fn test_e2e_cqelsql_order_by_desc_limit() {
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
     let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "10", 1000),
-        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "50", 2000),
-        stream_elem_literal("http://example.org/s3", "http://example.org/temp", "30", 3000),
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "10",
+            1000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s2",
+            "http://example.org/temp",
+            "50",
+            2000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s3",
+            "http://example.org/temp",
+            "30",
+            3000,
+        ),
     ];
 
     let mut inputs = QueryInputs::new();
@@ -1467,16 +1660,28 @@ async fn test_e2e_cqelsql_multi_stream_join() {
     let definition = CqelsQlParser::parse(query_str).expect("parse failed");
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
-    let temp_elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
-    ];
-    let humidity_elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/humidity", "65", 2000),
-    ];
+    let temp_elements = vec![stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    )];
+    let humidity_elements = vec![stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/humidity",
+        "65",
+        2000,
+    )];
 
     let mut inputs = QueryInputs::new();
-    inputs.add_stream("temp_stream", Box::pin(futures::stream::iter(temp_elements)));
-    inputs.add_stream("humidity_stream", Box::pin(futures::stream::iter(humidity_elements)));
+    inputs.add_stream(
+        "temp_stream",
+        Box::pin(futures::stream::iter(temp_elements)),
+    );
+    inputs.add_stream(
+        "humidity_stream",
+        Box::pin(futures::stream::iter(humidity_elements)),
+    );
 
     let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
     // Each element should match one of the patterns, producing individual bindings
@@ -1499,14 +1704,12 @@ async fn test_e2e_cypherql_basic_parse_compile_execute() {
     let compiled = CypherQueryCompiler::compile(query_str, definition).expect("compile failed");
 
     // Create triples that represent (alice)-[:KNOWS]->(bob)
-    let elements = vec![
-        stream_elem_iri(
-            "http://example.org/alice",
-            "http://example.org/KNOWS",
-            "http://example.org/bob",
-            1000,
-        ),
-    ];
+    let elements = vec![stream_elem_iri(
+        "http://example.org/alice",
+        "http://example.org/KNOWS",
+        "http://example.org/bob",
+        1000,
+    )];
 
     let mut inputs = QueryInputs::new();
     inputs.add_stream("events", Box::pin(futures::stream::iter(elements)));
@@ -1531,14 +1734,12 @@ async fn test_e2e_cypherql_with_where_filter() {
     let definition = CypherQlParser::parse(query_str).expect("parse failed");
     let compiled = CypherQueryCompiler::compile(query_str, definition).expect("compile failed");
 
-    let elements = vec![
-        stream_elem_iri(
-            "http://example.org/alice",
-            "http://example.org/KNOWS",
-            "http://example.org/bob",
-            1000,
-        ),
-    ];
+    let elements = vec![stream_elem_iri(
+        "http://example.org/alice",
+        "http://example.org/KNOWS",
+        "http://example.org/bob",
+        1000,
+    )];
 
     let mut inputs = QueryInputs::new();
     inputs.add_stream("events", Box::pin(futures::stream::iter(elements)));
@@ -1569,7 +1770,10 @@ async fn test_e2e_empty_stream_produces_empty_results() {
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
     let mut inputs = QueryInputs::new();
-    inputs.add_stream("sensors", Box::pin(futures::stream::empty::<StreamElement>()));
+    inputs.add_stream(
+        "sensors",
+        Box::pin(futures::stream::empty::<StreamElement>()),
+    );
 
     let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
     assert!(results.is_empty());
@@ -1584,10 +1788,7 @@ async fn test_e2e_engine_stream_to_query_execution() {
     let engine = ReactiveStreamEngine::new();
 
     let (tx, stream) = create_stream_pair(32);
-    engine
-        .register_stream("sensors", stream)
-        .await
-        .unwrap();
+    engine.register_stream("sensors", stream).await.unwrap();
     engine.start().await.unwrap();
 
     // Parse and compile a query
@@ -1609,7 +1810,12 @@ async fn test_e2e_engine_stream_to_query_execution() {
     inputs.add_stream("sensors", receiver_to_stream(rx));
 
     // Send data through the engine
-    let elem = stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000);
+    let elem = stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    );
     tx.send(elem).await.unwrap();
 
     // Small delay to allow the forwarding task to process
@@ -1675,8 +1881,18 @@ async fn test_e2e_static_pattern_store_lookup() {
         .expect("compile failed");
 
     let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
-        stream_elem_literal("http://example.org/s2", "http://example.org/temp", "65", 2000),
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "42",
+            1000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s2",
+            "http://example.org/temp",
+            "65",
+            2000,
+        ),
     ];
 
     let mut inputs = QueryInputs::new();
@@ -1690,7 +1906,11 @@ async fn test_e2e_static_pattern_store_lookup() {
     for result in &results {
         assert!(result.contains("sensor"));
         assert!(result.contains("temp"));
-        assert!(result.contains("type"), "result should contain ?type from static store: {:?}", result);
+        assert!(
+            result.contains("type"),
+            "result should contain ?type from static store: {:?}",
+            result
+        );
     }
 }
 
@@ -1740,9 +1960,12 @@ async fn test_e2e_named_graph_lookup() {
     let compiled = CqelsQueryCompiler::compile_with_store(query_str, definition, Some(store))
         .expect("compile failed");
 
-    let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
-    ];
+    let elements = vec![stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    )];
 
     let mut inputs = QueryInputs::new();
     inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
@@ -1787,9 +2010,12 @@ async fn test_e2e_static_no_match_passthrough() {
     let compiled = CqelsQueryCompiler::compile_with_store(query_str, definition, Some(store))
         .expect("compile failed");
 
-    let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
-    ];
+    let elements = vec![stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    )];
 
     let mut inputs = QueryInputs::new();
     inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
@@ -1842,9 +2068,12 @@ async fn test_e2e_multiple_static_patterns_joined() {
     let compiled = CqelsQueryCompiler::compile_with_store(query_str, definition, Some(store))
         .expect("compile failed");
 
-    let elements = vec![
-        stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000),
-    ];
+    let elements = vec![stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    )];
 
     let mut inputs = QueryInputs::new();
     inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
@@ -1871,10 +2100,7 @@ async fn test_e2e_multiple_static_patterns_joined() {
 async fn test_engine_register_binding_query() {
     let engine = ReactiveStreamEngine::new();
     let (tx, stream) = create_stream_pair(32);
-    engine
-        .register_stream("sensors", stream)
-        .await
-        .unwrap();
+    engine.register_stream("sensors", stream).await.unwrap();
     engine.start().await.unwrap();
 
     let query_str = r#"
@@ -1895,7 +2121,12 @@ async fn test_engine_register_binding_query() {
         .unwrap();
 
     // Send data
-    let elem = stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000);
+    let elem = stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    );
     tx.send(elem).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1934,12 +2165,14 @@ async fn test_runtime_cqelsql_query() {
         }
     "#;
 
-    let mut result_stream = runtime
-        .register_cqelsql_query(query_str)
-        .await
-        .unwrap();
+    let mut result_stream = runtime.register_cqelsql_query(query_str).await.unwrap();
 
-    let elem = stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000);
+    let elem = stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    );
     tx.send(elem).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1986,12 +2219,14 @@ async fn test_runtime_with_static_store() {
         }
     "#;
 
-    let mut result_stream = runtime
-        .register_cqelsql_query(query_str)
-        .await
-        .unwrap();
+    let mut result_stream = runtime.register_cqelsql_query(query_str).await.unwrap();
 
-    let elem = stream_elem_literal("http://example.org/s1", "http://example.org/temp", "42", 1000);
+    let elem = stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    );
     tx.send(elem).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2084,7 +2319,11 @@ async fn test_session_window_final_flush() {
     let batches: Vec<_> = window.apply(stream).collect().await;
 
     // With final flush, the single session should be emitted when stream ends
-    assert_eq!(batches.len(), 1, "single session should be flushed on stream end");
+    assert_eq!(
+        batches.len(),
+        1,
+        "single session should be flushed on stream end"
+    );
     assert_eq!(batches[0].elements.len(), 3);
 }
 
@@ -2148,10 +2387,7 @@ async fn test_runtime_reasoning_integration() {
         }
     "#;
 
-    let mut result_stream = runtime
-        .register_cqelsql_query(query_str)
-        .await
-        .unwrap();
+    let mut result_stream = runtime.register_cqelsql_query(query_str).await.unwrap();
 
     // Send the original triple — reasoning should infer the "is Human" triple
     let elem = StreamElement::Rdf(RdfStreamElement::new(
@@ -2169,7 +2405,10 @@ async fn test_runtime_reasoning_integration() {
         .await
         .expect("timed out waiting for inferred result");
 
-    assert!(first.is_some(), "should receive inferred triple via reasoning");
+    assert!(
+        first.is_some(),
+        "should receive inferred triple via reasoning"
+    );
     let bs = first.unwrap();
     assert!(bs.contains("s"));
     assert!(bs.contains("o"));
@@ -2231,7 +2470,11 @@ async fn test_runtime_cypherql_with_store() {
 
     let result = runtime.register_cypherql_query(query_str).await;
     // The query should parse and compile successfully (store wired but unused)
-    assert!(result.is_ok(), "CypherQL query with store should compile: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "CypherQL query with store should compile: {:?}",
+        result.err()
+    );
 
     drop(tx); // suppress unused warning
 

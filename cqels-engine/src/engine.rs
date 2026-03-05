@@ -409,11 +409,8 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let received = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            recv_stream.next(),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(500), recv_stream.next()).await;
 
         assert!(received.is_ok());
         assert!(received.unwrap().is_some());
@@ -506,9 +503,7 @@ mod tests {
 
     impl MockContinuousQuery {
         fn new(id: &str) -> Self {
-            Self {
-                id: id.to_string(),
-            }
+            Self { id: id.to_string() }
         }
     }
 
@@ -568,11 +563,8 @@ mod tests {
         let mut result_stream = engine.register_query(Box::new(query)).await.unwrap();
 
         // Should get at least one item
-        let first = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            result_stream.next(),
-        )
-        .await;
+        let first =
+            tokio::time::timeout(std::time::Duration::from_millis(500), result_stream.next()).await;
         assert!(first.is_ok());
         assert!(first.unwrap().is_some());
 
@@ -580,11 +572,8 @@ mod tests {
         engine.unregister_query("cancel-test").await.unwrap();
 
         // Stream should terminate (return None) on next item
-        let after_cancel = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            result_stream.next(),
-        )
-        .await;
+        let after_cancel =
+            tokio::time::timeout(std::time::Duration::from_millis(500), result_stream.next()).await;
         assert!(after_cancel.is_ok());
         assert!(after_cancel.unwrap().is_none());
 
@@ -643,16 +632,8 @@ mod tests {
         engine.stop().await.unwrap();
 
         // Both streams should terminate
-        let r1 = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            s1.next(),
-        )
-        .await;
-        let r2 = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            s2.next(),
-        )
-        .await;
+        let r1 = tokio::time::timeout(std::time::Duration::from_millis(500), s1.next()).await;
+        let r2 = tokio::time::timeout(std::time::Duration::from_millis(500), s2.next()).await;
 
         assert!(r1.is_ok() && r1.unwrap().is_none());
         assert!(r2.is_ok() && r2.unwrap().is_none());

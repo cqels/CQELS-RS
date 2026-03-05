@@ -1,8 +1,8 @@
 pub mod aggregate;
-pub mod filter;
 pub mod bind;
+pub mod filter;
 pub mod join;
+pub mod parallel;
 pub mod ranking;
 pub mod rspql;
 pub mod swag;
-pub mod parallel;

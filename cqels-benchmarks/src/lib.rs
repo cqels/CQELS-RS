@@ -81,7 +81,7 @@ pub fn generate_sensor_readings(count: usize) -> Vec<RdfStreamElement> {
         let subject = Term::Iri(IriTerm::new(format!("http://sensor/{sensor_id}")));
         let predicate = IriTerm::new(predicates[pred_idx]);
         let value: f64 = match pred_idx {
-            0 => rng.gen_range(-20.0..50.0),  // temperature
+            0 => rng.gen_range(-20.0..50.0),   // temperature
             1 => rng.gen_range(0.0..100.0),    // humidity
             2 => rng.gen_range(950.0..1050.0), // pressure
             _ => 0.0,

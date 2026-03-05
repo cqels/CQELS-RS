@@ -48,8 +48,9 @@ impl CqelsRuntime {
     ///
     /// Returns an error if the default RDF store cannot be created.
     pub fn try_new() -> Result<Self, CqelsError> {
-        let store = cqels_core::store::create_rdf_store()
-            .map_err(|e| CqelsError::Evaluation { message: format!("RDF store creation failed: {e}") })?;
+        let store = cqels_core::store::create_rdf_store().map_err(|e| CqelsError::Evaluation {
+            message: format!("RDF store creation failed: {e}"),
+        })?;
         Ok(Self {
             engine: ReactiveStreamEngine::new(),
             store,
@@ -161,16 +162,21 @@ impl CqelsRuntime {
         &self,
         query_string: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
-        let definition = CqelsQlParser::parse(query_string)
-            .map_err(|e| CqelsError::Evaluation { message: format!("Parse error: {e}") })?;
+        let definition =
+            CqelsQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
+                message: format!("Parse error: {e}"),
+            })?;
 
-        let compiled =
-            CqelsQueryCompiler::compile_with_store(query_string, definition, Some(self.store.clone()))
-                .map_err(|e| CqelsError::Evaluation { message: format!("Compile error: {e}") })?;
+        let compiled = CqelsQueryCompiler::compile_with_store(
+            query_string,
+            definition,
+            Some(self.store.clone()),
+        )
+        .map_err(|e| CqelsError::Evaluation {
+            message: format!("Compile error: {e}"),
+        })?;
 
-        self.engine
-            .register_binding_query(Box::new(compiled))
-            .await
+        self.engine.register_binding_query(Box::new(compiled)).await
     }
 
     /// Parses, compiles, and registers a CypherQL query.
@@ -183,16 +189,21 @@ impl CqelsRuntime {
         &self,
         query_string: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
-        let definition = CypherQlParser::parse(query_string)
-            .map_err(|e| CqelsError::Evaluation { message: format!("Parse error: {e}") })?;
+        let definition =
+            CypherQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
+                message: format!("Parse error: {e}"),
+            })?;
 
-        let compiled =
-            CypherQueryCompiler::compile_with_store(query_string, definition, Some(self.store.clone()))
-                .map_err(|e| CqelsError::Evaluation { message: format!("Compile error: {e}") })?;
+        let compiled = CypherQueryCompiler::compile_with_store(
+            query_string,
+            definition,
+            Some(self.store.clone()),
+        )
+        .map_err(|e| CqelsError::Evaluation {
+            message: format!("Compile error: {e}"),
+        })?;
 
-        self.engine
-            .register_binding_query(Box::new(compiled))
-            .await
+        self.engine.register_binding_query(Box::new(compiled)).await
     }
 
     /// Registers a CEP pattern against a named stream.
@@ -217,16 +228,15 @@ impl CqelsRuntime {
 
         // Convert broadcast receiver into a typed stream
         let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
-        let typed_stream: Pin<Box<dyn Stream<Item = T> + Send>> = Box::pin(
-            futures::StreamExt::filter_map(stream, |result| {
+        let typed_stream: Pin<Box<dyn Stream<Item = T> + Send>> =
+            Box::pin(futures::StreamExt::filter_map(stream, |result| {
                 futures::future::ready(result.ok().and_then(|elem| {
                     // Try to downcast — this works when T = StreamElement
                     // For other T types, the caller should use process() directly
                     let any: Box<dyn std::any::Any> = Box::new(elem);
                     any.downcast::<T>().ok().map(|t| *t)
                 }))
-            }),
-        );
+            }));
 
         let processor = NfaPatternProcessor::new(pattern);
         Ok(processor.process(typed_stream))

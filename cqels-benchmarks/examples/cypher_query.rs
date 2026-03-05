@@ -4,8 +4,8 @@
 //!
 //! Run with: `cargo run --example cypher_query`
 
-use cqels_core::parser::CypherQlParser;
 use cqels_core::parser::ast::PatternSource;
+use cqels_core::parser::CypherQlParser;
 
 fn main() {
     println!("=== CypherQL Query Parsing Example ===\n");
@@ -23,11 +23,20 @@ fn main() {
 
     match CypherQlParser::parse(query1) {
         Ok(def) => {
-            println!("  Streams: {:?}", def.streams.iter().map(|s| &s.name).collect::<Vec<_>>());
+            println!(
+                "  Streams: {:?}",
+                def.streams.iter().map(|s| &s.name).collect::<Vec<_>>()
+            );
             println!("  Pattern groups: {}", def.pattern_groups.len());
             println!("  WHERE: {:?}", def.where_expression);
             println!("  RETURN items: {}", def.return_expressions.len());
-            println!("  ORDER BY: {:?}", def.order_by_conditions.iter().map(|o| &o.expression).collect::<Vec<_>>());
+            println!(
+                "  ORDER BY: {:?}",
+                def.order_by_conditions
+                    .iter()
+                    .map(|o| &o.expression)
+                    .collect::<Vec<_>>()
+            );
             println!("  LIMIT: {:?}", def.limit);
         }
         Err(e) => println!("  Parse error: {e}"),
@@ -55,7 +64,10 @@ fn main() {
                     println!("    Nodes: {}", pattern.nodes.len());
                     println!("    Relationships: {}", pattern.relationships.len());
                     for rel in &pattern.relationships {
-                        println!("      Direction: {:?}, Types: {:?}", rel.direction, rel.types);
+                        println!(
+                            "      Direction: {:?}, Types: {:?}",
+                            rel.direction, rel.types
+                        );
                     }
                 }
             }
@@ -89,8 +101,11 @@ fn main() {
                     PatternSource::Default => "DEFAULT",
                     _ => "UNKNOWN",
                 };
-                println!("  Pattern group [{}]: {} patterns",
-                    source_label, group.patterns.len());
+                println!(
+                    "  Pattern group [{}]: {} patterns",
+                    source_label,
+                    group.patterns.len()
+                );
             }
         }
         Err(e) => println!("  Parse error: {e}"),

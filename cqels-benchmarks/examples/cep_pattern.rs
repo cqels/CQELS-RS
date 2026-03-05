@@ -93,7 +93,7 @@ async fn main() {
         .where_cond(|e: &SensorEvent| e.name == "pressure" && e.value > 1020.0);
 
     let events = vec![
-        event("temp", 35.0, 1000),      // matches high_temp
+        event("temp", 35.0, 1000),       // matches high_temp
         event("humidity", 80.0, 2000),   // skipped (relaxed contiguity)
         event("humidity", 85.0, 3000),   // skipped
         event("pressure", 1025.0, 4000), // matches high_pressure
@@ -201,7 +201,7 @@ async fn main() {
 
     let events_err = vec![
         event("start", 1.0, 1000),
-        event("error", 1.0, 2000),   // error immediately after start
+        event("error", 1.0, 2000), // error immediately after start
         event("success", 1.0, 3000),
     ];
 

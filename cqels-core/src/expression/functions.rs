@@ -400,9 +400,7 @@ fn format_epoch_as_datetime(epoch_secs: u64) -> String {
     }
     let d = remaining_days + 1;
 
-    format!(
-        "{y:04}-{m:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}Z"
-    )
+    format!("{y:04}-{m:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
 }
 
 fn is_leap_year(y: i64) -> bool {
@@ -635,7 +633,8 @@ fn next_pseudo_random_seed() -> u64 {
         .as_nanos();
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
     let seed = time.wrapping_add(count as u128);
-    seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) as u64
+    seed.wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407) as u64
 }
 
 #[cfg(test)]
@@ -644,16 +643,31 @@ mod tests {
 
     #[test]
     fn test_abs() {
-        assert_eq!(call_builtin("abs", &[Value::Integer(-5)]), Value::Integer(5));
-        assert_eq!(call_builtin("abs", &[Value::Float(-3.14)]), Value::Float(3.14));
+        assert_eq!(
+            call_builtin("abs", &[Value::Integer(-5)]),
+            Value::Integer(5)
+        );
+        assert_eq!(
+            call_builtin("abs", &[Value::Float(-3.14)]),
+            Value::Float(3.14)
+        );
         assert_eq!(call_builtin("ABS", &[Value::Null]), Value::Null);
     }
 
     #[test]
     fn test_ceil_floor_round() {
-        assert_eq!(call_builtin("ceil", &[Value::Float(3.2)]), Value::Float(4.0));
-        assert_eq!(call_builtin("floor", &[Value::Float(3.8)]), Value::Float(3.0));
-        assert_eq!(call_builtin("round", &[Value::Float(3.5)]), Value::Float(4.0));
+        assert_eq!(
+            call_builtin("ceil", &[Value::Float(3.2)]),
+            Value::Float(4.0)
+        );
+        assert_eq!(
+            call_builtin("floor", &[Value::Float(3.8)]),
+            Value::Float(3.0)
+        );
+        assert_eq!(
+            call_builtin("round", &[Value::Float(3.5)]),
+            Value::Float(4.0)
+        );
     }
 
     #[test]
@@ -666,7 +680,10 @@ mod tests {
     fn test_concat() {
         let result = call_builtin(
             "concat",
-            &[Value::String("hello".into()), Value::String(" world".into())],
+            &[
+                Value::String("hello".into()),
+                Value::String(" world".into()),
+            ],
         );
         assert_eq!(result, Value::String("hello world".into()));
     }
@@ -689,7 +706,11 @@ mod tests {
         assert_eq!(
             call_builtin(
                 "substr",
-                &[Value::String("hello".into()), Value::Integer(2), Value::Integer(3)]
+                &[
+                    Value::String("hello".into()),
+                    Value::Integer(2),
+                    Value::Integer(3)
+                ]
             ),
             Value::String("ell".into())
         );
@@ -712,7 +733,10 @@ mod tests {
         assert_eq!(
             call_builtin(
                 "contains",
-                &[Value::String("hello world".into()), Value::String("world".into())]
+                &[
+                    Value::String("hello world".into()),
+                    Value::String("world".into())
+                ]
             ),
             Value::Boolean(true)
         );
@@ -764,7 +788,10 @@ mod tests {
 
     #[test]
     fn test_bound() {
-        assert_eq!(call_builtin("bound", &[Value::Integer(1)]), Value::Boolean(true));
+        assert_eq!(
+            call_builtin("bound", &[Value::Integer(1)]),
+            Value::Boolean(true)
+        );
         assert_eq!(call_builtin("bound", &[Value::Null]), Value::Boolean(false));
     }
 
@@ -788,7 +815,10 @@ mod tests {
             call_builtin("coalesce", &[Value::Null, Value::Integer(42)]),
             Value::Integer(42)
         );
-        assert_eq!(call_builtin("coalesce", &[Value::Null, Value::Null]), Value::Null);
+        assert_eq!(
+            call_builtin("coalesce", &[Value::Null, Value::Null]),
+            Value::Null
+        );
     }
 
     #[test]
@@ -836,7 +866,10 @@ mod tests {
 
     #[test]
     fn test_unknown_function() {
-        assert_eq!(call_builtin("nonexistent", &[Value::Integer(1)]), Value::Null);
+        assert_eq!(
+            call_builtin("nonexistent", &[Value::Integer(1)]),
+            Value::Null
+        );
     }
 
     #[test]
@@ -859,7 +892,9 @@ mod tests {
     fn test_sha256_known_value() {
         assert_eq!(
             call_builtin("sha256", &[Value::String("hello".into())]),
-            Value::String("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into())
+            Value::String(
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into()
+            )
         );
     }
 

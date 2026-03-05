@@ -47,19 +47,13 @@ impl ExpressionEvaluator {
                     .strip_prefix('?')
                     .or_else(|| name.strip_prefix('$'))
                     .unwrap_or(name);
-                bindings
-                    .get(var_name)
-                    .cloned()
-                    .unwrap_or(Value::Null)
+                bindings.get(var_name).cloned().unwrap_or(Value::Null)
             }
 
             Expression::PropertyAccess { variable, property } => {
                 // Cypher-style: look up "variable.property" as a binding key
                 let key = format!("{variable}.{property}");
-                bindings
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or(Value::Null)
+                bindings.get(&key).cloned().unwrap_or(Value::Null)
             }
 
             Expression::BinaryOp { op, left, right } => {
@@ -91,10 +85,8 @@ impl ExpressionEvaluator {
             }
 
             Expression::FunctionCall { name, args } => {
-                let evaluated_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| self.evaluate(a, bindings))
-                    .collect();
+                let evaluated_args: Vec<Value> =
+                    args.iter().map(|a| self.evaluate(a, bindings)).collect();
 
                 // Try to resolve prefixed function name
                 let resolved_name = self.resolve_prefixed_name(name);
@@ -124,9 +116,7 @@ impl ExpressionEvaluator {
             }
 
             Expression::Aggregate {
-                function,
-                argument,
-                ..
+                function, argument, ..
             } => {
                 // Single-row aggregate evaluation: just return the argument value
                 // Actual aggregation happens at the pipeline level
@@ -201,12 +191,10 @@ impl ExpressionEvaluator {
                     _ => eval_arithmetic(&lval, &rval, |a, b| a / b),
                 }
             }
-            BinaryOp::Mod => {
-                match rval.as_numeric() {
-                    Some(d) if d == 0.0 => Value::Null,
-                    _ => eval_arithmetic(&lval, &rval, |a, b| a % b),
-                }
-            }
+            BinaryOp::Mod => match rval.as_numeric() {
+                Some(d) if d == 0.0 => Value::Null,
+                _ => eval_arithmetic(&lval, &rval, |a, b| a % b),
+            },
 
             // String operators
             BinaryOp::Contains => match (lval.as_string(), rval.as_string()) {
@@ -228,12 +216,7 @@ impl ExpressionEvaluator {
     }
 
     /// Three-valued AND: `null AND false = false`, `null AND true = null`
-    fn eval_and(
-        &self,
-        left: &Expression,
-        right: &Expression,
-        bindings: &BindingSet,
-    ) -> Value {
+    fn eval_and(&self, left: &Expression, right: &Expression, bindings: &BindingSet) -> Value {
         let lval = self.evaluate(left, bindings);
         let l_bool = if lval.is_null() {
             None
@@ -261,12 +244,7 @@ impl ExpressionEvaluator {
     }
 
     /// Three-valued OR: `null OR true = true`, `null OR false = null`
-    fn eval_or(
-        &self,
-        left: &Expression,
-        right: &Expression,
-        bindings: &BindingSet,
-    ) -> Value {
+    fn eval_or(&self, left: &Expression, right: &Expression, bindings: &BindingSet) -> Value {
         let lval = self.evaluate(left, bindings);
         let l_bool = if lval.is_null() {
             None
@@ -330,7 +308,9 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 
         // String-Term comparison
         (Value::String(s), Value::Term(t)) | (Value::Term(t), Value::String(s)) => {
-            t.to_string().trim_matches(|c| c == '<' || c == '>' || c == '"') == s.as_str()
+            t.to_string()
+                .trim_matches(|c| c == '<' || c == '>' || c == '"')
+                == s.as_str()
         }
 
         _ => false,
@@ -343,10 +323,7 @@ fn eval_arithmetic(a: &Value, b: &Value, f: fn(f64, f64) -> f64) -> Value {
         // Both integers: try to stay integer
         (Value::Integer(x), Value::Integer(y)) => {
             let result = f(*x as f64, *y as f64);
-            if result.fract() == 0.0
-                && result >= i64::MIN as f64
-                && result <= i64::MAX as f64
-            {
+            if result.fract() == 0.0 && result >= i64::MIN as f64 && result <= i64::MAX as f64 {
                 Value::Integer(result as i64)
             } else {
                 Value::Float(result)
@@ -465,7 +442,7 @@ mod tests {
             right: Box::new(Expression::Literal(Value::Integer(5))),
         };
         let bs = BindingSet::new(0); // x is unbound → null
-        // SPARQL: null in comparison → null (evaluates to false in FILTER context)
+                                     // SPARQL: null in comparison → null (evaluates to false in FILTER context)
         assert_eq!(eval.evaluate(&expr, &bs), Value::Null);
     }
 
@@ -581,10 +558,7 @@ mod tests {
         };
 
         let bs_high = make_bindings(&[("x", Value::Integer(20))]);
-        assert_eq!(
-            eval.evaluate(&expr, &bs_high),
-            Value::String("high".into())
-        );
+        assert_eq!(eval.evaluate(&expr, &bs_high), Value::String("high".into()));
 
         let bs_low = make_bindings(&[("x", Value::Integer(5))]);
         assert_eq!(eval.evaluate(&expr, &bs_low), Value::String("low".into()));

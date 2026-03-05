@@ -131,11 +131,11 @@ impl ReasoningConfigBuilder {
 
     /// Builds the `ReasoningConfig`, returning an error if required fields are missing.
     pub fn try_build(self) -> Result<ReasoningConfig, cqels_model::CqelsError> {
-        let rule_set = self.rule_set.ok_or_else(|| {
-            cqels_model::CqelsError::Evaluation {
+        let rule_set = self
+            .rule_set
+            .ok_or_else(|| cqels_model::CqelsError::Evaluation {
                 message: "rule_set is required".to_string(),
-            }
-        })?;
+            })?;
         Ok(ReasoningConfig {
             rule_set,
             default_window: self.default_window,

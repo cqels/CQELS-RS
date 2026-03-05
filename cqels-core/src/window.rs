@@ -255,10 +255,7 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SlidingWindow {
                 while window_start <= ts {
                     let window_end = window_start + size_ms;
                     if ts < window_end {
-                        windows
-                            .entry(window_start)
-                            .or_default()
-                            .push(elem.clone());
+                        windows.entry(window_start).or_default().push(elem.clone());
                     }
                     window_start += slide_ms;
                 }
@@ -327,9 +324,7 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SessionWindow {
                 },
                 move |state, elem| {
                     let ts = elem.timestamp();
-                    let completed = if !state.current.is_empty()
-                        && (ts - state.last_ts) > gap_ms
-                    {
+                    let completed = if !state.current.is_empty() && (ts - state.last_ts) > gap_ms {
                         let batch = WindowedBatch::new(
                             std::mem::take(&mut state.current),
                             state.start_ts,
@@ -559,7 +554,10 @@ mod tests {
             WindowSpec::RangeSlide(Duration::from_secs(10), Duration::from_secs(5)).window_type(),
             WindowType::SlidingTime
         );
-        assert_eq!(WindowSpec::Rows(100).window_type(), WindowType::TumblingCount);
+        assert_eq!(
+            WindowSpec::Rows(100).window_type(),
+            WindowType::TumblingCount
+        );
     }
 
     #[test]
@@ -567,16 +565,28 @@ mod tests {
         type TV = TimestampedValue<i64>;
 
         let tw = tumbling(Duration::from_secs(5));
-        assert_eq!(<TumblingWindow as Window<TV>>::window_type(&tw), WindowType::TumblingTime);
+        assert_eq!(
+            <TumblingWindow as Window<TV>>::window_type(&tw),
+            WindowType::TumblingTime
+        );
 
         let sw = sliding(Duration::from_secs(10), Duration::from_secs(5));
-        assert_eq!(<SlidingWindow as Window<TV>>::window_type(&sw), WindowType::SlidingTime);
+        assert_eq!(
+            <SlidingWindow as Window<TV>>::window_type(&sw),
+            WindowType::SlidingTime
+        );
 
         let sess = session(Duration::from_secs(30));
-        assert_eq!(<SessionWindow as Window<TV>>::window_type(&sess), WindowType::Session);
+        assert_eq!(
+            <SessionWindow as Window<TV>>::window_type(&sess),
+            WindowType::Session
+        );
 
         let tc = tumbling_count(100);
-        assert_eq!(<TumblingCountWindow as Window<TV>>::window_type(&tc), WindowType::TumblingCount);
+        assert_eq!(
+            <TumblingCountWindow as Window<TV>>::window_type(&tc),
+            WindowType::TumblingCount
+        );
     }
 
     // ─── NEW TESTS ──────────────────────────────────────────────────────────

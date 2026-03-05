@@ -11,9 +11,11 @@ use std::time::Duration;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use futures::StreamExt;
 
-use cqels_benchmarks::{generate_rdf_stream_batch, generate_sensor_readings, generate_social_events};
+use cqels_benchmarks::{
+    generate_rdf_stream_batch, generate_sensor_readings, generate_social_events,
+};
 use cqels_core::operator::aggregate::{
-    AggregateFunction, CountAggregate, SumAggregate, WindowedAggregateOperator, GroupKey,
+    AggregateFunction, CountAggregate, GroupKey, SumAggregate, WindowedAggregateOperator,
 };
 use cqels_core::parser::{CqelsQlParser, CypherQlParser};
 use cqels_core::stream::{RdfStreamElement, Timestamped};
@@ -22,8 +24,7 @@ use cqels_engine::{NfaPatternProcessor, Pattern};
 use cqels_model::statement::Statement;
 use cqels_model::term::{IriTerm, LiteralTerm, Term};
 use cqels_reasoning::{
-    ReasoningConfig, ReteNetwork, Rule, RuleSet,
-    PatternTerm, TriplePattern, TripleTemplate,
+    PatternTerm, ReasoningConfig, ReteNetwork, Rule, RuleSet, TriplePattern, TripleTemplate,
 };
 
 // ─── Stream element creation benchmarks ──────────────────────────────────────
@@ -33,15 +34,11 @@ fn bench_rdf_element_creation(c: &mut Criterion) {
 
     for &count in &[100, 1000, 10000] {
         group.throughput(Throughput::Elements(count));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(count),
-            &count,
-            |b, &count| {
-                b.iter(|| {
-                    black_box(generate_rdf_stream_batch(count as usize));
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.iter(|| {
+                black_box(generate_rdf_stream_batch(count as usize));
+            });
+        });
     }
 
     group.finish();
@@ -53,8 +50,7 @@ fn bench_statement_construction(c: &mut Criterion) {
             let subject = Term::Iri(IriTerm::new("http://example.org/s1"));
             let predicate = IriTerm::new("http://example.org/p1");
             let object = Term::Literal(
-                LiteralTerm::new("42.0")
-                    .with_datatype("http://www.w3.org/2001/XMLSchema#double"),
+                LiteralTerm::new("42.0").with_datatype("http://www.w3.org/2001/XMLSchema#double"),
             );
             let stmt = Statement::new(subject, predicate, object);
             black_box(RdfStreamElement::new(stmt, 1000));
@@ -314,10 +310,8 @@ fn bench_sliding_window(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let stream = Box::pin(futures::stream::iter(elements.clone()));
-                        let window = SlidingWindow::new(
-                            Duration::from_secs(15),
-                            Duration::from_secs(5),
-                        );
+                        let window =
+                            SlidingWindow::new(Duration::from_secs(15), Duration::from_secs(5));
                         let batches: Vec<_> = window.apply(stream).collect().await;
                         black_box(batches.len());
                     });
@@ -406,7 +400,8 @@ fn bench_windowed_aggregation(c: &mut Criterion) {
                         let window = TumblingWindow::new(Duration::from_secs(10));
                         let batches: Vec<_> = window.apply(stream).collect().await;
 
-                        let sum_agg = SumAggregate::new(|e: &RdfStreamElement| e.timestamp() as f64);
+                        let sum_agg =
+                            SumAggregate::new(|e: &RdfStreamElement| e.timestamp() as f64);
                         let mut total = 0.0f64;
                         for batch in &batches {
                             let mut acc = sum_agg.create_accumulator();
@@ -444,7 +439,13 @@ impl Timestamped for BenchEvent {
 fn generate_bench_events(count: usize) -> Vec<BenchEvent> {
     (0..count)
         .map(|i| {
-            let name = if i % 3 == 0 { "A" } else if i % 3 == 1 { "B" } else { "C" };
+            let name = if i % 3 == 0 {
+                "A"
+            } else if i % 3 == 1 {
+                "B"
+            } else {
+                "C"
+            };
             BenchEvent {
                 name: name.to_string(),
                 value: (i as f64) * 1.5,

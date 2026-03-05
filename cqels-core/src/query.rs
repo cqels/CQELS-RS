@@ -90,10 +90,7 @@ pub trait ContinuousQuery: Send + Sync {
     fn query_type(&self) -> QueryType;
 
     /// Executes this query on the given input streams.
-    fn execute(
-        &self,
-        inputs: QueryInputs,
-    ) -> Pin<Box<dyn Stream<Item = Self::Result> + Send>>;
+    fn execute(&self, inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = Self::Result> + Send>>;
 }
 
 #[cfg(test)]

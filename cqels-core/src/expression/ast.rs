@@ -16,10 +16,7 @@ pub enum Expression {
     /// A variable reference (e.g., `?x` or `$x`).
     Variable(String),
     /// Property access on a variable (Cypher-style: `n.name`).
-    PropertyAccess {
-        variable: String,
-        property: String,
-    },
+    PropertyAccess { variable: String, property: String },
     /// A binary operation.
     BinaryOp {
         op: BinaryOp,
@@ -32,10 +29,7 @@ pub enum Expression {
         operand: Box<Expression>,
     },
     /// A function call (e.g., `strlen(?x)`, `abs(?val)`).
-    FunctionCall {
-        name: String,
-        args: Vec<Expression>,
-    },
+    FunctionCall { name: String, args: Vec<Expression> },
     /// BOUND(?var) — tests whether a variable is bound.
     Bound(String),
     /// IF(condition, then, else).

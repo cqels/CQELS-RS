@@ -55,25 +55,29 @@ impl ReteStreamOperator {
     ) -> Pin<Box<dyn Stream<Item = StreamElement> + Send>> {
         let network = self.network.clone();
 
-        Box::pin(input.then(move |elem| {
-            let network = network.clone();
-            async move {
-                match &elem {
-                    StreamElement::Rdf(rdf) => {
-                        let mut net = network.lock().await;
-                        let inferred = net.process_element(rdf);
-                        drop(net);
+        Box::pin(
+            input
+                .then(move |elem| {
+                    let network = network.clone();
+                    async move {
+                        match &elem {
+                            StreamElement::Rdf(rdf) => {
+                                let mut net = network.lock().await;
+                                let inferred = net.process_element(rdf);
+                                drop(net);
 
-                        let mut results = vec![elem];
-                        for inf in inferred {
-                            results.push(StreamElement::Rdf(inf.to_rdf_stream_element()));
+                                let mut results = vec![elem];
+                                for inf in inferred {
+                                    results.push(StreamElement::Rdf(inf.to_rdf_stream_element()));
+                                }
+                                results
+                            }
+                            _ => vec![elem],
                         }
-                        results
                     }
-                    _ => vec![elem],
-                }
-            }
-        }).flat_map(futures::stream::iter))
+                })
+                .flat_map(futures::stream::iter),
+        )
     }
 
     /// Processes a single element and returns inferred elements only.
@@ -138,9 +142,12 @@ mod tests {
     async fn test_stream_operator_basic() {
         let operator = ReteStreamOperator::new(make_test_config());
 
-        let input = vec![
-            make_element("http://ex.org/alice", "http://ex.org/type", "http://ex.org/Person", 1000),
-        ];
+        let input = vec![make_element(
+            "http://ex.org/alice",
+            "http://ex.org/type",
+            "http://ex.org/Person",
+            1000,
+        )];
         let input_stream = Box::pin(futures::stream::iter(input));
 
         let results: Vec<StreamElement> = operator.apply(input_stream).collect().await;
@@ -153,9 +160,12 @@ mod tests {
     async fn test_stream_operator_no_match() {
         let operator = ReteStreamOperator::new(make_test_config());
 
-        let input = vec![
-            make_element("http://ex.org/alice", "http://ex.org/knows", "http://ex.org/bob", 1000),
-        ];
+        let input = vec![make_element(
+            "http://ex.org/alice",
+            "http://ex.org/knows",
+            "http://ex.org/bob",
+            1000,
+        )];
         let input_stream = Box::pin(futures::stream::iter(input));
 
         let results: Vec<StreamElement> = operator.apply(input_stream).collect().await;
@@ -169,8 +179,18 @@ mod tests {
         let operator = ReteStreamOperator::new(make_test_config());
 
         let input = vec![
-            make_element("http://ex.org/alice", "http://ex.org/type", "http://ex.org/Person", 1000),
-            make_element("http://ex.org/bob", "http://ex.org/type", "http://ex.org/Person", 2000),
+            make_element(
+                "http://ex.org/alice",
+                "http://ex.org/type",
+                "http://ex.org/Person",
+                1000,
+            ),
+            make_element(
+                "http://ex.org/bob",
+                "http://ex.org/type",
+                "http://ex.org/Person",
+                2000,
+            ),
         ];
         let input_stream = Box::pin(futures::stream::iter(input));
 

@@ -44,12 +44,7 @@ pub fn match_triple_pattern(
     let mut bindings = BindingSet::new(timestamp);
 
     // Match subject
-    if !match_term_component(
-        &pattern.subject,
-        &stmt.subject,
-        prefixes,
-        &mut bindings,
-    ) {
+    if !match_term_component(&pattern.subject, &stmt.subject, prefixes, &mut bindings) {
         return None;
     }
 
@@ -190,9 +185,7 @@ pub fn apply_filters(
     let evaluator = evaluator.clone();
 
     Box::pin(stream.filter(move |bs| {
-        let pass = filters
-            .iter()
-            .all(|f| evaluator.evaluate_as_bool(f, bs));
+        let pass = filters.iter().all(|f| evaluator.evaluate_as_bool(f, bs));
         futures::future::ready(pass)
     }))
 }
@@ -265,12 +258,19 @@ fn try_match_optional_block(
                 triple_patterns.extend(patterns.iter().cloned());
             }
             CqelsPatternGroup::Filter { expression } => {
-                if let Ok(expr) = crate::expression::parser::ExpressionParser::parse_cqelsql(expression) {
+                if let Ok(expr) =
+                    crate::expression::parser::ExpressionParser::parse_cqelsql(expression)
+                {
                     filter_exprs.push(expr);
                 }
             }
-            CqelsPatternGroup::Bind { expression, variable } => {
-                if let Ok(expr) = crate::expression::parser::ExpressionParser::parse_cqelsql(expression) {
+            CqelsPatternGroup::Bind {
+                expression,
+                variable,
+            } => {
+                if let Ok(expr) =
+                    crate::expression::parser::ExpressionParser::parse_cqelsql(expression)
+                {
                     bind_exprs.push((expr, variable.clone()));
                 }
             }
@@ -293,7 +293,9 @@ fn try_match_optional_block(
 
     if all_matched && !triple_patterns.is_empty() {
         // Apply filters from the optional block
-        let filters_pass = filter_exprs.iter().all(|f| evaluator.evaluate_as_bool(f, &extended));
+        let filters_pass = filter_exprs
+            .iter()
+            .all(|f| evaluator.evaluate_as_bool(f, &extended));
         if filters_pass {
             // Apply binds from the optional block
             for (expr, var) in &bind_exprs {
@@ -410,14 +412,21 @@ fn try_match_pattern_groups(
                 }
             }
             CqelsPatternGroup::Filter { expression } => {
-                if let Ok(expr) = crate::expression::parser::ExpressionParser::parse_cqelsql(expression) {
+                if let Ok(expr) =
+                    crate::expression::parser::ExpressionParser::parse_cqelsql(expression)
+                {
                     if !evaluator.evaluate_as_bool(&expr, &result) {
                         return None;
                     }
                 }
             }
-            CqelsPatternGroup::Bind { expression, variable } => {
-                if let Ok(expr) = crate::expression::parser::ExpressionParser::parse_cqelsql(expression) {
+            CqelsPatternGroup::Bind {
+                expression,
+                variable,
+            } => {
+                if let Ok(expr) =
+                    crate::expression::parser::ExpressionParser::parse_cqelsql(expression)
+                {
                     let val = evaluator.evaluate(&expr, &result);
                     let var_name = variable
                         .strip_prefix('?')
@@ -430,7 +439,11 @@ fn try_match_pattern_groups(
         }
     }
 
-    if has_patterns { Some(result) } else { None }
+    if has_patterns {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Checks that a pattern is connected to the current bindings.
@@ -478,9 +491,9 @@ pub fn apply_minus(
 
     Box::pin(stream.filter(move |bs| {
         // Keep the binding set only if NONE of the minus blocks match
-        let should_keep = !minus_blocks.iter().any(|patterns| {
-            minus_patterns_match(patterns, bs, &prefixes)
-        });
+        let should_keep = !minus_blocks
+            .iter()
+            .any(|patterns| minus_patterns_match(patterns, bs, &prefixes));
         futures::future::ready(should_keep)
     }))
 }
@@ -620,9 +633,10 @@ fn match_chain_recursive(
         // Check relationship type filter
         if !rel.types.is_empty() {
             let pred = stmt.predicate.as_str();
-            let type_matches = rel.types.iter().any(|t| {
-                pred.ends_with(t) || pred == t.as_str()
-            });
+            let type_matches = rel
+                .types
+                .iter()
+                .any(|t| pred.ends_with(t) || pred == t.as_str());
             if !type_matches {
                 continue;
             }
@@ -632,9 +646,7 @@ fn match_chain_recursive(
 
         // Determine start/end nodes based on relationship direction
         let (start_term, end_term) = match rel.direction {
-            RelDirection::Outgoing | RelDirection::Undirected => {
-                (&stmt.subject, &stmt.object)
-            }
+            RelDirection::Outgoing | RelDirection::Undirected => (&stmt.subject, &stmt.object),
             RelDirection::Incoming => (&stmt.object, &stmt.subject),
         };
 
@@ -723,11 +735,7 @@ fn match_chain_recursive(
 }
 
 /// Checks if a node's label constraints are satisfied by looking for rdf:type triples.
-fn check_node_labels(
-    node: &NodePattern,
-    node_term: &Term,
-    stmts: &[Statement],
-) -> bool {
+fn check_node_labels(node: &NodePattern, node_term: &Term, stmts: &[Statement]) -> bool {
     if node.labels.is_empty() {
         return true;
     }
@@ -736,8 +744,7 @@ fn check_node_labels(
         let has_label = stmts.iter().any(|s| {
             let subj_str = term_to_string(&s.subject);
             subj_str == node_str
-                && (s.predicate.as_str()
-                    == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+                && (s.predicate.as_str() == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
                     || s.predicate.as_str().ends_with("type"))
                 && (s.object == Term::Iri(cqels_model::term::IriTerm::new(label))
                     || term_to_string(&s.object) == *label
@@ -751,10 +758,7 @@ fn check_node_labels(
 }
 
 /// Checks inline node property constraints: `(n:Sensor {location: "NYC"})`.
-fn check_node_properties(
-    node: &NodePattern,
-    bs: &BindingSet,
-) -> bool {
+fn check_node_properties(node: &NodePattern, bs: &BindingSet) -> bool {
     if node.properties.is_empty() {
         return true;
     }
@@ -765,9 +769,7 @@ fn check_node_properties(
                 Some(val) => {
                     let val_str = val.to_string();
                     // Compare with property value (strip quotes if present)
-                    let expected = prop_value
-                        .trim_matches('"')
-                        .trim_matches('\'');
+                    let expected = prop_value.trim_matches('"').trim_matches('\'');
                     if val_str != expected && val_str != *prop_value {
                         return false;
                     }
@@ -865,9 +867,7 @@ pub fn apply_group_by_aggregates(
     let mut results = Vec::new();
 
     for (_key, group) in groups {
-        let mut result = BindingSet::new(
-            group.iter().map(|bs| bs.timestamp()).max().unwrap_or(0),
-        );
+        let mut result = BindingSet::new(group.iter().map(|bs| bs.timestamp()).max().unwrap_or(0));
 
         // Copy group-by variable values
         if let Some(first) = group.first() {
@@ -909,11 +909,7 @@ pub fn apply_group_by_aggregates(
                     .collect()
             };
 
-            let agg_result = compute_aggregate(
-                agg.function,
-                &values,
-                agg.separator.as_deref(),
-            );
+            let agg_result = compute_aggregate(agg.function, &values, agg.separator.as_deref());
             result.insert(alias, agg_result);
         }
 
@@ -924,7 +920,11 @@ pub fn apply_group_by_aggregates(
 }
 
 /// Computes a single aggregate value.
-fn compute_aggregate(function: AggregateExprFunction, values: &[Value], separator: Option<&str>) -> Value {
+fn compute_aggregate(
+    function: AggregateExprFunction,
+    values: &[Value],
+    separator: Option<&str>,
+) -> Value {
     match function {
         AggregateExprFunction::Count => Value::Integer(values.len() as i64),
         AggregateExprFunction::Sum => {
@@ -945,10 +945,7 @@ fn compute_aggregate(function: AggregateExprFunction, values: &[Value], separato
             }
         }
         AggregateExprFunction::Avg => {
-            let nums: Vec<f64> = values
-                .iter()
-                .filter_map(|v| v.as_numeric())
-                .collect();
+            let nums: Vec<f64> = values.iter().filter_map(|v| v.as_numeric()).collect();
             if nums.is_empty() {
                 Value::Null
             } else {
@@ -1103,7 +1100,12 @@ pub fn apply_distinct(
 fn deterministic_binding_key(bs: &BindingSet) -> String {
     let mut pairs: Vec<(String, String)> = bs
         .variables()
-        .map(|var| (var.to_string(), bs.get(var).map(|v| v.to_string()).unwrap_or_default()))
+        .map(|var| {
+            (
+                var.to_string(),
+                bs.get(var).map(|v| v.to_string()).unwrap_or_default(),
+            )
+        })
         .collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     let mut key = String::new();
@@ -1170,7 +1172,11 @@ mod tests {
         )
     }
 
-    fn make_triple_pattern(subject: &str, predicate: &str, object: &str) -> crate::parser::ast::TriplePattern {
+    fn make_triple_pattern(
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> crate::parser::ast::TriplePattern {
         crate::parser::ast::TriplePattern {
             subject: subject.to_string(),
             predicate: predicate.to_string(),
@@ -1332,26 +1338,38 @@ mod tests {
     #[test]
     fn test_compute_aggregate_count() {
         let values = vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)];
-        assert_eq!(compute_aggregate(AggregateExprFunction::Count, &values, None), Value::Integer(3));
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Count, &values, None),
+            Value::Integer(3)
+        );
     }
 
     #[test]
     fn test_compute_aggregate_sum() {
         let values = vec![Value::Integer(10), Value::Integer(20), Value::Integer(30)];
-        assert_eq!(compute_aggregate(AggregateExprFunction::Sum, &values, None), Value::Integer(60));
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Sum, &values, None),
+            Value::Integer(60)
+        );
     }
 
     #[test]
     fn test_compute_aggregate_avg() {
         let values = vec![Value::Float(10.0), Value::Float(20.0), Value::Float(30.0)];
-        assert_eq!(compute_aggregate(AggregateExprFunction::Avg, &values, None), Value::Float(20.0));
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Avg, &values, None),
+            Value::Float(20.0)
+        );
     }
 
     #[test]
     fn test_resolve_term_prefix() {
         let mut prefixes = HashMap::new();
         prefixes.insert("ex".to_string(), "http://example.org/".to_string());
-        assert_eq!(resolve_term("ex:name", &prefixes), "http://example.org/name");
+        assert_eq!(
+            resolve_term("ex:name", &prefixes),
+            "http://example.org/name"
+        );
     }
 
     #[test]

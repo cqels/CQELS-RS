@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use cqels_model::{Statement, Term};
 use cqels_model::term::IriTerm;
+use cqels_model::{Statement, Term};
 
 /// A term in a triple pattern — either a variable or a constant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -241,10 +241,7 @@ mod tests {
         );
         let bindings = pattern.match_statement(&stmt).unwrap();
         assert_eq!(bindings.get("s"), Some(&iri("http://ex.org/alice")));
-        assert_eq!(
-            bindings.get("p"),
-            Some(&iri("http://ex.org/knows"))
-        );
+        assert_eq!(bindings.get("p"), Some(&iri("http://ex.org/knows")));
         assert_eq!(bindings.get("o"), Some(&iri("http://ex.org/bob")));
     }
 

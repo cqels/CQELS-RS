@@ -210,10 +210,7 @@ mod tests {
     #[test]
     fn test_compile_basic_cypher_query() {
         let def = make_basic_definition();
-        let result = CypherQueryCompiler::compile(
-            "FROM STREAM events [RANGE 30s] MATCH ...",
-            def,
-        );
+        let result = CypherQueryCompiler::compile("FROM STREAM events [RANGE 30s] MATCH ...", def);
         assert!(result.is_ok());
         let compiled = result.unwrap();
         assert_eq!(compiled.query_id, "test-cypher");

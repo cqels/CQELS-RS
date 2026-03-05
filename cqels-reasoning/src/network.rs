@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use cqels_model::Statement;
 use cqels_core::stream::RdfStreamElement;
+use cqels_model::Statement;
 
 use crate::alpha::AlphaNetwork;
 use crate::beta::BetaNetwork;
@@ -122,9 +122,9 @@ impl ReteNetwork {
         }
 
         // 5. Resolve conflicts
-        let resolved =
-            self.conflict_resolver
-                .resolve(all_activations, self.config.rule_set());
+        let resolved = self
+            .conflict_resolver
+            .resolve(all_activations, self.config.rule_set());
 
         // 6. Fire productions, deduplicate, and collect results
         let rules = self.config.rule_set().rules();
@@ -166,10 +166,8 @@ impl ReteNetwork {
                 for elem in &new_elements {
                     let inferred = self.process_single_no_recurse(elem);
                     for inf in inferred {
-                        next_round.push(RdfStreamElement::new(
-                            inf.statement.clone(),
-                            inf.timestamp,
-                        ));
+                        next_round
+                            .push(RdfStreamElement::new(inf.statement.clone(), inf.timestamp));
                         results.push(inf);
                     }
                 }
@@ -210,9 +208,9 @@ impl ReteNetwork {
             all_activations.extend(activations);
         }
 
-        let resolved =
-            self.conflict_resolver
-                .resolve(all_activations, self.config.rule_set());
+        let resolved = self
+            .conflict_resolver
+            .resolve(all_activations, self.config.rule_set());
 
         let rules = self.config.rule_set().rules();
         let mut results = Vec::new();
@@ -279,10 +277,7 @@ mod tests {
     }
 
     fn make_element(s: &str, p: &str, o: &str, ts: i64) -> RdfStreamElement {
-        RdfStreamElement::new(
-            Statement::new(iri(s), IriTerm::new(p), iri(o)),
-            ts,
-        )
+        RdfStreamElement::new(Statement::new(iri(s), IriTerm::new(p), iri(o)), ts)
     }
 
     #[test]
@@ -736,9 +731,24 @@ mod tests {
         let config = ReasoningConfig::default_config(rule_set);
         let mut network = ReteNetwork::compile(config);
 
-        let elem1 = make_element("http://ex.org/a", "http://ex.org/type", "http://ex.org/X", 100);
-        let elem2 = make_element("http://ex.org/b", "http://ex.org/type", "http://ex.org/Y", 200);
-        let elem3 = make_element("http://ex.org/c", "http://ex.org/type", "http://ex.org/Z", 300);
+        let elem1 = make_element(
+            "http://ex.org/a",
+            "http://ex.org/type",
+            "http://ex.org/X",
+            100,
+        );
+        let elem2 = make_element(
+            "http://ex.org/b",
+            "http://ex.org/type",
+            "http://ex.org/Y",
+            200,
+        );
+        let elem3 = make_element(
+            "http://ex.org/c",
+            "http://ex.org/type",
+            "http://ex.org/Z",
+            300,
+        );
 
         let r1 = network.process_element(&elem1);
         let r2 = network.process_element(&elem2);
@@ -772,7 +782,12 @@ mod tests {
         let config = ReasoningConfig::default_config(rule_set);
         let mut network = ReteNetwork::compile(config);
 
-        let elem = make_element("http://ex.org/a", "http://ex.org/p", "http://ex.org/b", 1000);
+        let elem = make_element(
+            "http://ex.org/a",
+            "http://ex.org/p",
+            "http://ex.org/b",
+            1000,
+        );
         let results = network.process_element(&elem);
 
         assert_eq!(results.len(), 1);
@@ -814,7 +829,10 @@ mod tests {
             total_inferred += network.process_element(&elem).len();
         }
 
-        assert!(total_inferred >= 5, "Should infer at least 5 triples, got {total_inferred}");
+        assert!(
+            total_inferred >= 5,
+            "Should infer at least 5 triples, got {total_inferred}"
+        );
         assert!(network.working_memory().size() > 0);
     }
 

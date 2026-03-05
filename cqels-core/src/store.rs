@@ -38,11 +38,7 @@ pub trait RdfStore: Send + Sync {
     fn load_statements(&self, statements: &[Statement]) -> Result<(), String>;
 
     /// Loads statements into a named graph.
-    fn load_named_graph(
-        &self,
-        graph_uri: &str,
-        statements: &[Statement],
-    ) -> Result<(), String>;
+    fn load_named_graph(&self, graph_uri: &str, statements: &[Statement]) -> Result<(), String>;
 }
 
 /// An RDF store backed by oxigraph's in-memory store.
@@ -84,8 +80,9 @@ impl RdfStore for OxigraphRdfStore {
 
     fn load_statements(&self, statements: &[Statement]) -> Result<(), String> {
         for stmt in statements {
-            let quad: oxrdf::Quad =
-                stmt.try_into().map_err(|e: cqels_model::CqelsError| e.to_string())?;
+            let quad: oxrdf::Quad = stmt
+                .try_into()
+                .map_err(|e: cqels_model::CqelsError| e.to_string())?;
             self.store
                 .insert(QuadRef::from(&quad))
                 .map_err(|e| e.to_string())?;
@@ -93,16 +90,12 @@ impl RdfStore for OxigraphRdfStore {
         Ok(())
     }
 
-    fn load_named_graph(
-        &self,
-        graph_uri: &str,
-        statements: &[Statement],
-    ) -> Result<(), String> {
-        let graph_node =
-            oxrdf::NamedNode::new(graph_uri).map_err(|e| e.to_string())?;
+    fn load_named_graph(&self, graph_uri: &str, statements: &[Statement]) -> Result<(), String> {
+        let graph_node = oxrdf::NamedNode::new(graph_uri).map_err(|e| e.to_string())?;
         for stmt in statements {
-            let quad: oxrdf::Quad =
-                stmt.try_into().map_err(|e: cqels_model::CqelsError| e.to_string())?;
+            let quad: oxrdf::Quad = stmt
+                .try_into()
+                .map_err(|e: cqels_model::CqelsError| e.to_string())?;
             // Override the graph name with the specified named graph
             let new_quad = oxrdf::Quad::new(
                 quad.subject,

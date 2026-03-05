@@ -121,7 +121,8 @@ fn parse_additive(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> 
     }
 
     let mut iter = children.into_iter();
-    let first = iter.next()
+    let first = iter
+        .next()
         .ok_or_else(|| ParseError::Syntax("missing additive operand".into()))?;
     let mut result = parse_multiplicative(first)?;
 
@@ -162,7 +163,8 @@ fn parse_multiplicative(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expres
     }
 
     let mut iter = children.into_iter();
-    let first = iter.next()
+    let first = iter
+        .next()
         .ok_or_else(|| ParseError::Syntax("missing multiplicative operand".into()))?;
     let mut result = parse_unary(first)?;
 
@@ -206,7 +208,9 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
 
     let first_text = children[0].as_str();
     if first_text == "!" && children.len() > 1 {
-        let operand_pair = children.into_iter().last()
+        let operand_pair = children
+            .into_iter()
+            .last()
             .ok_or_else(|| ParseError::Syntax("missing NOT operand".into()))?;
         let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
@@ -215,7 +219,9 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         });
     }
     if first_text == "-" && children.len() > 1 {
-        let operand_pair = children.into_iter().last()
+        let operand_pair = children
+            .into_iter()
+            .last()
             .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
         let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
@@ -224,7 +230,9 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         });
     }
     if first_text == "+" && children.len() > 1 {
-        let operand_pair = children.into_iter().last()
+        let operand_pair = children
+            .into_iter()
+            .last()
             .ok_or_else(|| ParseError::Syntax("missing unary plus operand".into()))?;
         let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
@@ -234,7 +242,9 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     }
 
     if text.starts_with('!') && children.len() == 1 {
-        let operand_pair = children.into_iter().next()
+        let operand_pair = children
+            .into_iter()
+            .next()
             .ok_or_else(|| ParseError::Syntax("missing NOT operand".into()))?;
         let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
@@ -243,7 +253,9 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         });
     }
     if text.starts_with('-') && children.len() == 1 {
-        let operand_pair = children.into_iter().next()
+        let operand_pair = children
+            .into_iter()
+            .next()
             .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
         let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
@@ -252,7 +264,9 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         });
     }
 
-    let first = children.into_iter().next()
+    let first = children
+        .into_iter()
+        .next()
         .ok_or_else(|| ParseError::Syntax("missing unary operand".into()))?;
     parse_primary(first)
 }
@@ -437,12 +451,8 @@ fn parse_aggregate(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression>
 
     let inner = pair.into_inner().next();
     let argument = match inner {
-        Some(p) if p.as_rule() == Rule::star => {
-            Expression::Literal(Value::String("*".to_string()))
-        }
-        Some(p) if p.as_rule() == Rule::variable => {
-            Expression::Variable(p.as_str().to_string())
-        }
+        Some(p) if p.as_rule() == Rule::star => Expression::Literal(Value::String("*".to_string())),
+        Some(p) if p.as_rule() == Rule::variable => Expression::Variable(p.as_str().to_string()),
         Some(p) => Expression::Variable(p.as_str().to_string()),
         None => Expression::Literal(Value::String("*".to_string())),
     };

@@ -48,24 +48,24 @@
 //! );
 //! ```
 
-mod pattern;
-mod rule;
 mod alpha;
 mod beta;
-mod memory;
-mod production;
-mod conflict;
-mod network;
 mod config;
+mod conflict;
+mod memory;
+mod network;
+mod pattern;
+mod production;
+mod rule;
 pub mod stream_adapter;
 
-pub use pattern::{PatternTerm, TriplePattern, TripleTemplate};
-pub use rule::{Rule, RuleCondition, RuleConsequent, RuleSet};
 pub use alpha::{AlphaMatch, AlphaNetwork, AlphaNode};
 pub use beta::{BetaNetwork, BetaNode};
-pub use memory::{FactIndex, WorkingMemory};
-pub use production::Activation;
-pub use conflict::{ConflictResolution, ConflictResolver};
-pub use network::{InferredRdfStreamElement, ReteNetwork};
 pub use config::ReasoningConfig;
+pub use conflict::{ConflictResolution, ConflictResolver};
+pub use memory::{FactIndex, WorkingMemory};
+pub use network::{InferredRdfStreamElement, ReteNetwork};
+pub use pattern::{PatternTerm, TriplePattern, TripleTemplate};
+pub use production::Activation;
+pub use rule::{Rule, RuleCondition, RuleConsequent, RuleSet};
 pub use stream_adapter::ReteStreamOperator;

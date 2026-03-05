@@ -75,10 +75,7 @@ impl ContinuousQuery for CompiledCqelsQuery {
         QueryType::Sparql
     }
 
-    fn execute(
-        &self,
-        mut inputs: QueryInputs,
-    ) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
+    fn execute(&self, mut inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
         let definition = Arc::clone(&self.definition);
         let filter_expressions = Arc::clone(&self.filter_expressions);
         let bind_expressions = Arc::clone(&self.bind_expressions);
@@ -154,9 +151,7 @@ impl ContinuousQuery for CompiledCqelsQuery {
             .pattern_groups
             .iter()
             .filter_map(|pg| match pg {
-                CqelsPatternGroup::Union { left, right } => {
-                    Some((left.clone(), right.clone()))
-                }
+                CqelsPatternGroup::Union { left, right } => Some((left.clone(), right.clone())),
                 _ => None,
             })
             .collect();
@@ -245,9 +240,7 @@ impl ContinuousQuery for CompiledCqelsQuery {
                     }
                 }
                 Some(WindowType::Triples) => {
-                    let count = window_spec
-                        .and_then(|w| w.triple_count)
-                        .unwrap_or(1) as usize;
+                    let count = window_spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
                     if count == 0 {
                         input_stream
                     } else {
@@ -320,9 +313,7 @@ impl ContinuousQuery for CompiledCqelsQuery {
                             match_triple_pattern(pattern, &stmt, &prefixes_clone, timestamp)
                         {
                             combined = Some(match combined {
-                                Some(existing) => {
-                                    existing.join(&bs).unwrap_or(existing)
-                                }
+                                Some(existing) => existing.join(&bs).unwrap_or(existing),
                                 None => bs,
                             });
                         }
@@ -392,8 +383,10 @@ impl ContinuousQuery for CompiledCqelsQuery {
             // Collect all results for batch processing
             let evaluator2 = evaluator.clone();
 
-            let result_stream = with_minus.collect::<Vec<BindingSet>>().into_stream().flat_map(
-                move |elements| {
+            let result_stream = with_minus
+                .collect::<Vec<BindingSet>>()
+                .into_stream()
+                .flat_map(move |elements| {
                     let mut results = elements;
 
                     // GROUP BY + aggregates
@@ -419,16 +412,11 @@ impl ContinuousQuery for CompiledCqelsQuery {
                     }
 
                     // ORDER BY + LIMIT
-                    results = apply_order_and_limit(
-                        results,
-                        &order_by_expressions,
-                        &evaluator2,
-                        limit,
-                    );
+                    results =
+                        apply_order_and_limit(results, &order_by_expressions, &evaluator2, limit);
 
                     futures::stream::iter(results)
-                },
-            );
+                });
 
             // Project and distinct
             let projected = if select_vars.is_empty() {
@@ -504,10 +492,7 @@ impl ContinuousQuery for CompiledCypherQuery {
         QueryType::Cypher
     }
 
-    fn execute(
-        &self,
-        mut inputs: QueryInputs,
-    ) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
+    fn execute(&self, mut inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
         let definition = Arc::clone(&self.definition);
         let where_expression = Arc::clone(&self.where_expression);
         let having_expressions = Arc::clone(&self.having_expressions);
@@ -522,57 +507,57 @@ impl ContinuousQuery for CompiledCypherQuery {
 
         // Pre-compute static bindings from RDF store for Cypher static/named-graph patterns
         let rdf_store = self.rdf_store.clone();
-        let static_bindings: Vec<BindingSet> =
-            if let Some(store) = &rdf_store {
-                use crate::parser::ast::PatternSource;
-                let mut accumulated: Vec<BindingSet> = Vec::new();
+        let static_bindings: Vec<BindingSet> = if let Some(store) = &rdf_store {
+            use crate::parser::ast::PatternSource;
+            let mut accumulated: Vec<BindingSet> = Vec::new();
 
-                for pg in &definition.pattern_groups {
-                    if pg.source == PatternSource::Static || pg.source == PatternSource::Graph {
-                        // Convert Cypher patterns to triple pattern lookups via the store
-                        for cypher_pattern in &pg.patterns {
-                            // For each relationship in the pattern, query the store
-                            for rel in &cypher_pattern.relationships {
-                                let subj_var = rel.start_node.as_deref().unwrap_or("_s");
-                                let obj_var = rel.end_node.as_deref().unwrap_or("_o");
+            for pg in &definition.pattern_groups {
+                if pg.source == PatternSource::Static || pg.source == PatternSource::Graph {
+                    // Convert Cypher patterns to triple pattern lookups via the store
+                    for cypher_pattern in &pg.patterns {
+                        // For each relationship in the pattern, query the store
+                        for rel in &cypher_pattern.relationships {
+                            let subj_var = rel.start_node.as_deref().unwrap_or("_s");
+                            let obj_var = rel.end_node.as_deref().unwrap_or("_o");
 
-                                // Build a triple pattern from the relationship
-                                let predicate_str = rel.types.first()
-                                    .map(|t| format!("<{t}>"))
-                                    .unwrap_or_else(|| "?_p".to_string());
+                            // Build a triple pattern from the relationship
+                            let predicate_str = rel
+                                .types
+                                .first()
+                                .map(|t| format!("<{t}>"))
+                                .unwrap_or_else(|| "?_p".to_string());
 
-                                let triple_pattern = crate::parser::ast::TriplePattern {
-                                    subject: format!("?{subj_var}"),
-                                    predicate: predicate_str,
-                                    object: format!("?{obj_var}"),
-                                };
+                            let triple_pattern = crate::parser::ast::TriplePattern {
+                                subject: format!("?{subj_var}"),
+                                predicate: predicate_str,
+                                object: format!("?{obj_var}"),
+                            };
 
-                                let prefixes = std::collections::HashMap::new();
-                                let pattern_results = if pg.source == PatternSource::Graph {
-                                    let graph_uri = pg.source_name.as_deref().unwrap_or("");
-                                    store.query_named_graph_pattern(
-                                        graph_uri,
-                                        &triple_pattern,
-                                        &prefixes,
-                                    )
-                                } else {
-                                    store.query_pattern(&triple_pattern, &prefixes)
-                                };
+                            let prefixes = std::collections::HashMap::new();
+                            let pattern_results = if pg.source == PatternSource::Graph {
+                                let graph_uri = pg.source_name.as_deref().unwrap_or("");
+                                store.query_named_graph_pattern(
+                                    graph_uri,
+                                    &triple_pattern,
+                                    &prefixes,
+                                )
+                            } else {
+                                store.query_pattern(&triple_pattern, &prefixes)
+                            };
 
-                                if accumulated.is_empty() {
-                                    accumulated = pattern_results;
-                                } else if !pattern_results.is_empty() {
-                                    accumulated =
-                                        join_binding_sets(&accumulated, &pattern_results);
-                                }
+                            if accumulated.is_empty() {
+                                accumulated = pattern_results;
+                            } else if !pattern_results.is_empty() {
+                                accumulated = join_binding_sets(&accumulated, &pattern_results);
                             }
                         }
                     }
                 }
-                accumulated
-            } else {
-                vec![]
-            };
+            }
+            accumulated
+        } else {
+            vec![]
+        };
 
         // Take input streams — merge multiple if available
         let input_stream: Option<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> =
@@ -639,9 +624,8 @@ impl ContinuousQuery for CompiledCypherQuery {
                     }
                 }
                 Some(WindowType::Triples) => {
-                    let count = cypher_window_spec
-                        .and_then(|w| w.triple_count)
-                        .unwrap_or(1) as usize;
+                    let count =
+                        cypher_window_spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
                     if count == 0 {
                         Box::pin(input_stream.map(|elem| vec![elem]))
                     } else {
@@ -674,8 +658,7 @@ impl ContinuousQuery for CompiledCypherQuery {
                 let mut all_results: Vec<BindingSet> = Vec::new();
                 for pg in &pattern_groups {
                     for pattern in &pg.patterns {
-                        let results =
-                            match_cypher_pattern(pattern, &stmts, timestamp);
+                        let results = match_cypher_pattern(pattern, &stmts, timestamp);
                         all_results.extend(results);
                     }
                 }
@@ -723,42 +706,37 @@ impl ContinuousQuery for CompiledCypherQuery {
 
         if needs_collect {
             let evaluator4 = evaluator2.clone();
-            let result_stream =
-                with_returns
-                    .collect::<Vec<BindingSet>>()
-                    .into_stream()
-                    .flat_map(move |elements| {
-                        let mut results = elements;
+            let result_stream = with_returns
+                .collect::<Vec<BindingSet>>()
+                .into_stream()
+                .flat_map(move |elements| {
+                    let mut results = elements;
 
-                        if has_aggregates {
-                            results = apply_group_by_aggregates(
-                                results,
-                                &group_by,
-                                &aggregate_specs,
-                                &evaluator4,
-                            );
-
-                            if !having_expressions.is_empty() {
-                                results = results
-                                    .into_iter()
-                                    .filter(|bs| {
-                                        having_expressions
-                                            .iter()
-                                            .all(|h| evaluator4.evaluate_as_bool(h, bs))
-                                    })
-                                    .collect();
-                            }
-                        }
-
-                        results = apply_order_and_limit(
+                    if has_aggregates {
+                        results = apply_group_by_aggregates(
                             results,
-                            &order_by_expressions,
+                            &group_by,
+                            &aggregate_specs,
                             &evaluator4,
-                            limit,
                         );
 
-                        futures::stream::iter(results)
-                    });
+                        if !having_expressions.is_empty() {
+                            results = results
+                                .into_iter()
+                                .filter(|bs| {
+                                    having_expressions
+                                        .iter()
+                                        .all(|h| evaluator4.evaluate_as_bool(h, bs))
+                                })
+                                .collect();
+                        }
+                    }
+
+                    results =
+                        apply_order_and_limit(results, &order_by_expressions, &evaluator4, limit);
+
+                    futures::stream::iter(results)
+                });
 
             let projected: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
                 if !select_vars.is_empty() {

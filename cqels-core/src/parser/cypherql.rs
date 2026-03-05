@@ -238,7 +238,10 @@ fn parse_window_spec(pair: pest::iterators::Pair<Rule>) -> ParseResult<WindowSpe
                     return Ok(WindowSpec::slide(durations[0], durations[1]));
                 }
                 return Ok(WindowSpec::range(
-                    durations.into_iter().next().unwrap_or(Duration::from_secs(0)),
+                    durations
+                        .into_iter()
+                        .next()
+                        .unwrap_or(Duration::from_secs(0)),
                 ));
             }
             Rule::window_triples => {
@@ -392,9 +395,7 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<Pattern
     Err(ParseError::Syntax("invalid pattern group".into()))
 }
 
-fn parse_cypher_patterns(
-    pair: pest::iterators::Pair<Rule>,
-) -> ParseResult<Vec<CypherPattern>> {
+fn parse_cypher_patterns(pair: pest::iterators::Pair<Rule>) -> ParseResult<Vec<CypherPattern>> {
     let mut patterns = Vec::new();
 
     for inner in pair.into_inner() {
@@ -525,7 +526,13 @@ fn parse_relationship_pattern(
                 direction = RelDirection::Incoming;
                 for detail in inner.into_inner() {
                     if detail.as_rule() == Rule::relationship_detail {
-                        parse_rel_detail(detail, &mut variable, &mut types, &mut path_length, &mut properties)?;
+                        parse_rel_detail(
+                            detail,
+                            &mut variable,
+                            &mut types,
+                            &mut path_length,
+                            &mut properties,
+                        )?;
                     }
                 }
             }
@@ -533,7 +540,13 @@ fn parse_relationship_pattern(
                 direction = RelDirection::Outgoing;
                 for detail in inner.into_inner() {
                     if detail.as_rule() == Rule::relationship_detail {
-                        parse_rel_detail(detail, &mut variable, &mut types, &mut path_length, &mut properties)?;
+                        parse_rel_detail(
+                            detail,
+                            &mut variable,
+                            &mut types,
+                            &mut path_length,
+                            &mut properties,
+                        )?;
                     }
                 }
             }
@@ -541,7 +554,13 @@ fn parse_relationship_pattern(
                 direction = RelDirection::Undirected;
                 for detail in inner.into_inner() {
                     if detail.as_rule() == Rule::relationship_detail {
-                        parse_rel_detail(detail, &mut variable, &mut types, &mut path_length, &mut properties)?;
+                        parse_rel_detail(
+                            detail,
+                            &mut variable,
+                            &mut types,
+                            &mut path_length,
+                            &mut properties,
+                        )?;
                     }
                 }
             }
@@ -841,7 +860,10 @@ mod tests {
         "#;
 
         let result = CypherQlParser::parse(query).unwrap();
-        assert_eq!(result.streams[0].window, WindowSpec::range(Duration::from_secs(30)));
+        assert_eq!(
+            result.streams[0].window,
+            WindowSpec::range(Duration::from_secs(30))
+        );
         assert_eq!(result.pattern_groups.len(), 1);
         let group = &result.pattern_groups[0];
         assert_eq!(group.source, PatternSource::Default);
@@ -907,7 +929,10 @@ mod tests {
         let result = CypherQlParser::parse(query).unwrap();
         assert!(!result.group_by_expressions.is_empty());
         assert!(!result.order_by_conditions.is_empty());
-        assert_eq!(result.order_by_conditions[0].direction, SortDirection::Descending);
+        assert_eq!(
+            result.order_by_conditions[0].direction,
+            SortDirection::Descending
+        );
         assert_eq!(result.limit, Some(10));
     }
 
@@ -989,7 +1014,10 @@ mod tests {
         "#;
         let r1 = CypherQlParser::parse(q1).unwrap();
         assert_eq!(r1.order_by_conditions.len(), 1);
-        assert_eq!(r1.order_by_conditions[0].direction, SortDirection::Descending);
+        assert_eq!(
+            r1.order_by_conditions[0].direction,
+            SortDirection::Descending
+        );
 
         // ORDER BY with property access expression
         let q2 = r#"
@@ -1002,7 +1030,10 @@ mod tests {
         let r2 = CypherQlParser::parse(q2).unwrap();
         assert_eq!(r2.return_expressions.len(), 2);
         assert_eq!(r2.order_by_conditions.len(), 1);
-        assert_eq!(r2.order_by_conditions[0].direction, SortDirection::Descending);
+        assert_eq!(
+            r2.order_by_conditions[0].direction,
+            SortDirection::Descending
+        );
         assert_eq!(r2.limit, Some(10));
 
         // ORDER BY with multiple sort keys
@@ -1014,8 +1045,14 @@ mod tests {
         "#;
         let r3 = CypherQlParser::parse(q3).unwrap();
         assert_eq!(r3.order_by_conditions.len(), 2);
-        assert_eq!(r3.order_by_conditions[0].direction, SortDirection::Ascending);
-        assert_eq!(r3.order_by_conditions[1].direction, SortDirection::Descending);
+        assert_eq!(
+            r3.order_by_conditions[0].direction,
+            SortDirection::Ascending
+        );
+        assert_eq!(
+            r3.order_by_conditions[1].direction,
+            SortDirection::Descending
+        );
     }
 
     #[test]
@@ -1049,17 +1086,13 @@ mod tests {
 
     #[test]
     fn test_parse_error_missing_return() {
-        let result = CypherQlParser::parse(
-            "FROM STREAM s [NOW] MATCH (n:Person)"
-        );
+        let result = CypherQlParser::parse("FROM STREAM s [NOW] MATCH (n:Person)");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_error_invalid_window() {
-        let result = CypherQlParser::parse(
-            "FROM STREAM s [] MATCH (n) RETURN n"
-        );
+        let result = CypherQlParser::parse("FROM STREAM s [] MATCH (n) RETURN n");
         assert!(result.is_err());
     }
 
@@ -1175,9 +1208,18 @@ mod tests {
         "#;
         let result = CypherQlParser::parse(query).unwrap();
         assert_eq!(result.return_expressions.len(), 3);
-        assert_eq!(result.return_expressions[0].aggregate_function, Some(AggregateFunction::Count));
-        assert_eq!(result.return_expressions[1].aggregate_function, Some(AggregateFunction::Sum));
-        assert_eq!(result.return_expressions[2].aggregate_function, Some(AggregateFunction::Avg));
+        assert_eq!(
+            result.return_expressions[0].aggregate_function,
+            Some(AggregateFunction::Count)
+        );
+        assert_eq!(
+            result.return_expressions[1].aggregate_function,
+            Some(AggregateFunction::Sum)
+        );
+        assert_eq!(
+            result.return_expressions[2].aggregate_function,
+            Some(AggregateFunction::Avg)
+        );
     }
 
     #[test]
@@ -1232,6 +1274,9 @@ mod tests {
         let result = CypherQlParser::parse(query).unwrap();
         assert_eq!(result.static_graphs.len(), 1);
         assert_eq!(result.static_graphs[0].depth, Some(3));
-        assert_eq!(result.static_graphs[0].cache_duration, Some(Duration::from_secs(300)));
+        assert_eq!(
+            result.static_graphs[0].cache_duration,
+            Some(Duration::from_secs(300))
+        );
     }
 }

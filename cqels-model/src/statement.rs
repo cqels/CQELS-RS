@@ -29,12 +29,7 @@ impl Statement {
     }
 
     /// Creates a new quad (statement with named graph).
-    pub fn new_quad(
-        subject: Term,
-        predicate: IriTerm,
-        object: Term,
-        graph: IriTerm,
-    ) -> Self {
+    pub fn new_quad(subject: Term, predicate: IriTerm, object: Term, graph: IriTerm) -> Self {
         Self {
             subject,
             predicate,
@@ -91,13 +86,16 @@ impl TryFrom<&Statement> for oxrdf::Quad {
     fn try_from(stmt: &Statement) -> Result<Self, Self::Error> {
         let subject = match &stmt.subject {
             Term::Iri(iri) => {
-                let nn = oxrdf::NamedNode::new(iri.as_str())
-                    .map_err(|e| CqelsError::InvalidTerm { detail: e.to_string() })?;
+                let nn =
+                    oxrdf::NamedNode::new(iri.as_str()).map_err(|e| CqelsError::InvalidTerm {
+                        detail: e.to_string(),
+                    })?;
                 oxrdf::Subject::NamedNode(nn)
             }
             Term::BlankNode(bn) => {
-                let b = oxrdf::BlankNode::new(bn.id())
-                    .map_err(|e| CqelsError::InvalidTerm { detail: e.to_string() })?;
+                let b = oxrdf::BlankNode::new(bn.id()).map_err(|e| CqelsError::InvalidTerm {
+                    detail: e.to_string(),
+                })?;
                 oxrdf::Subject::BlankNode(b)
             }
             Term::Literal(_) => {
@@ -107,17 +105,25 @@ impl TryFrom<&Statement> for oxrdf::Quad {
             }
         };
 
-        let predicate = oxrdf::NamedNode::new(stmt.predicate.as_str())
-            .map_err(|e| CqelsError::InvalidTerm { detail: e.to_string() })?;
+        let predicate = oxrdf::NamedNode::new(stmt.predicate.as_str()).map_err(|e| {
+            CqelsError::InvalidTerm {
+                detail: e.to_string(),
+            }
+        })?;
 
-        let object: oxrdf::Term = (&stmt.object)
-            .try_into()
-            .map_err(|e: CqelsError| CqelsError::InvalidTerm { detail: e.to_string() })?;
+        let object: oxrdf::Term =
+            (&stmt.object)
+                .try_into()
+                .map_err(|e: CqelsError| CqelsError::InvalidTerm {
+                    detail: e.to_string(),
+                })?;
 
         let graph_name = match &stmt.graph {
             Some(g) => {
-                let nn = oxrdf::NamedNode::new(g.as_str())
-                    .map_err(|e| CqelsError::InvalidTerm { detail: e.to_string() })?;
+                let nn =
+                    oxrdf::NamedNode::new(g.as_str()).map_err(|e| CqelsError::InvalidTerm {
+                        detail: e.to_string(),
+                    })?;
                 oxrdf::GraphName::NamedNode(nn)
             }
             None => oxrdf::GraphName::DefaultGraph,

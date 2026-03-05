@@ -813,10 +813,7 @@ mod tests {
 
         let processor = NfaPatternProcessor::new(pattern);
 
-        let events = vec![
-            Event::new("A", 1.0, 100),
-            Event::new("B", 2.0, 200),
-        ];
+        let events = vec![Event::new("A", 1.0, 100), Event::new("B", 2.0, 200)];
 
         let stream = Box::pin(futures::stream::iter(events));
         let matches: Vec<_> = processor.process(stream).collect().await;
@@ -881,10 +878,7 @@ mod tests {
 
         let processor = NfaPatternProcessor::new(pattern);
 
-        let events = vec![
-            Event::new("A", 1.0, 100),
-            Event::new("C", 3.0, 200),
-        ];
+        let events = vec![Event::new("A", 1.0, 100), Event::new("C", 3.0, 200)];
 
         let stream = Box::pin(futures::stream::iter(events));
         let matches: Vec<_> = processor.process(stream).collect().await;
@@ -926,10 +920,7 @@ mod tests {
 
         let processor = NfaPatternProcessor::new(pattern);
 
-        let events = vec![
-            Event::new("A", 1.0, 100),
-            Event::new("B", 2.0, 700),
-        ];
+        let events = vec![Event::new("A", 1.0, 100), Event::new("B", 2.0, 700)];
 
         let stream = Box::pin(futures::stream::iter(events));
         let matches: Vec<_> = processor.process(stream).collect().await;
@@ -947,10 +938,7 @@ mod tests {
 
         let processor = NfaPatternProcessor::new(pattern);
 
-        let events = vec![
-            Event::new("A", 1.0, 100),
-            Event::new("B", 2.0, 400),
-        ];
+        let events = vec![Event::new("A", 1.0, 100), Event::new("B", 2.0, 400)];
 
         let stream = Box::pin(futures::stream::iter(events));
         let matches: Vec<_> = processor.process(stream).collect().await;
@@ -1011,9 +999,7 @@ mod tests {
             .followed_by("end")
             .where_cond(|e| e.name == "B")
             .where_context(|event, prev| {
-                prev.first()
-                    .map(|a| event.value > a.value)
-                    .unwrap_or(false)
+                prev.first().map(|a| event.value > a.value).unwrap_or(false)
             });
 
         let processor = NfaPatternProcessor::new(pattern);
@@ -1062,10 +1048,7 @@ mod tests {
 
         let processor = NfaPatternProcessor::new(pattern);
 
-        let events = vec![
-            Event::new("A", 1.0, 100),
-            Event::new("B", 2.0, 500),
-        ];
+        let events = vec![Event::new("A", 1.0, 100), Event::new("B", 2.0, 500)];
 
         let stream = Box::pin(futures::stream::iter(events));
         let matches: Vec<_> = processor.process(stream).collect().await;
@@ -1079,8 +1062,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_event_stream() {
-        let pattern = Pattern::<Event>::begin("start")
-            .where_cond(|e| e.name == "A");
+        let pattern = Pattern::<Event>::begin("start").where_cond(|e| e.name == "A");
 
         let processor = NfaPatternProcessor::new(pattern);
         let stream = Box::pin(futures::stream::iter(Vec::<Event>::new()));
@@ -1090,8 +1072,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_matching_events() {
-        let pattern = Pattern::<Event>::begin("start")
-            .where_cond(|e| e.name == "X");
+        let pattern = Pattern::<Event>::begin("start").where_cond(|e| e.name == "X");
 
         let processor = NfaPatternProcessor::new(pattern);
         let events = vec![
@@ -1107,8 +1088,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_event_pattern() {
-        let pattern = Pattern::<Event>::begin("only")
-            .where_cond(|e| e.name == "A");
+        let pattern = Pattern::<Event>::begin("only").where_cond(|e| e.name == "A");
 
         let processor = NfaPatternProcessor::new(pattern);
         let events = vec![
@@ -1175,15 +1155,13 @@ mod tests {
             .followed_by("end")
             .where_cond(|e| e.name == "A")
             .where_context(|event, prev| {
-                prev.last()
-                    .map(|p| event.value > p.value)
-                    .unwrap_or(false)
+                prev.last().map(|p| event.value > p.value).unwrap_or(false)
             });
 
         let processor = NfaPatternProcessor::new(pattern);
         let events = vec![
             Event::new("A", 10.0, 100),
-            Event::new("A", 5.0, 200),  // starts new match from (10->5 rejected) but also starts partial
+            Event::new("A", 5.0, 200), // starts new match from (10->5 rejected) but also starts partial
             Event::new("A", 20.0, 300), // (10->20 passes, 5->20 passes) = 2 matches
         ];
 
@@ -1206,10 +1184,7 @@ mod tests {
         let processor = NfaPatternProcessor::new(pattern);
 
         // Exactly at boundary (diff = 100ms)
-        let events = vec![
-            Event::new("A", 1.0, 100),
-            Event::new("B", 2.0, 200),
-        ];
+        let events = vec![Event::new("A", 1.0, 100), Event::new("B", 2.0, 200)];
 
         let stream = Box::pin(futures::stream::iter(events));
         let matches: Vec<_> = processor.process(stream).collect().await;

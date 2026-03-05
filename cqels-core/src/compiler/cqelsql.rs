@@ -9,9 +9,7 @@ use std::sync::Arc;
 use crate::expression::ast::Expression;
 use crate::expression::evaluator::ExpressionEvaluator;
 use crate::expression::parser::ExpressionParser;
-use crate::parser::ast::{
-    CqelsPatternGroup, CqelsQueryDefinition, SelectElement,
-};
+use crate::parser::ast::{CqelsPatternGroup, CqelsQueryDefinition, SelectElement};
 use crate::parser::ParseResult;
 use crate::store::RdfStore;
 
@@ -262,7 +260,8 @@ mod tests {
     #[test]
     fn test_compile_with_prefixes() {
         let mut def = make_basic_definition();
-        def.prefixes.insert("ex".to_string(), "http://example.org/".to_string());
+        def.prefixes
+            .insert("ex".to_string(), "http://example.org/".to_string());
 
         let result = CqelsQueryCompiler::compile("...", def);
         assert!(result.is_ok());

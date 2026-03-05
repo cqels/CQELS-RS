@@ -34,10 +34,7 @@ impl FactIndex {
     }
 
     pub fn contains_key(&self, key: &Term) -> bool {
-        self.index
-            .get(key)
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
+        self.index.get(key).map(|s| !s.is_empty()).unwrap_or(false)
     }
 
     pub fn size(&self) -> usize {
@@ -140,28 +137,19 @@ impl WorkingMemory {
         // Choose the most selective index based on which positions are constants
         let candidates = if pattern.has_constant_subject() {
             if let crate::pattern::PatternTerm::Constant(ref term) = pattern.subject {
-                self.subject_index
-                    .get(term)
-                    .cloned()
-                    .unwrap_or_default()
+                self.subject_index.get(term).cloned().unwrap_or_default()
             } else {
                 self.all_facts_set()
             }
         } else if pattern.has_constant_predicate() {
             if let crate::pattern::PatternTerm::Constant(ref term) = pattern.predicate {
-                self.predicate_index
-                    .get(term)
-                    .cloned()
-                    .unwrap_or_default()
+                self.predicate_index.get(term).cloned().unwrap_or_default()
             } else {
                 self.all_facts_set()
             }
         } else if pattern.has_constant_object() {
             if let crate::pattern::PatternTerm::Constant(ref term) = pattern.object {
-                self.object_index
-                    .get(term)
-                    .cloned()
-                    .unwrap_or_default()
+                self.object_index.get(term).cloned().unwrap_or_default()
             } else {
                 self.all_facts_set()
             }
@@ -256,8 +244,16 @@ mod tests {
     #[test]
     fn test_working_memory_add_and_retrieve() {
         let mut wm = WorkingMemory::new();
-        let s1 = stmt("http://ex.org/alice", "http://ex.org/type", "http://ex.org/Person");
-        let s2 = stmt("http://ex.org/bob", "http://ex.org/type", "http://ex.org/Person");
+        let s1 = stmt(
+            "http://ex.org/alice",
+            "http://ex.org/type",
+            "http://ex.org/Person",
+        );
+        let s2 = stmt(
+            "http://ex.org/bob",
+            "http://ex.org/type",
+            "http://ex.org/Person",
+        );
 
         wm.add_fact(s1.clone(), 1000);
         wm.add_fact(s2.clone(), 2000);
@@ -290,15 +286,27 @@ mod tests {
     fn test_working_memory_pattern_query() {
         let mut wm = WorkingMemory::new();
         wm.add_fact(
-            stmt("http://ex.org/alice", "http://ex.org/type", "http://ex.org/Person"),
+            stmt(
+                "http://ex.org/alice",
+                "http://ex.org/type",
+                "http://ex.org/Person",
+            ),
             1000,
         );
         wm.add_fact(
-            stmt("http://ex.org/bob", "http://ex.org/type", "http://ex.org/Person"),
+            stmt(
+                "http://ex.org/bob",
+                "http://ex.org/type",
+                "http://ex.org/Person",
+            ),
             2000,
         );
         wm.add_fact(
-            stmt("http://ex.org/alice", "http://ex.org/knows", "http://ex.org/bob"),
+            stmt(
+                "http://ex.org/alice",
+                "http://ex.org/knows",
+                "http://ex.org/bob",
+            ),
             3000,
         );
 

@@ -3,10 +3,10 @@ use std::fmt;
 
 use cqels_model::{Statement, Term};
 
+use crate::alpha::AlphaNetwork;
 use crate::alpha::AlphaNode;
 use crate::production::Activation;
 use crate::rule::RuleSet;
-use crate::alpha::AlphaNetwork;
 
 /// A beta node joins bindings from two alpha nodes using shared variables.
 ///
@@ -38,10 +38,7 @@ impl BetaNode {
     pub fn add_left(&mut self, bindings: HashMap<String, Term>) -> Vec<HashMap<String, Term>> {
         let key = self.build_join_key(&bindings);
         let results = self.join_with_right(&bindings);
-        self.left_memory
-            .entry(key)
-            .or_default()
-            .push(bindings);
+        self.left_memory.entry(key).or_default().push(bindings);
         results
     }
 
@@ -49,10 +46,7 @@ impl BetaNode {
     pub fn add_right(&mut self, bindings: HashMap<String, Term>) -> Vec<HashMap<String, Term>> {
         let key = self.build_join_key(&bindings);
         let results = self.join_with_left(&bindings);
-        self.right_memory
-            .entry(key)
-            .or_default()
-            .push(bindings);
+        self.right_memory.entry(key).or_default().push(bindings);
         results
     }
 
@@ -340,14 +334,11 @@ impl BetaNetwork {
                 // Single-pattern rule: alpha feeds directly to production
                 rule_chains.push(Vec::new());
                 if let Some(&pi) = pattern_indices.first() {
-                    alpha_to_rule_map
-                        .entry(pi)
-                        .or_default()
-                        .push(BetaEntry {
-                            rule_index,
-                            chain_position: 0,
-                            is_left: true,
-                        });
+                    alpha_to_rule_map.entry(pi).or_default().push(BetaEntry {
+                        rule_index,
+                        chain_position: 0,
+                        is_left: true,
+                    });
                 }
                 continue;
             }
@@ -355,7 +346,11 @@ impl BetaNetwork {
             // Multi-pattern rule: create beta chain
             let mut chain = Vec::new();
             for i in 1..pattern_indices.len() {
-                let left_idx = if i == 1 { pattern_indices[0] } else { usize::MAX };
+                let left_idx = if i == 1 {
+                    pattern_indices[0]
+                } else {
+                    usize::MAX
+                };
                 let right_idx = pattern_indices[i];
 
                 // Find shared variables between left patterns and the new right pattern
@@ -386,14 +381,11 @@ impl BetaNetwork {
 
             // Map subsequent patterns' alpha nodes to their beta nodes (right side)
             for (i, &pi) in pattern_indices.iter().enumerate().skip(1) {
-                alpha_to_rule_map
-                    .entry(pi)
-                    .or_default()
-                    .push(BetaEntry {
-                        rule_index,
-                        chain_position: i - 1,
-                        is_left: false,
-                    });
+                alpha_to_rule_map.entry(pi).or_default().push(BetaEntry {
+                    rule_index,
+                    chain_position: i - 1,
+                    is_left: false,
+                });
             }
 
             rule_chains.push(chain);
