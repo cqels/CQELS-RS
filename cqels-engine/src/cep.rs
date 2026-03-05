@@ -114,6 +114,7 @@ impl<T: Clone + Timestamped> PatternMatch<T> {
 /// between two pattern states cause the partial match to be discarded,
 /// skipped, or forked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Contiguity {
     /// **Strict**: No intervening events are allowed between matched states.
     /// If the very next event does not match, the partial match is dropped.

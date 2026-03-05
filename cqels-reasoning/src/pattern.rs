@@ -6,6 +6,7 @@ use cqels_model::term::IriTerm;
 
 /// A term in a triple pattern — either a variable or a constant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PatternTerm {
     Variable(String),
     Constant(Term),

@@ -129,15 +129,28 @@ impl ReasoningConfigBuilder {
         self
     }
 
-    pub fn build(self) -> ReasoningConfig {
-        ReasoningConfig {
-            rule_set: self.rule_set.expect("rule_set is required"),
+    /// Builds the `ReasoningConfig`, returning an error if required fields are missing.
+    pub fn try_build(self) -> Result<ReasoningConfig, cqels_model::CqelsError> {
+        let rule_set = self.rule_set.ok_or_else(|| {
+            cqels_model::CqelsError::Evaluation {
+                message: "rule_set is required".to_string(),
+            }
+        })?;
+        Ok(ReasoningConfig {
+            rule_set,
             default_window: self.default_window,
             enable_recursive_inference: self.enable_recursive_inference,
             max_recursion_depth: self.max_recursion_depth,
             conflict_resolution: self.conflict_resolution,
             emit_input_triples: self.emit_input_triples,
             track_provenance: self.track_provenance,
-        }
+        })
+    }
+
+    /// Builds the `ReasoningConfig`, panicking if required fields are missing.
+    ///
+    /// Prefer [`try_build()`](Self::try_build) for fallible construction.
+    pub fn build(self) -> ReasoningConfig {
+        self.try_build().expect("rule_set is required")
     }
 }

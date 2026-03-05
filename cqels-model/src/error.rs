@@ -8,6 +8,7 @@ use thiserror::Error;
 /// bare `String`, making it easier to inspect errors programmatically
 /// and produce high-quality diagnostics.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CqelsError {
     /// A query syntax or semantic error originating from the parser.
     ///
@@ -86,6 +87,7 @@ pub type CqelsResult<T> = Result<T, CqelsError>;
 
 /// Describes the kind of parse error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseErrorKind {
     /// Grammar/syntax error (malformed input).
     Syntax,

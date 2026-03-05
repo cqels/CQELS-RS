@@ -87,6 +87,7 @@ fn main() {
                     PatternSource::Static => "STATIC",
                     PatternSource::Graph => "GRAPH",
                     PatternSource::Default => "DEFAULT",
+                    _ => "UNKNOWN",
                 };
                 println!("  Pattern group [{}]: {} patterns",
                     source_label, group.patterns.len());

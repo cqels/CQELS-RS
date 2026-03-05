@@ -608,6 +608,7 @@ pub fn value_to_bool(value: &Value) -> bool {
         Value::String(s) => !s.is_empty(),
         Value::Term(_) => true,
         Value::Null => false,
+        _ => false,
     }
 }
 

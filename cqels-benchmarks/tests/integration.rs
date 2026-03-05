@@ -87,6 +87,7 @@ fn term_as_str(t: &Term) -> &str {
         Term::Iri(iri) => iri.as_str(),
         Term::Literal(lit) => lit.value(),
         Term::BlankNode(bn) => bn.id(),
+        _ => "",
     }
 }
 

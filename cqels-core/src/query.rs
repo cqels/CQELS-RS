@@ -11,6 +11,7 @@ use crate::stream::StreamElement;
 ///
 /// Maps to Java's `QueryType` enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum QueryType {
     Sparql,
     Cypher,

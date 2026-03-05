@@ -8,6 +8,7 @@ use crate::rule::RuleSet;
 
 /// Strategy for resolving conflicts when multiple rules fire simultaneously.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConflictResolution {
     /// Higher priority rules fire first; lower priority rules are suppressed
     /// if they produce the same inferred triple.

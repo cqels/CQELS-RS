@@ -15,6 +15,7 @@ use crate::stream::Timestamped;
 ///
 /// Maps to Java's `WindowType` enum in CQELS 2.0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum WindowType {
     TumblingTime,
     SlidingTime,
@@ -107,6 +108,7 @@ impl<T: fmt::Debug> fmt::Display for WindowedBatch<T> {
 /// | `Rows(n)` | `[ROWS n]` | Count-based tumbling window |
 /// | `RowsSlide(n, s)` | `[ROWS n SLIDE s]` | Count-based sliding window |
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum WindowSpec {
     /// Process only the most recent element (NOW window).
     Now,

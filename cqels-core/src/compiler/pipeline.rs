@@ -142,6 +142,7 @@ fn term_to_value(term: &Term) -> Value {
             }
             Value::String(val.to_string())
         }
+        _ => Value::Null,
     }
 }
 
@@ -175,6 +176,7 @@ fn match_constant(resolved: &str, term: &Term) -> bool {
         Term::Iri(iri) => iri.as_str() == resolved,
         Term::Literal(lit) => lit.value() == resolved,
         Term::BlankNode(bn) => bn.id() == resolved,
+        _ => false,
     }
 }
 
@@ -826,6 +828,7 @@ fn term_to_string(term: &Term) -> String {
         Term::Iri(iri) => iri.as_str().to_string(),
         Term::BlankNode(bn) => bn.id().to_string(),
         Term::Literal(lit) => lit.value().to_string(),
+        _ => String::new(),
     }
 }
 

@@ -11,6 +11,7 @@ use crate::term::{IriTerm, LiteralTerm, Term};
 /// Maps to the various typed representations needed when evaluating
 /// SPARQL/Cypher expressions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Value {
     /// An RDF term (IRI, blank node, or literal).
     Term(Term),

@@ -27,6 +27,7 @@ use cqels_model::CqelsError;
 /// while internally using structured error data. It can be converted into
 /// [`CqelsError`] via the `From` impl for seamless error propagation.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ParseError {
     /// Grammar/syntax error in the query string.
     #[error("syntax error: {0}")]

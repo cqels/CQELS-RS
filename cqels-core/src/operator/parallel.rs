@@ -90,6 +90,7 @@ impl ParallelExecutionConfigBuilder {
 ///
 /// Maps to Java's `AggregationBackend` enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AggregationBackend {
     /// Standard aggregation — all aggregate types supported.
     Legacy,
@@ -143,6 +144,7 @@ impl Default for SwagConfig {
 
 /// Stream ordering assumption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Ordering {
     InOrder,
     OutOfOrder,
@@ -150,6 +152,7 @@ pub enum Ordering {
 
 /// FIFO window algorithm selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FifoAlgorithm {
     TwoStacks,
     TwoStacksLite,
@@ -157,12 +160,14 @@ pub enum FifoAlgorithm {
 
 /// Out-of-order algorithm selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OooAlgorithm {
     Reactive,
 }
 
 /// Parallel execution mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParallelMode {
     KeyPartitionedOnly,
     BatchOnClose,

@@ -20,6 +20,7 @@ where
 
 /// Tagged union for left/right stream elements.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum TaggedUnion<L, R> {
     Left(L),
     Right(R),

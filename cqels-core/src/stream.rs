@@ -14,6 +14,7 @@ pub trait Timestamped {
 /// Maps to Java's `StreamElement` interface. Can contain either an RDF statement
 /// or a generic payload.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum StreamElement {
     /// An RDF stream element carrying an RDF statement.
     Rdf(RdfStreamElement),
@@ -166,6 +167,7 @@ impl From<StreamRecord> for StreamElement {
 /// Maps to Java's `StreamEvent<T>` interface.
 /// Watermarks signal event-time progression and trigger window operations.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum StreamEvent<T: Clone> {
     /// A data record with a value and timestamp.
     Record {

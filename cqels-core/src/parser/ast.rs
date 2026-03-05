@@ -11,6 +11,7 @@ use std::time::Duration;
 
 /// Window type for stream sources.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WindowType {
     /// Process elements immediately without buffering.
     Now,
@@ -130,6 +131,7 @@ fn format_duration(d: Option<&Duration>) -> String {
 
 /// Sort direction for ORDER BY clauses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SortDirection {
     Ascending,
     Descending,
@@ -152,6 +154,7 @@ pub struct GraphDefinition {
 
 /// Aggregate function type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AggregateFunction {
     Count,
     Sum,
@@ -180,6 +183,7 @@ impl fmt::Display for AggregateFunction {
 
 /// Query type for CqelsQL queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CqelsQueryType {
     Select,
     Construct,
@@ -248,6 +252,7 @@ impl fmt::Display for TriplePattern {
 
 /// A pattern group in the WHERE clause.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum CqelsPatternGroup {
     /// Patterns from a named stream source.
     Stream {
@@ -313,6 +318,7 @@ impl Default for OperatorHints {
 
 /// A select element in the SELECT clause.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SelectElement {
     /// A simple variable projection.
     Variable(String),
@@ -485,6 +491,7 @@ impl CqelsQueryDefinitionBuilder {
 
 /// Query type for CypherQL queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CypherQueryType {
     Select,
     Construct,
@@ -500,6 +507,7 @@ pub struct CypherStreamDefinition {
 
 /// Pattern source context in CypherQL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PatternSource {
     Stream,
     Static,
@@ -533,6 +541,7 @@ impl fmt::Display for NodePattern {
 
 /// Direction of a relationship in a Cypher pattern.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RelDirection {
     Outgoing,
     Incoming,
@@ -622,6 +631,7 @@ impl fmt::Display for PropertyFilter {
 
 /// Filter operator for property comparisons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FilterOperator {
     Eq,
     Neq,

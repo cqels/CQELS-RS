@@ -9,6 +9,7 @@ use cqels_model::Value;
 
 /// A compiled expression tree node.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Expression {
     /// A literal constant value.
     Literal(Value),
@@ -96,6 +97,7 @@ impl fmt::Display for Expression {
 
 /// Binary operators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BinaryOp {
     // Logical
     And,
@@ -147,6 +149,7 @@ impl fmt::Display for BinaryOp {
 
 /// Unary operators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnaryOp {
     Not,
     Negate,
@@ -165,6 +168,7 @@ impl fmt::Display for UnaryOp {
 
 /// Aggregate function type used in expression AST.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AggregateExprFunction {
     Count,
     Sum,

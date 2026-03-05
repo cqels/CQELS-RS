@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Maps to RDF4J's `Value` interface hierarchy. In Rust we use a flat enum
 /// rather than a class hierarchy.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Term {
     /// An IRI (Internationalized Resource Identifier).
     Iri(IriTerm),

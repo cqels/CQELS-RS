@@ -49,3 +49,11 @@ pub mod parser;
 pub mod expression;
 pub mod compiler;
 pub mod store;
+
+// Convenience re-exports for common types.
+pub use compiler::{CompiledCqelsQuery, CompiledCypherQuery, CqelsQueryCompiler, CypherQueryCompiler};
+pub use expression::{Expression, ExpressionEvaluator};
+pub use parser::{CqelsQlParser, CypherQlParser, ParseError, ParseResult};
+pub use query::{ContinuousQuery, QueryInputs, QueryType};
+pub use store::{RdfStore, create_rdf_store};
+pub use stream::{RdfStreamElement, StreamElement, StreamRecord, Timestamped};
