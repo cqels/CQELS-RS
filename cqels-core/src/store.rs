@@ -167,7 +167,10 @@ fn query_store_pattern(
 
     let mut results = Vec::new();
 
-    for quad in store.quads_for_pattern(subj_ref, pred_ref, obj_ref, graph_ref).flatten() {
+    for quad in store
+        .quads_for_pattern(subj_ref, pred_ref, obj_ref, graph_ref)
+        .flatten()
+    {
         let stmt = Statement::from(quad);
         if let Some(bs) = match_triple_pattern(pattern, &stmt, prefixes, 0) {
             results.push(bs);

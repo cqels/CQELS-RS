@@ -1,0 +1,55 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.cargo/bin/cargo build *)",
+      "Bash(~/.cargo/bin/cargo test *)",
+      "Bash(~/.cargo/bin/cargo fmt *)",
+      "Bash(~/.cargo/bin/cargo clippy *)",
+      "Bash(~/.cargo/bin/cargo doc *)",
+      "Bash(~/.cargo/bin/cargo check *)",
+      "Bash(~/.cargo/bin/cargo bench *)",
+      "Bash(~/.cargo/bin/cargo update *)",
+      "Bash(~/.cargo/bin/cargo tree *)",
+      "Bash(RUSTDOCFLAGS*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Bash(git stash*)",
+      "Bash(gh run *)",
+      "Bash(gh pr *)",
+      "Bash(gh api *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git clean -fdx*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/danhlephuoc/code/cqels-rs/.claude/hooks/pre-commit-check.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/danhlephuoc/code/cqels-rs/.claude/hooks/auto-format.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
