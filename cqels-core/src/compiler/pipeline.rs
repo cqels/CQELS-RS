@@ -608,6 +608,7 @@ pub fn match_cypher_pattern(
 }
 
 /// Recursively matches relationship chain patterns against statements.
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 fn match_chain_recursive(
     relationships: &[crate::parser::ast::RelationshipPattern],
     rel_idx: usize,
@@ -791,7 +792,7 @@ fn extract_node_properties(
     node_map: &HashMap<String, &NodePattern>,
     result: &mut BindingSet,
 ) {
-    for (var, _node) in node_map {
+    for var in node_map.keys() {
         if let Some(node_val) = bs.get(var.as_str()) {
             // Extract a comparable string from the node value, regardless of
             // whether it's stored as Value::Term or Value::String.

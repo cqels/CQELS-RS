@@ -131,7 +131,7 @@ impl ReactiveStreamEngine {
     ///
     /// This bridges the type gap between compiled queries (which produce
     /// `BindingSet`) and the engine's stream infrastructure. The query is
-    /// tracked in the registry and can be cancelled via [`unregister_query`].
+    /// tracked in the registry and can be cancelled via [`Self::unregister_query`].
     pub async fn register_binding_query(
         &self,
         query: Box<dyn ContinuousQuery<Result = BindingSet>>,

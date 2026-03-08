@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn test_value_as_numeric() {
         assert_eq!(Value::Integer(42).as_numeric(), Some(42.0));
-        assert_eq!(Value::Float(3.14).as_numeric(), Some(3.14));
+        assert_eq!(Value::Float(3.15).as_numeric(), Some(3.15));
         assert_eq!(Value::String("hello".into()).as_numeric(), None);
         assert_eq!(Value::Boolean(true).as_numeric(), None);
         assert_eq!(Value::Null.as_numeric(), None);

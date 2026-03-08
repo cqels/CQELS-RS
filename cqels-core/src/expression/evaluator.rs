@@ -187,12 +187,12 @@ impl ExpressionEvaluator {
             BinaryOp::Div => {
                 // Division by zero → null
                 match rval.as_numeric() {
-                    Some(d) if d == 0.0 => Value::Null,
+                    Some(0.0) => Value::Null,
                     _ => eval_arithmetic(&lval, &rval, |a, b| a / b),
                 }
             }
             BinaryOp::Mod => match rval.as_numeric() {
-                Some(d) if d == 0.0 => Value::Null,
+                Some(0.0) => Value::Null,
                 _ => eval_arithmetic(&lval, &rval, |a, b| a % b),
             },
 

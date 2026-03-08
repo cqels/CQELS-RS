@@ -159,7 +159,7 @@ fn query_store_pattern(
 
     let graph_name = graph_uri
         .and_then(|uri| oxrdf::NamedNode::new(uri).ok())
-        .map(|nn| oxrdf::GraphName::NamedNode(nn));
+        .map(oxrdf::GraphName::NamedNode);
     let graph_ref: Option<GraphNameRef<'_>> = match &graph_name {
         Some(g) => Some(g.as_ref()),
         None => Some(GraphNameRef::DefaultGraph),
@@ -167,12 +167,10 @@ fn query_store_pattern(
 
     let mut results = Vec::new();
 
-    for quad_result in store.quads_for_pattern(subj_ref, pred_ref, obj_ref, graph_ref) {
-        if let Ok(quad) = quad_result {
-            let stmt = Statement::from(quad);
-            if let Some(bs) = match_triple_pattern(pattern, &stmt, prefixes, 0) {
-                results.push(bs);
-            }
+    for quad in store.quads_for_pattern(subj_ref, pred_ref, obj_ref, graph_ref).flatten() {
+        let stmt = Statement::from(quad);
+        if let Some(bs) = match_triple_pattern(pattern, &stmt, prefixes, 0) {
+            results.push(bs);
         }
     }
 

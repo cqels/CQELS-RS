@@ -400,14 +400,11 @@ impl ContinuousQuery for CompiledCqelsQuery {
 
                         // HAVING
                         if !having_expressions.is_empty() {
-                            results = results
-                                .into_iter()
-                                .filter(|bs| {
-                                    having_expressions
-                                        .iter()
-                                        .all(|h| evaluator2.evaluate_as_bool(h, bs))
-                                })
-                                .collect();
+                            results.retain(|bs| {
+                                having_expressions
+                                    .iter()
+                                    .all(|h| evaluator2.evaluate_as_bool(h, bs))
+                            });
                         }
                     }
 
@@ -684,7 +681,7 @@ impl ContinuousQuery for CompiledCypherQuery {
         let evaluator2 = evaluator.clone();
         let filtered: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
             if let Some(where_expr) = where_expression.as_ref() {
-                apply_filters(binding_stream, &[where_expr.clone()], &evaluator)
+                apply_filters(binding_stream, std::slice::from_ref(where_expr), &evaluator)
             } else {
                 binding_stream
             };
@@ -721,14 +718,11 @@ impl ContinuousQuery for CompiledCypherQuery {
                         );
 
                         if !having_expressions.is_empty() {
-                            results = results
-                                .into_iter()
-                                .filter(|bs| {
-                                    having_expressions
-                                        .iter()
-                                        .all(|h| evaluator4.evaluate_as_bool(h, bs))
-                                })
-                                .collect();
+                            results.retain(|bs| {
+                                having_expressions
+                                    .iter()
+                                    .all(|h| evaluator4.evaluate_as_bool(h, bs))
+                            });
                         }
                     }
 

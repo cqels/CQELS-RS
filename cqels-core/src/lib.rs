@@ -7,8 +7,8 @@
 //!
 //! # Modules
 //!
-//! - [`stream`] -- Stream element types ([`StreamElement`](stream::StreamElement),
-//!   [`RdfStreamElement`](stream::RdfStreamElement)) and the [`Timestamped`](stream::Timestamped)
+//! - [`stream`] -- Stream element types ([`StreamElement`],
+//!   [`RdfStreamElement`]) and the [`Timestamped`]
 //!   trait that all streamable items must implement.
 //! - [`window`] -- Window operators for partitioning unbounded streams into
 //!   finite batches: [`TumblingWindow`](window::TumblingWindow),
@@ -25,7 +25,7 @@
 //!
 //! The processing pipeline follows a dataflow model:
 //!
-//! 1. **Ingest** -- Raw events arrive as [`StreamElement`](stream::StreamElement) values.
+//! 1. **Ingest** -- Raw events arrive as [`StreamElement`] values.
 //! 2. **Window** -- The [`Window`](window::Window) trait partitions the stream into
 //!    [`WindowedBatch`](window::WindowedBatch) segments.
 //! 3. **Evaluate** -- Operators (join, filter, aggregate) process each batch.

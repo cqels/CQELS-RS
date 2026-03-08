@@ -35,9 +35,8 @@ pub(crate) fn parse(input: &str) -> ParseResult<Expression> {
 fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     let inner = pair.into_inner();
     for child in inner {
-        match child.as_rule() {
-            Rule::conditional_or_expr => return parse_or(child),
-            _ => {}
+        if child.as_rule() == Rule::conditional_or_expr {
+            return parse_or(child);
         }
     }
     Err(ParseError::Syntax("invalid expression".into()))

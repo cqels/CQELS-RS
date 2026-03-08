@@ -307,7 +307,7 @@ fn extract_datetime_part(args: &[Value], part_index: usize) -> Value {
             .map(Value::Integer)
             .unwrap_or(Value::Null),
         // Hours, Minutes, Seconds from time part
-        3 | 4 | 5 => {
+        3..=5 => {
             let time_str = match time_part {
                 Some(t) => t,
                 None => return Value::Null,
@@ -648,8 +648,8 @@ mod tests {
             Value::Integer(5)
         );
         assert_eq!(
-            call_builtin("abs", &[Value::Float(-3.14)]),
-            Value::Float(3.14)
+            call_builtin("abs", &[Value::Float(-3.15)]),
+            Value::Float(3.15)
         );
         assert_eq!(call_builtin("ABS", &[Value::Null]), Value::Null);
     }
