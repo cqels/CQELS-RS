@@ -3,7 +3,7 @@
 ## Environment
 
 - Cargo path: `~/.cargo/bin/cargo` (not in default PATH)
-- MSRV: Rust 1.75 (see `rust-version` in workspace Cargo.toml)
+- MSRV: Rust 1.80 (see `rust-version` in workspace Cargo.toml)
 - Workspace members: cqels-model, cqels-core, cqels-engine, cqels-reasoning, cqels-benchmarks
 
 ## Build & Test Commands
@@ -13,7 +13,7 @@
 - Format: `~/.cargo/bin/cargo fmt --all`
 - Clippy: `~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings`
 - Docs: `RUSTDOCFLAGS="-Dwarnings" ~/.cargo/bin/cargo doc --workspace --no-deps`
-- MSRV check: `~/.cargo/bin/cargo check --workspace --exclude cqels-benchmarks --locked`
+- MSRV check: `~/.cargo/bin/cargo check --workspace --exclude cqels-benchmarks --locked` (Rust 1.80)
 
 ## Before Every Commit
 
@@ -48,4 +48,4 @@ Config: `.github/workflows/ci.yml`
 
 - Cargo.lock is committed to git (not gitignored)
 - After adding/updating deps, always check MSRV compatibility
-- Known pins for MSRV 1.75: rayon 1.10.0, rayon-core 1.12.1, half 2.4.1, pest* 2.7.15
+- Known pins for MSRV 1.80: pest* 2.7.15 (2.8+ requires Rust 1.83)
