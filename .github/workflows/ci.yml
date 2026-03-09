@@ -62,11 +62,11 @@ jobs:
           RUSTDOCFLAGS: -Dwarnings
 
   msrv:
-    name: MSRV (1.80)
+    name: MSRV (1.83)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.80
+      - uses: dtolnay/rust-toolchain@1.83
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --exclude cqels-benchmarks --locked
 

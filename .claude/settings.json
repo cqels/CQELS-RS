@@ -1,15 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(~/.cargo/bin/cargo build *)",
-      "Bash(~/.cargo/bin/cargo test *)",
-      "Bash(~/.cargo/bin/cargo fmt *)",
-      "Bash(~/.cargo/bin/cargo clippy *)",
-      "Bash(~/.cargo/bin/cargo doc *)",
-      "Bash(~/.cargo/bin/cargo check *)",
-      "Bash(~/.cargo/bin/cargo bench *)",
-      "Bash(~/.cargo/bin/cargo update *)",
-      "Bash(~/.cargo/bin/cargo tree *)",
+      "Bash(~/.cargo/bin/cargo *)",
       "Bash(RUSTDOCFLAGS*)",
       "Bash(git add *)",
       "Bash(git commit *)",
@@ -19,27 +11,20 @@
       "Bash(git branch*)",
       "Bash(git checkout*)",
       "Bash(git stash*)",
-      "Bash(gh run *)",
+      "Bash(git push *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
       "Bash(gh pr *)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "Bash(chmod *)"
     ],
     "deny": [
       "Bash(rm -rf *)",
-      "Bash(git clean -fdx*)"
+      "Bash(git clean -fdx*)",
+      "Bash(gh run watch *)"
     ]
   },
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/Users/danhlephuoc/code/cqels-rs/.claude/hooks/pre-commit-check.sh"
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
