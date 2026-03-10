@@ -20,7 +20,8 @@
 //!   executable query plans.
 //! - [`operator`] -- Stream operators including aggregation, filtering, joins,
 //!   ranking, and the SWAG (Sliding-Window AGgregation) algorithm for efficient
-//!   incremental aggregation.
+//!   incremental aggregation via
+//!   [`TwoStacksLiteWindow`](operator::swag::TwoStacksLiteWindow).
 //!
 //! # Architecture
 //!

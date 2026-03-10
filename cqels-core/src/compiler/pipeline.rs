@@ -920,61 +920,86 @@ pub fn apply_group_by_aggregates(
     results
 }
 
-/// Computes a single aggregate value.
-fn compute_aggregate(
-    function: AggregateExprFunction,
-    values: &[Value],
-    separator: Option<&str>,
-) -> Value {
+/// Returns `true` if all aggregate functions are SWAG-compatible.
+pub fn is_swag_compatible(aggregates: &[PipelineAggregateSpec]) -> bool {
+    aggregates.iter().all(|a| {
+        matches!(
+            a.function,
+            AggregateExprFunction::Count
+                | AggregateExprFunction::Sum
+                | AggregateExprFunction::Avg
+                | AggregateExprFunction::Min
+                | AggregateExprFunction::Max
+        )
+    })
+}
+
+/// Extracts an `f64` from a [`Value`], returning `0.0` for non-numeric values.
+fn value_as_f64(v: &Value) -> f64 {
+    v.as_numeric().unwrap_or(0.0)
+}
+
+/// Computes an aggregate using the SWAG (Sliding Window AGgregation) backend.
+///
+/// Supports COUNT, SUM, AVG, MIN, and MAX via `TwoStacksLiteWindow`.
+fn compute_aggregate_swag(function: AggregateExprFunction, values: &[Value]) -> Value {
+    use crate::operator::swag::*;
+
     match function {
-        AggregateExprFunction::Count => Value::Integer(values.len() as i64),
+        AggregateExprFunction::Count => {
+            let op = SwagCountOp::<Value>::new();
+            let mut window = TwoStacksLiteWindow::new(op);
+            for v in values {
+                window.push(v);
+            }
+            Value::Integer(window.query())
+        }
         AggregateExprFunction::Sum => {
+            if values.is_empty() {
+                return Value::Integer(0);
+            }
             let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+            let op = SwagSumOp::new(value_as_f64);
+            let mut window = TwoStacksLiteWindow::new(op);
+            for v in values {
+                window.push(v);
+            }
+            let sum = window.query();
             if all_integers {
-                // Direct integer arithmetic to avoid f64 precision loss
-                let sum: i64 = values
-                    .iter()
-                    .filter_map(|v| match v {
-                        Value::Integer(i) => Some(*i),
-                        _ => None,
-                    })
-                    .sum();
-                Value::Integer(sum)
+                Value::Integer(sum as i64)
             } else {
-                let sum: f64 = values.iter().filter_map(|v| v.as_numeric()).sum();
                 Value::Float(sum)
             }
         }
         AggregateExprFunction::Avg => {
-            let nums: Vec<f64> = values.iter().filter_map(|v| v.as_numeric()).collect();
-            if nums.is_empty() {
-                Value::Null
-            } else {
-                Value::Float(nums.iter().sum::<f64>() / nums.len() as f64)
+            if values.is_empty() {
+                return Value::Null;
             }
+            let op = SwagMeanOp::new(value_as_f64);
+            let mut window = TwoStacksLiteWindow::new(op);
+            for v in values {
+                window.push(v);
+            }
+            Value::Float(window.query())
         }
         AggregateExprFunction::Min => {
             if values.is_empty() {
                 return Value::Null;
             }
             let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+            let op = SwagMinOp::new(value_as_f64);
+            let mut window = TwoStacksLiteWindow::new(op);
+            for v in values {
+                window.push(v);
+            }
+            let min = window.query();
+            if min == f64::INFINITY {
+                return Value::Null;
+            }
             if all_integers {
-                values
-                    .iter()
-                    .filter_map(|v| match v {
-                        Value::Integer(i) => Some(*i),
-                        _ => None,
-                    })
-                    .min()
-                    .map(Value::Integer)
-                    .unwrap_or(Value::Null)
+                Value::Integer(min as i64)
             } else {
-                values
-                    .iter()
-                    .filter_map(|v| v.as_numeric())
-                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(Value::Float)
-                    .unwrap_or(Value::Null)
+                Value::Float(min)
             }
         }
         AggregateExprFunction::Max => {
@@ -982,27 +1007,49 @@ fn compute_aggregate(
                 return Value::Null;
             }
             let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+            let op = SwagMaxOp::new(value_as_f64);
+            let mut window = TwoStacksLiteWindow::new(op);
+            for v in values {
+                window.push(v);
+            }
+            let max = window.query();
+            if max == f64::NEG_INFINITY {
+                return Value::Null;
+            }
             if all_integers {
-                values
-                    .iter()
-                    .filter_map(|v| match v {
-                        Value::Integer(i) => Some(*i),
-                        _ => None,
-                    })
-                    .max()
-                    .map(Value::Integer)
-                    .unwrap_or(Value::Null)
+                Value::Integer(max as i64)
             } else {
-                values
-                    .iter()
-                    .filter_map(|v| v.as_numeric())
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(Value::Float)
-                    .unwrap_or(Value::Null)
+                Value::Float(max)
             }
         }
+        _ => unreachable!("non-SWAG function passed to compute_aggregate_swag"),
+    }
+}
+
+/// Computes a single aggregate value.
+///
+/// SWAG-compatible functions (COUNT, SUM, AVG, MIN, MAX) are routed through
+/// [`compute_aggregate_swag`] which uses the `TwoStacksLiteWindow` for
+/// amortized O(1) sliding-window aggregation. Collect and GroupConcat use
+/// the legacy path.
+fn compute_aggregate(
+    function: AggregateExprFunction,
+    values: &[Value],
+    separator: Option<&str>,
+) -> Value {
+    // Use SWAG for compatible functions
+    match function {
+        AggregateExprFunction::Count
+        | AggregateExprFunction::Sum
+        | AggregateExprFunction::Avg
+        | AggregateExprFunction::Min
+        | AggregateExprFunction::Max => return compute_aggregate_swag(function, values),
+        _ => {}
+    }
+
+    // Legacy path for Collect and GroupConcat
+    match function {
         AggregateExprFunction::Collect => {
-            // COLLECT returns a string representation of all values
             let strs: Vec<String> = values.iter().map(|v| v.to_string()).collect();
             Value::String(format!("[{}]", strs.join(", ")))
         }
@@ -1017,6 +1064,7 @@ fn compute_aggregate(
                 .collect();
             Value::String(strs.join(sep))
         }
+        _ => unreachable!(),
     }
 }
 
@@ -1752,5 +1800,144 @@ mod tests {
         bs.insert("n.location", Value::String("LA".into()));
 
         assert!(!check_node_properties(&node, &bs));
+    }
+
+    // ── Phase 13: SWAG equivalence tests ──────────────────────────────────
+
+    #[test]
+    fn test_swag_count_equivalence() {
+        let values = vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Count, &values, None),
+            Value::Integer(3)
+        );
+    }
+
+    #[test]
+    fn test_swag_sum_equivalence() {
+        // Integer sum
+        let ints = vec![Value::Integer(10), Value::Integer(20), Value::Integer(30)];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Sum, &ints, None),
+            Value::Integer(60)
+        );
+        // Float sum
+        let floats = vec![Value::Float(1.5), Value::Float(2.5), Value::Float(3.0)];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Sum, &floats, None),
+            Value::Float(7.0)
+        );
+    }
+
+    #[test]
+    fn test_swag_avg_equivalence() {
+        let values = vec![Value::Float(10.0), Value::Float(20.0), Value::Float(30.0)];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Avg, &values, None),
+            Value::Float(20.0)
+        );
+    }
+
+    #[test]
+    fn test_swag_min_max_equivalence() {
+        let ints = vec![Value::Integer(5), Value::Integer(1), Value::Integer(9)];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Min, &ints, None),
+            Value::Integer(1)
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Max, &ints, None),
+            Value::Integer(9)
+        );
+
+        let floats = vec![Value::Float(3.5), Value::Float(1.25), Value::Float(2.75)];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Min, &floats, None),
+            Value::Float(1.25)
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Max, &floats, None),
+            Value::Float(3.5)
+        );
+    }
+
+    #[test]
+    fn test_swag_empty_values() {
+        let empty: Vec<Value> = vec![];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Count, &empty, None),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Sum, &empty, None),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Avg, &empty, None),
+            Value::Null
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Min, &empty, None),
+            Value::Null
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Max, &empty, None),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn test_swag_mixed_types() {
+        let mixed = vec![Value::Integer(10), Value::Float(20.5), Value::Integer(30)];
+        // Mixed types → float path
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Sum, &mixed, None),
+            Value::Float(60.5)
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Avg, &mixed, None),
+            Value::Float(60.5 / 3.0)
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Min, &mixed, None),
+            Value::Float(10.0)
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Max, &mixed, None),
+            Value::Float(30.0)
+        );
+    }
+
+    #[test]
+    fn test_is_swag_compatible() {
+        use crate::expression::ast::Expression;
+
+        let make_spec = |func| PipelineAggregateSpec {
+            function: func,
+            argument: Expression::Variable("x".to_string()),
+            alias: "a".to_string(),
+            distinct: false,
+            separator: None,
+        };
+
+        // All SWAG-compatible
+        let swag_aggs = vec![
+            make_spec(AggregateExprFunction::Count),
+            make_spec(AggregateExprFunction::Sum),
+            make_spec(AggregateExprFunction::Avg),
+            make_spec(AggregateExprFunction::Min),
+            make_spec(AggregateExprFunction::Max),
+        ];
+        assert!(is_swag_compatible(&swag_aggs));
+
+        // Contains non-SWAG function
+        let mixed_aggs = vec![
+            make_spec(AggregateExprFunction::Count),
+            make_spec(AggregateExprFunction::GroupConcat),
+        ];
+        assert!(!is_swag_compatible(&mixed_aggs));
+
+        // Empty list is trivially compatible
+        assert!(is_swag_compatible(&[]));
     }
 }
