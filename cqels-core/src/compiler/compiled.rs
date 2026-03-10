@@ -19,7 +19,9 @@ use crate::parser::ast::{
 };
 use crate::query::{ContinuousQuery, QueryInputs, QueryType};
 use crate::stream::StreamElement;
-use crate::window::{SlidingWindow, TumblingCountWindow, TumblingWindow, Window};
+use crate::window::{
+    SlidingCountWindow, SlidingWindow, TumblingCountWindow, TumblingWindow, Window,
+};
 
 use crate::store::RdfStore;
 
@@ -245,6 +247,20 @@ impl ContinuousQuery for CompiledCqelsQuery {
                         input_stream
                     } else {
                         let window = TumblingCountWindow::new(count);
+                        Box::pin(
+                            window
+                                .apply(input_stream)
+                                .flat_map(|batch| futures::stream::iter(batch.elements)),
+                        )
+                    }
+                }
+                Some(WindowType::TriplesSlide) => {
+                    let count = window_spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
+                    let slide = window_spec.and_then(|w| w.triple_slide).unwrap_or(1) as usize;
+                    if count == 0 || slide == 0 {
+                        input_stream
+                    } else {
+                        let window = SlidingCountWindow::new(count, slide);
                         Box::pin(
                             window
                                 .apply(input_stream)
@@ -627,6 +643,18 @@ impl ContinuousQuery for CompiledCypherQuery {
                         Box::pin(input_stream.map(|elem| vec![elem]))
                     } else {
                         let window = TumblingCountWindow::new(count);
+                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
+                    }
+                }
+                Some(WindowType::TriplesSlide) => {
+                    let count =
+                        cypher_window_spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
+                    let slide =
+                        cypher_window_spec.and_then(|w| w.triple_slide).unwrap_or(1) as usize;
+                    if count == 0 || slide == 0 {
+                        Box::pin(input_stream.map(|elem| vec![elem]))
+                    } else {
+                        let window = SlidingCountWindow::new(count, slide);
                         Box::pin(window.apply(input_stream).map(|batch| batch.elements))
                     }
                 }

@@ -336,14 +336,21 @@ fn parse_window_spec(pair: pest::iterators::Pair<Rule>) -> ParseResult<WindowSpe
                 ));
             }
             Rule::window_triples => {
+                let mut integers = Vec::new();
                 for d in inner.into_inner() {
                     if d.as_rule() == Rule::integer {
-                        let count: u64 = d
+                        let val: u64 = d
                             .as_str()
                             .parse()
                             .map_err(|e| ParseError::Syntax(format!("invalid count: {e}")))?;
-                        return Ok(WindowSpec::triples(count));
+                        integers.push(val);
                     }
+                }
+                if integers.len() >= 2 {
+                    return Ok(WindowSpec::triples_slide(integers[0], integers[1]));
+                }
+                if let Some(&count) = integers.first() {
+                    return Ok(WindowSpec::triples(count));
                 }
                 return Err(ParseError::Syntax("missing triple count".into()));
             }
@@ -783,6 +790,15 @@ mod tests {
         "#;
         let result = CqelsQlParser::parse(query).unwrap();
         assert_eq!(result.streams[0].window, WindowSpec::triples(100));
+
+        // Test TRIPLES with SLIDE
+        let query = r#"
+            SELECT ?x
+            FROM STREAM s1 [TRIPLES 100 SLIDE 50]
+            WHERE { ?x <http://ex.org/p> ?y . }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert_eq!(result.streams[0].window, WindowSpec::triples_slide(100, 50));
 
         // Test SLIDE
         let query = r#"

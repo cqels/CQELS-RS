@@ -13,7 +13,8 @@
 //! - [`window`] -- Window operators for partitioning unbounded streams into
 //!   finite batches: [`TumblingWindow`](window::TumblingWindow),
 //!   [`SlidingWindow`](window::SlidingWindow), [`SessionWindow`](window::SessionWindow),
-//!   and [`TumblingCountWindow`](window::TumblingCountWindow).
+//!   [`TumblingCountWindow`](window::TumblingCountWindow), and
+//!   [`SlidingCountWindow`](window::SlidingCountWindow).
 //! - [`query`] -- Continuous query representations and input bindings.
 //! - [`parser`] -- CQELS-QL query parser that translates textual queries into
 //!   executable query plans.

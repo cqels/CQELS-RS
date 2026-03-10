@@ -426,6 +426,109 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for TumblingCountWindow 
     }
 }
 
+/// Overlapping count-based sliding window.
+///
+/// Collects `count` elements per batch and advances by `slide` elements.
+/// When `slide < count`, batches overlap (elements appear in multiple windows).
+///
+/// For example, with `count = 4` and `slide = 2`, a stream of 6 elements
+/// produces batches `[e0,e1,e2,e3]`, `[e2,e3,e4,e5]`.
+///
+/// Maps to Java's `SlidingCountWindow` in CQELS 2.0.
+#[derive(Clone, Debug)]
+pub struct SlidingCountWindow {
+    /// Number of elements per batch.
+    pub count: usize,
+    /// Number of elements to advance between batches.
+    pub slide: usize,
+}
+
+impl SlidingCountWindow {
+    pub fn new(count: usize, slide: usize) -> Self {
+        assert!(count > 0, "count must be positive");
+        assert!(slide > 0, "slide must be positive");
+        assert!(slide <= count, "slide must not exceed count");
+        Self { count, slide }
+    }
+}
+
+impl<T: Timestamped + Clone + Send + 'static> Window<T> for SlidingCountWindow {
+    fn apply(
+        &self,
+        stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+    ) -> Pin<Box<dyn Stream<Item = WindowedBatch<T>> + Send>> {
+        use futures::StreamExt;
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+
+        let count = self.count;
+        let slide = self.slide;
+
+        // Shared state for final flush of remaining elements
+        let final_state: Arc<Mutex<Option<VecDeque<T>>>> = Arc::new(Mutex::new(None));
+        let final_state_writer = final_state.clone();
+
+        let stream = stream
+            .scan(VecDeque::<T>::new(), move |buffer, elem| {
+                buffer.push_back(elem);
+
+                let batch = if buffer.len() >= count {
+                    let elements: Vec<T> = buffer.iter().take(count).cloned().collect();
+                    let min_ts = elements.iter().map(|e| e.timestamp()).min().unwrap_or(0);
+                    let max_ts = elements.iter().map(|e| e.timestamp()).max().unwrap_or(0);
+                    // Advance by slide
+                    for _ in 0..slide {
+                        buffer.pop_front();
+                    }
+                    Some(WindowedBatch::new(
+                        elements,
+                        min_ts,
+                        max_ts,
+                        WindowType::SlidingCount,
+                    ))
+                } else {
+                    None
+                };
+
+                // Snapshot buffer for final flush
+                {
+                    let mut guard = final_state_writer.lock().unwrap();
+                    *guard = Some(buffer.clone());
+                }
+
+                futures::future::ready(Some(batch))
+            })
+            .filter_map(futures::future::ready);
+
+        // Flush remaining elements when stream ends
+        let final_flush = futures::stream::once(async move {
+            let guard = final_state.lock().unwrap();
+            guard.as_ref().and_then(|buffer| {
+                if buffer.is_empty() {
+                    None
+                } else {
+                    let elements: Vec<T> = buffer.iter().cloned().collect();
+                    let min_ts = elements.iter().map(|e| e.timestamp()).min().unwrap_or(0);
+                    let max_ts = elements.iter().map(|e| e.timestamp()).max().unwrap_or(0);
+                    Some(WindowedBatch::new(
+                        elements,
+                        min_ts,
+                        max_ts,
+                        WindowType::SlidingCount,
+                    ))
+                }
+            })
+        })
+        .filter_map(futures::future::ready);
+
+        Box::pin(stream.chain(final_flush))
+    }
+
+    fn window_type(&self) -> WindowType {
+        WindowType::SlidingCount
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Factory functions
 // ---------------------------------------------------------------------------
@@ -456,6 +559,13 @@ pub fn session(gap: Duration) -> SessionWindow {
 /// Convenience factory matching Java's `Window.tumblingCount(count)`.
 pub fn tumbling_count(count: usize) -> TumblingCountWindow {
     TumblingCountWindow::new(count)
+}
+
+/// Creates a [`SlidingCountWindow`] with the given window size and slide.
+///
+/// Convenience factory matching Java's `Window.slidingCount(count, slide)`.
+pub fn sliding_count(count: usize, slide: usize) -> SlidingCountWindow {
+    SlidingCountWindow::new(count, slide)
 }
 
 #[cfg(test)]
@@ -558,6 +668,10 @@ mod tests {
             WindowSpec::Rows(100).window_type(),
             WindowType::TumblingCount
         );
+        assert_eq!(
+            WindowSpec::RowsSlide(10, 5).window_type(),
+            WindowType::SlidingCount
+        );
     }
 
     #[test]
@@ -586,6 +700,12 @@ mod tests {
         assert_eq!(
             <TumblingCountWindow as Window<TV>>::window_type(&tc),
             WindowType::TumblingCount
+        );
+
+        let sc = sliding_count(10, 5);
+        assert_eq!(
+            <SlidingCountWindow as Window<TV>>::window_type(&sc),
+            WindowType::SlidingCount
         );
     }
 
@@ -659,6 +779,69 @@ mod tests {
         assert_eq!(batch.window_start, 0);
         assert_eq!(batch.window_end, 5000);
         assert_eq!(batch.window_type, WindowType::TumblingTime);
+    }
+
+    #[tokio::test]
+    async fn test_sliding_count_window_basic() {
+        // 7 elements, count=3, slide=2 → batches: [0,1,2], [2,3,4], [4,5,6]
+        let elements = make_elements(&[100, 200, 300, 400, 500, 600, 700]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = SlidingCountWindow::new(3, 2);
+        let batches: Vec<_> = window.apply(stream).collect().await;
+
+        // Full batches: [100,200,300], [300,400,500], [500,600,700]
+        // After 3rd batch, buffer has [700] which is flushed as partial
+        assert_eq!(batches.len(), 4);
+        assert_eq!(batches[0].size(), 3);
+        assert_eq!(batches[1].size(), 3);
+        assert_eq!(batches[2].size(), 3);
+        assert_eq!(batches[3].size(), 1); // partial flush
+    }
+
+    #[tokio::test]
+    async fn test_sliding_count_window_no_overlap() {
+        // count == slide → equivalent to tumbling count
+        let elements = make_elements(&[100, 200, 300, 400, 500, 600]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = SlidingCountWindow::new(3, 3);
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].size(), 3);
+        assert_eq!(batches[1].size(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_sliding_count_window_slide_one() {
+        // Slide of 1 → maximum overlap
+        let elements = make_elements(&[10, 20, 30, 40]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = SlidingCountWindow::new(3, 1);
+        let batches: Vec<_> = window.apply(stream).collect().await;
+
+        // Batches: [10,20,30], [20,30,40], then partial flush [30,40]
+        assert_eq!(batches.len(), 3); // 2 full + 1 partial
+        assert_eq!(batches[0].size(), 3);
+        assert_eq!(batches[1].size(), 3);
+        assert_eq!(batches[2].size(), 2); // remaining buffer after last slide
+    }
+
+    #[tokio::test]
+    async fn test_sliding_count_window_empty_stream() {
+        let stream = Box::pin(futures::stream::iter(Vec::<TimestampedValue<i64>>::new()));
+        let window = SlidingCountWindow::new(3, 1);
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert_eq!(batches.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_sliding_count_window_partial() {
+        // Fewer elements than window size → single partial batch
+        let elements = make_elements(&[100, 200]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = SlidingCountWindow::new(5, 2);
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].size(), 2);
     }
 
     #[test]

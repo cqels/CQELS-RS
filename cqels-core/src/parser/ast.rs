@@ -21,6 +21,8 @@ pub enum WindowType {
     Slide,
     /// Count-based window with specified number of elements.
     Triples,
+    /// Sliding count-based window with element count and slide.
+    TriplesSlide,
 }
 
 impl fmt::Display for WindowType {
@@ -30,6 +32,7 @@ impl fmt::Display for WindowType {
             WindowType::Range => write!(f, "RANGE"),
             WindowType::Slide => write!(f, "SLIDE"),
             WindowType::Triples => write!(f, "TRIPLES"),
+            WindowType::TriplesSlide => write!(f, "TRIPLES_SLIDE"),
         }
     }
 }
@@ -43,6 +46,7 @@ pub struct WindowSpec {
     pub duration: Option<Duration>,
     pub step: Option<Duration>,
     pub triple_count: Option<u64>,
+    pub triple_slide: Option<u64>,
 }
 
 impl WindowSpec {
@@ -53,6 +57,7 @@ impl WindowSpec {
             duration: None,
             step: None,
             triple_count: None,
+            triple_slide: None,
         }
     }
 
@@ -63,6 +68,7 @@ impl WindowSpec {
             duration: Some(duration),
             step: None,
             triple_count: None,
+            triple_slide: None,
         }
     }
 
@@ -73,6 +79,7 @@ impl WindowSpec {
             duration: Some(duration),
             step: Some(step),
             triple_count: None,
+            triple_slide: None,
         }
     }
 
@@ -83,6 +90,18 @@ impl WindowSpec {
             duration: None,
             step: None,
             triple_count: Some(count),
+            triple_slide: None,
+        }
+    }
+
+    /// Creates a TRIPLES SLIDE window with count and slide.
+    pub fn triples_slide(count: u64, slide: u64) -> Self {
+        Self {
+            window_type: WindowType::TriplesSlide,
+            duration: None,
+            step: None,
+            triple_count: Some(count),
+            triple_slide: Some(slide),
         }
     }
 }
@@ -104,6 +123,14 @@ impl fmt::Display for WindowSpec {
             }
             WindowType::Triples => {
                 write!(f, "TRIPLES {}", self.triple_count.unwrap_or(0))
+            }
+            WindowType::TriplesSlide => {
+                write!(
+                    f,
+                    "TRIPLES {} SLIDE {}",
+                    self.triple_count.unwrap_or(0),
+                    self.triple_slide.unwrap_or(0)
+                )
             }
         }
     }

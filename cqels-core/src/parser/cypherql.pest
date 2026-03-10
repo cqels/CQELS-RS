@@ -51,7 +51,7 @@ window_spec = { window_now | window_slide | window_range | window_triples }
 
 window_now     = { ^"now" }
 window_range   = { ^"range" ~ duration ~ (^"step" ~ duration)? }
-window_triples = { ^"triples" ~ integer_literal }
+window_triples = { ^"triples" ~ integer_literal ~ (^"slide" ~ integer_literal)? }
 window_slide   = { ^"slide" ~ duration ~ ^"step" ~ duration }
 
 duration  = { integer_literal ~ time_unit }

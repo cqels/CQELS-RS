@@ -12,7 +12,9 @@ use futures::StreamExt;
 use proptest::prelude::*;
 
 use cqels_core::stream::Timestamped;
-use cqels_core::window::{SlidingWindow, TumblingCountWindow, TumblingWindow, Window};
+use cqels_core::window::{
+    SlidingCountWindow, SlidingWindow, TumblingCountWindow, TumblingWindow, Window,
+};
 
 /// Simple timestamped element for testing.
 #[derive(Debug, Clone)]
@@ -285,6 +287,77 @@ proptest! {
                     total_in_windows, total
                 );
             }
+            Ok(())
+        })?;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sliding Count Window Properties
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    #[test]
+    fn sliding_count_batch_sizes_valid(
+        n in 10usize..100,
+        count in 2usize..15,
+        slide_frac in 1usize..100,
+    ) {
+        let slide = (slide_frac % count).max(1); // slide in [1, count]
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let timestamps: Vec<i64> = (0..n as i64).collect();
+        let elements = make_elements(timestamps);
+
+        rt.block_on(async {
+            let stream = Box::pin(futures::stream::iter(elements));
+            let window = SlidingCountWindow::new(count, slide);
+            let batches: Vec<_> = window.apply(stream).collect().await;
+
+            for (i, batch) in batches.iter().enumerate() {
+                if i < batches.len() - 1 {
+                    // All non-final batches should have exactly `count` elements
+                    prop_assert_eq!(
+                        batch.size(), count,
+                        "full batch {} should have exactly {} elements, got {}",
+                        i, count, batch.size()
+                    );
+                } else {
+                    // Final batch may be partial
+                    prop_assert!(
+                        batch.size() > 0 && batch.size() <= count,
+                        "final batch should have 1..={} elements, got {}",
+                        count, batch.size()
+                    );
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    #[test]
+    fn sliding_count_produces_overlap(
+        n in 20usize..100,
+        count in 3usize..10,
+    ) {
+        let slide = 1; // maximum overlap
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let timestamps: Vec<i64> = (0..n as i64).collect();
+        let elements = make_elements(timestamps);
+        let total = elements.len();
+
+        rt.block_on(async {
+            let stream = Box::pin(futures::stream::iter(elements));
+            let window = SlidingCountWindow::new(count, slide);
+            let batches: Vec<_> = window.apply(stream).collect().await;
+
+            let total_in_windows: usize = batches.iter().map(|b| b.size()).sum();
+            prop_assert!(
+                total_in_windows >= total,
+                "overlapping sliding count windows should have >= total elements: {} >= {}",
+                total_in_windows, total
+            );
             Ok(())
         })?;
     }
