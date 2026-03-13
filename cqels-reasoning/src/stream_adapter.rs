@@ -49,6 +49,10 @@ impl ReteStreamOperator {
     /// inferred elements (as `StreamElement::Rdf`).
     ///
     /// Non-RDF elements pass through unchanged.
+    ///
+    /// Note: inferred elements are converted to plain `RdfStreamElement`,
+    /// discarding provenance metadata. Use [`process()`](Self::process)
+    /// directly if you need access to [`InferredRdfStreamElement`] fields.
     pub fn apply(
         &self,
         input: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,

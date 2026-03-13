@@ -43,6 +43,20 @@ pub trait StreamEngine: Send + Sync {
     /// Stops the engine, completing all streams.
     async fn stop(&self) -> Result<(), CqelsError>;
 
+    /// Registers and executes a continuous query producing [`BindingSet`] results.
+    ///
+    /// This is the primary method for compiled CQELS-QL and Cypher-QL queries.
+    /// The default implementation returns [`CqelsError::UnsupportedOperation`].
+    async fn register_binding_query(
+        &self,
+        query: Box<dyn ContinuousQuery<Result = BindingSet>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
+        let _ = query;
+        Err(CqelsError::UnsupportedOperation {
+            operation: "register_binding_query".to_string(),
+        })
+    }
+
     /// Returns whether the engine is currently running.
     fn is_running(&self) -> bool;
 }
@@ -258,6 +272,14 @@ impl StreamEngine for ReactiveStreamEngine {
         let inputs = self.build_query_inputs().await;
         let raw_stream = query.execute(inputs);
         self.wrap_with_cancellation(query_id, raw_stream).await
+    }
+
+    async fn register_binding_query(
+        &self,
+        query: Box<dyn ContinuousQuery<Result = BindingSet>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
+        // Delegate to the inherent method
+        ReactiveStreamEngine::register_binding_query(self, query).await
     }
 
     async fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
@@ -678,5 +700,116 @@ mod tests {
 
         let ids = engine.registered_query_ids().await;
         assert!(ids.is_empty());
+    }
+
+    // -- Mock binding query for register_binding_query tests --
+
+    struct MockBindingQuery {
+        id: String,
+    }
+
+    impl MockBindingQuery {
+        fn new(id: &str) -> Self {
+            Self { id: id.to_string() }
+        }
+    }
+
+    #[async_trait]
+    impl ContinuousQuery for MockBindingQuery {
+        type Result = BindingSet;
+
+        fn query_id(&self) -> &str {
+            &self.id
+        }
+
+        fn query_string(&self) -> &str {
+            "MOCK BINDING QUERY"
+        }
+
+        fn query_type(&self) -> QueryType {
+            QueryType::Custom
+        }
+
+        fn execute(&self, _inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
+            Box::pin(futures::stream::unfold(0i64, |ts| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Some((BindingSet::new(ts), ts + 1))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_trait_register_binding_query() {
+        let engine = ReactiveStreamEngine::new();
+        engine.start().await.unwrap();
+
+        // Call through the StreamEngine trait
+        let engine_trait: &dyn StreamEngine = &engine;
+        let query = MockBindingQuery::new("binding-q1");
+        let mut result_stream = engine_trait
+            .register_binding_query(Box::new(query))
+            .await
+            .unwrap();
+
+        // Should receive at least one BindingSet
+        let first =
+            tokio::time::timeout(std::time::Duration::from_millis(500), result_stream.next()).await;
+        assert!(first.is_ok());
+        let binding = first.unwrap().unwrap();
+        assert_eq!(binding.timestamp(), 0);
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_trait_register_binding_query_default() {
+        // A minimal StreamEngine impl that uses the default register_binding_query
+        struct MinimalEngine;
+
+        #[async_trait]
+        impl StreamEngine for MinimalEngine {
+            async fn register_stream(
+                &self,
+                _name: &str,
+                _stream: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,
+            ) -> Result<(), CqelsError> {
+                Ok(())
+            }
+            async fn unregister_stream(&self, _name: &str) -> Result<(), CqelsError> {
+                Ok(())
+            }
+            async fn register_query(
+                &self,
+                _query: Box<dyn ContinuousQuery<Result = StreamElement>>,
+            ) -> Result<Pin<Box<dyn Stream<Item = StreamElement> + Send>>, CqelsError> {
+                Err(CqelsError::UnsupportedOperation {
+                    operation: "register_query".to_string(),
+                })
+            }
+            async fn unregister_query(&self, _query_id: &str) -> Result<(), CqelsError> {
+                Ok(())
+            }
+            async fn start(&self) -> Result<(), CqelsError> {
+                Ok(())
+            }
+            async fn stop(&self) -> Result<(), CqelsError> {
+                Ok(())
+            }
+            fn is_running(&self) -> bool {
+                false
+            }
+        }
+
+        let engine = MinimalEngine;
+        let query = MockBindingQuery::new("default-test");
+        let result = engine.register_binding_query(Box::new(query)).await;
+
+        match result {
+            Err(CqelsError::UnsupportedOperation { operation }) => {
+                assert_eq!(operation, "register_binding_query");
+            }
+            Err(other) => panic!("expected UnsupportedOperation, got: {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 }

@@ -39,7 +39,10 @@ impl InferredRdfStreamElement {
         true
     }
 
-    /// Converts this into an `RdfStreamElement`.
+    /// Converts to a plain [`RdfStreamElement`], **discarding** provenance
+    /// metadata (`inferred_by` and `derived_from`).
+    ///
+    /// Use the fields on this struct directly if you need provenance data.
     pub fn to_rdf_stream_element(&self) -> RdfStreamElement {
         RdfStreamElement::new(self.statement.clone(), self.timestamp)
     }

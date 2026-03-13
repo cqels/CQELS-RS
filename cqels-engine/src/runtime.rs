@@ -210,6 +210,11 @@ impl CqelsRuntime {
     ///
     /// Returns a stream of [`PatternMatch`] results. The pattern is compiled
     /// into an NFA and evaluated against the named stream's elements.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use `register_stream_cep_pattern` instead. This method silently drops \
+                all events when T != StreamElement due to type-erasure downcast."
+    )]
     pub async fn register_cep_pattern<T>(
         &self,
         stream_name: &str,
@@ -382,5 +387,61 @@ mod tests {
         let runtime = CqelsRuntime::new();
         let ids = runtime.registered_query_ids().await;
         assert!(ids.is_empty());
+    }
+
+    /// Documents the footgun: `register_cep_pattern` with a non-StreamElement
+    /// type silently drops all events due to the downcast failing.
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn test_deprecated_cep_pattern_type_mismatch() {
+        use crate::cep::Pattern;
+        use cqels_core::stream::{RdfStreamElement, StreamElement, Timestamped};
+
+        #[derive(Clone, Debug)]
+        struct CustomEvent {
+            ts: i64,
+        }
+        impl Timestamped for CustomEvent {
+            fn timestamp(&self) -> i64 {
+                self.ts
+            }
+        }
+
+        let runtime = CqelsRuntime::new();
+
+        // Register a stream and start the engine
+        let elem = StreamElement::Rdf(RdfStreamElement::new(
+            cqels_model::Statement::new(
+                cqels_model::Term::Iri(cqels_model::term::IriTerm::new("http://ex.org/s")),
+                cqels_model::term::IriTerm::new("http://ex.org/p"),
+                cqels_model::Term::Literal(cqels_model::term::LiteralTerm::new("v")),
+            ),
+            1000,
+        ));
+        let stream = Box::pin(futures::stream::iter(vec![elem]));
+        runtime.register_stream("test", stream).await.unwrap();
+        runtime.start().await.unwrap();
+
+        // Register a CEP pattern with a mismatched type — downcast will fail
+        let pattern = Pattern::<CustomEvent>::begin("start").where_cond(|_| true);
+        let mut result_stream = runtime
+            .register_cep_pattern::<CustomEvent>("test", pattern)
+            .await
+            .unwrap();
+
+        // Wait briefly; no matches should arrive because downcasts all fail
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            futures::StreamExt::next(&mut result_stream),
+        )
+        .await;
+
+        // Timeout expected — no items produced due to silent downcast failure
+        assert!(
+            result.is_err(),
+            "should timeout because downcast drops all events"
+        );
+
+        runtime.stop().await.unwrap();
     }
 }

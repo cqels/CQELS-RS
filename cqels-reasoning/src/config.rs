@@ -40,6 +40,10 @@ impl ReasoningConfig {
         self.emit_input_triples
     }
 
+    /// Returns whether provenance tracking is enabled.
+    ///
+    /// When enabled, provenance data is only available via the low-level
+    /// `ReteStreamOperator::process()` API, not through `CqelsRuntime`.
     pub fn track_provenance(&self) -> bool {
         self.track_provenance
     }
@@ -124,6 +128,14 @@ impl ReasoningConfigBuilder {
         self
     }
 
+    /// Enables provenance tracking on inferred elements.
+    ///
+    /// When enabled, `InferredRdfStreamElement::derived_from` is populated
+    /// with the premises that triggered each rule. **Note:** provenance data
+    /// is only available via the low-level `ReteStreamOperator::process()`
+    /// API. The high-level `ReteStreamOperator::apply()` and `CqelsRuntime`
+    /// APIs convert inferred elements to plain `RdfStreamElement`, discarding
+    /// provenance metadata.
     pub fn track_provenance(mut self, track: bool) -> Self {
         self.track_provenance = track;
         self
