@@ -15,6 +15,14 @@
 //!   pattern matching.
 //! - [`CqelsError`] -- Unified error type for the CQELS engine.
 //!
+//! # Output Serialization
+//!
+//! The [`serialization`] module provides standard output formats:
+//! - [SPARQL JSON Results](https://www.w3.org/TR/sparql11-results-json/) via
+//!   [`serialization::to_sparql_json`]
+//! - [N-Triples](https://www.w3.org/TR/n-triples/) via
+//!   [`serialization::to_ntriples`]
+//!
 //! # Interoperability
 //!
 //! The types in this crate provide bidirectional conversions with the
@@ -40,6 +48,7 @@
 
 pub mod binding;
 pub mod error;
+pub mod serialization;
 pub mod statement;
 pub mod term;
 pub mod value;
