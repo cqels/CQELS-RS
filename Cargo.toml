@@ -4,6 +4,7 @@ members = [
     "cqels-core",
     "cqels-engine",
     "cqels-reasoning",
+    "cqels-geo",
     "cqels-benchmarks",
 ]
 resolver = "2"
@@ -48,6 +49,11 @@ tracing-subscriber = "0.3"
 # Error handling
 thiserror = "2"
 anyhow = "1"
+
+# Geospatial
+geo = "0.29"
+wkt = "0.11"
+rstar = "0.12"
 
 # Cryptographic hashing (SPARQL hash functions)
 md-5 = "0.10"

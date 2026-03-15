@@ -1,0 +1,15 @@
+[package]
+name = "cqels-geo"
+description = "GeoSPARQL spatial computing and reasoning for CQELS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cqels-model.workspace = true
+geo.workspace = true
+wkt.workspace = true
+rstar.workspace = true
+thiserror.workspace = true
