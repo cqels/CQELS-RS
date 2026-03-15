@@ -174,36 +174,20 @@ fn geometry_to_point(geom: &Geometry<f64>) -> Option<Point<f64>> {
     }
 }
 
-/// Tests if `container` contains `contained` for various geometry type
-/// combinations.
+/// Tests if `container` spatially contains `contained` (DE-9IM: T*****FF*).
+///
+/// Delegates to the `geo` crate's `Contains` trait which correctly handles
+/// all geometry type combinations including boundary semantics.
 fn geometry_contains(container: &Geometry<f64>, contained: &Geometry<f64>) -> bool {
-    match (container, contained) {
-        (Geometry::Point(a), Geometry::Point(b)) => {
-            (a.x() - b.x()).abs() < 1e-10 && (a.y() - b.y()).abs() < 1e-10
-        }
-        (Geometry::Polygon(poly), Geometry::Point(pt)) => poly.contains(pt),
-        (Geometry::Polygon(a), Geometry::Polygon(b)) => {
-            // Check if all vertices of b are inside a
-            b.exterior().points().all(|p| a.contains(&p))
-        }
-        (Geometry::MultiPolygon(mp), Geometry::Point(pt)) => mp.contains(pt),
-        _ => false,
-    }
+    container.contains(contained)
 }
 
-/// Tests if two geometries intersect.
+/// Tests if two geometries spatially intersect (DE-9IM: T******** etc).
+///
+/// Delegates to the `geo` crate's `Intersects` trait which correctly handles
+/// boundary-boundary, boundary-interior, and interior-interior intersections.
 fn geometry_intersects(g1: &Geometry<f64>, g2: &Geometry<f64>) -> bool {
-    match (g1, g2) {
-        (Geometry::Point(a), Geometry::Point(b)) => {
-            (a.x() - b.x()).abs() < 1e-10 && (a.y() - b.y()).abs() < 1e-10
-        }
-        (Geometry::Polygon(poly), Geometry::Point(pt))
-        | (Geometry::Point(pt), Geometry::Polygon(poly)) => poly.contains(pt),
-        (Geometry::Polygon(a), Geometry::Polygon(b)) => a.intersects(b),
-        (Geometry::MultiPolygon(mp), Geometry::Point(pt))
-        | (Geometry::Point(pt), Geometry::MultiPolygon(mp)) => mp.contains(pt),
-        _ => false,
-    }
+    g1.intersects(g2)
 }
 
 /// Extracts an IRI string from a Value.
@@ -313,5 +297,45 @@ mod tests {
     fn test_evaluate_function_unknown() {
         let p = wkt_literal("POINT(1 2)");
         assert_eq!(evaluate_function("geof:unknownFunc", &[&p, &p]), None);
+    }
+
+    // ─── Regression tests for boundary semantics (#9) ───────────────────
+
+    #[test]
+    fn test_sf_equals_identical_polygon() {
+        let poly = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        assert_eq!(sf_equals(&poly, &poly), Some(Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_sf_intersects_boundary_point() {
+        let poly = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        let boundary_pt = wkt_literal("POINT(0 0)");
+        assert_eq!(
+            sf_intersects(&poly, &boundary_pt),
+            Some(Value::Boolean(true))
+        );
+        assert_eq!(
+            sf_intersects(&boundary_pt, &poly),
+            Some(Value::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn test_sf_equals_different_polygons() {
+        let poly1 = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        let poly2 = wkt_literal("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))");
+        assert_eq!(sf_equals(&poly1, &poly2), Some(Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_sf_disjoint_boundary_point() {
+        let poly = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        let boundary_pt = wkt_literal("POINT(0 0)");
+        // A boundary point intersects the polygon, so it is NOT disjoint
+        assert_eq!(
+            sf_disjoint(&poly, &boundary_pt),
+            Some(Value::Boolean(false))
+        );
     }
 }

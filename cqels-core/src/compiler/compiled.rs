@@ -311,6 +311,12 @@ impl ContinuousQuery for CompiledCqelsQuery {
         // Phase 1: Batch-level pattern matching — match across all statements
         // in each window batch so that multi-pattern queries can join across elements.
         let prefixes_clone = prefixes.clone();
+        // For single-stream queries, all patterns form a mandatory conjunction:
+        // every pattern must have at least one match for the batch to produce
+        // results. For multi-stream queries, batches may only contain elements
+        // from one source stream, so we cannot require all patterns to match
+        // (this is the documented multi-stream limitation, #5).
+        let require_all_patterns = stream_patterns.len() <= 1;
         let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
             Box::pin(batch_stream.flat_map(move |batch| {
                 let mut stmts: Vec<(Statement, i64)> = Vec::new();
@@ -321,8 +327,10 @@ impl ContinuousQuery for CompiledCqelsQuery {
                     }
                 }
 
-                // For each pattern, collect bindings from all matching statements
+                // For each pattern, collect bindings from all matching statements.
+                let total_patterns = all_patterns.len();
                 let mut pattern_results: Vec<Vec<BindingSet>> = Vec::new();
+                let mut matched_count = 0;
                 for pattern in &all_patterns {
                     let matches: Vec<BindingSet> = stmts
                         .iter()
@@ -332,11 +340,15 @@ impl ContinuousQuery for CompiledCqelsQuery {
                         .collect();
                     if !matches.is_empty() {
                         pattern_results.push(matches);
+                        matched_count += 1;
                     }
                 }
 
-                // Join across patterns (cross-product with compatible bindings)
-                let results = if pattern_results.is_empty() {
+                // When all patterns are from the same stream, enforce that
+                // every mandatory pattern contributes at least one match.
+                let results = if pattern_results.is_empty()
+                    || (require_all_patterns && matched_count < total_patterns)
+                {
                     vec![]
                 } else {
                     let mut accumulated = pattern_results.remove(0);

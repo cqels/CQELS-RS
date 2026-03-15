@@ -74,12 +74,26 @@ struct QueryState {
     cancel_tx: watch::Sender<bool>,
 }
 
-/// Stream wrapper that removes a query from the registry when the inner stream ends.
+/// Stream wrapper that removes a query from the registry when the inner stream
+/// ends naturally or the stream is dropped.
 struct CleanupStream<S> {
     inner: S,
     queries: Arc<Mutex<HashMap<String, QueryState>>>,
     query_id: String,
     cleaned: bool,
+}
+
+impl<S> CleanupStream<S> {
+    fn do_cleanup(&mut self) {
+        if !self.cleaned {
+            self.cleaned = true;
+            let queries = Arc::clone(&self.queries);
+            let id = self.query_id.clone();
+            tokio::spawn(async move {
+                queries.lock().await.remove(&id);
+            });
+        }
+    }
 }
 
 impl<S: Stream + Unpin> Stream for CleanupStream<S> {
@@ -88,15 +102,16 @@ impl<S: Stream + Unpin> Stream for CleanupStream<S> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_next(cx);
-        if matches!(result, Poll::Ready(None)) && !this.cleaned {
-            this.cleaned = true;
-            let queries = Arc::clone(&this.queries);
-            let id = this.query_id.clone();
-            tokio::spawn(async move {
-                queries.lock().await.remove(&id);
-            });
+        if matches!(result, Poll::Ready(None)) {
+            this.do_cleanup();
         }
         result
+    }
+}
+
+impl<S> Drop for CleanupStream<S> {
+    fn drop(&mut self) {
+        self.do_cleanup();
     }
 }
 
@@ -852,6 +867,34 @@ mod tests {
         assert!(
             !ids.contains(&"finite-q".to_string()),
             "completed query should be removed from registry"
+        );
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_dropped_stream_removes_query_from_registry() {
+        let engine = ReactiveStreamEngine::new();
+        engine.start().await.unwrap();
+
+        let query = MockContinuousQuery::new("drop-query");
+        let result_stream = engine.register_query(Box::new(query)).await.unwrap();
+
+        // Query should be registered
+        let ids = engine.registered_query_ids().await;
+        assert!(ids.contains(&"drop-query".to_string()));
+
+        // Drop the stream without consuming it
+        drop(result_stream);
+
+        // Give the spawned cleanup task a moment to run
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Query should be removed from registry
+        let ids = engine.registered_query_ids().await;
+        assert!(
+            !ids.contains(&"drop-query".to_string()),
+            "dropped stream should remove query from registry"
         );
 
         engine.stop().await.unwrap();
