@@ -36,6 +36,14 @@ use super::pipeline::{
 /// Immutable query data is wrapped in `Arc` so that `execute()` can
 /// cheaply share references with async closures instead of deep-cloning
 /// expression trees and definitions on every call.
+///
+/// # Limitations
+///
+/// **Multi-stream merging (#5):** When a query references multiple streams,
+/// they are merged via `select_all` before windowing. All streams share the
+/// first stream's window spec and source identity is lost after merge.
+/// Per-stream windowing and cross-stream joins require a more sophisticated
+/// execution model.
 pub struct CompiledCqelsQuery {
     /// Original query string.
     pub(crate) query_string: String,
@@ -180,7 +188,10 @@ impl ContinuousQuery for CompiledCqelsQuery {
                     .or_else(|| inputs.stream_names().next().map(|s| s.to_string()));
                 stream_name.and_then(|name| inputs.take_stream(&name))
             } else {
-                // Multiple streams — merge all using select_all (round-robin fair interleaving)
+                // LIMITATION (#5): Multiple streams are merged before windowing.
+                // All streams share the first stream's window spec, and source
+                // identity is lost after merge. Per-stream windowing and
+                // cross-stream joins require a more sophisticated execution model.
                 let streams: Vec<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> =
                     stream_patterns
                         .iter()
@@ -200,27 +211,25 @@ impl ContinuousQuery for CompiledCqelsQuery {
             None => return Box::pin(futures::stream::empty()),
         };
 
-        // Apply windowing from the first stream's window spec
+        // Apply windowing from the first stream's window spec.
+        // Produces batches of elements (Vec<StreamElement>) so that pattern
+        // matching can operate across multiple statements in a window.
         let window_spec = definition.streams.first().map(|s| &s.window);
-        let input_stream: Pin<Box<dyn Stream<Item = StreamElement> + Send>> =
+        let batch_stream: Pin<Box<dyn Stream<Item = Vec<StreamElement>> + Send>> =
             match window_spec.map(|w| &w.window_type) {
                 Some(WindowType::Now) => {
-                    // NOW: each element is its own "window" — pass through as-is
-                    input_stream
+                    // NOW: each element is its own batch
+                    Box::pin(input_stream.map(|elem| vec![elem]))
                 }
                 Some(WindowType::Range) => {
                     let duration = window_spec
                         .and_then(|w| w.duration)
                         .unwrap_or(Duration::from_secs(0));
                     if duration.is_zero() {
-                        input_stream
+                        Box::pin(input_stream.map(|elem| vec![elem]))
                     } else {
                         let window = TumblingWindow::new(duration);
-                        Box::pin(
-                            window
-                                .apply(input_stream)
-                                .flat_map(|batch| futures::stream::iter(batch.elements)),
-                        )
+                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
                     }
                 }
                 Some(WindowType::Slide) => {
@@ -231,44 +240,32 @@ impl ContinuousQuery for CompiledCqelsQuery {
                         .and_then(|w| w.step)
                         .unwrap_or(Duration::from_secs(0));
                     if duration.is_zero() || step.is_zero() {
-                        input_stream
+                        Box::pin(input_stream.map(|elem| vec![elem]))
                     } else {
                         let window = SlidingWindow::new(duration, step);
-                        Box::pin(
-                            window
-                                .apply(input_stream)
-                                .flat_map(|batch| futures::stream::iter(batch.elements)),
-                        )
+                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
                     }
                 }
                 Some(WindowType::Triples) => {
                     let count = window_spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
                     if count == 0 {
-                        input_stream
+                        Box::pin(input_stream.map(|elem| vec![elem]))
                     } else {
                         let window = TumblingCountWindow::new(count);
-                        Box::pin(
-                            window
-                                .apply(input_stream)
-                                .flat_map(|batch| futures::stream::iter(batch.elements)),
-                        )
+                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
                     }
                 }
                 Some(WindowType::TriplesSlide) => {
                     let count = window_spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
                     let slide = window_spec.and_then(|w| w.triple_slide).unwrap_or(1) as usize;
                     if count == 0 || slide == 0 {
-                        input_stream
+                        Box::pin(input_stream.map(|elem| vec![elem]))
                     } else {
                         let window = SlidingCountWindow::new(count, slide);
-                        Box::pin(
-                            window
-                                .apply(input_stream)
-                                .flat_map(|batch| futures::stream::iter(batch.elements)),
-                        )
+                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
                     }
                 }
-                None => input_stream,
+                None => Box::pin(input_stream.map(|elem| vec![elem])),
             };
 
         // All stream + default patterns for matching against streaming data
@@ -311,33 +308,45 @@ impl ContinuousQuery for CompiledCqelsQuery {
             vec![]
         };
 
-        // Phase 1: Pattern matching — convert StreamElements to BindingSets
+        // Phase 1: Batch-level pattern matching — match across all statements
+        // in each window batch so that multi-pattern queries can join across elements.
         let prefixes_clone = prefixes.clone();
         let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
-            Box::pin(input_stream.filter_map(move |elem| {
-                let timestamp = elem.timestamp();
-                let stmt = match &elem {
-                    StreamElement::Rdf(rdf) => Some(rdf.statement.clone()),
-                    _ => None,
+            Box::pin(batch_stream.flat_map(move |batch| {
+                let mut stmts: Vec<(Statement, i64)> = Vec::new();
+                for elem in &batch {
+                    let ts = elem.timestamp();
+                    if let StreamElement::Rdf(rdf) = elem {
+                        stmts.push((rdf.statement.clone(), ts));
+                    }
+                }
+
+                // For each pattern, collect bindings from all matching statements
+                let mut pattern_results: Vec<Vec<BindingSet>> = Vec::new();
+                for pattern in &all_patterns {
+                    let matches: Vec<BindingSet> = stmts
+                        .iter()
+                        .filter_map(|(stmt, ts)| {
+                            match_triple_pattern(pattern, stmt, &prefixes_clone, *ts)
+                        })
+                        .collect();
+                    if !matches.is_empty() {
+                        pattern_results.push(matches);
+                    }
+                }
+
+                // Join across patterns (cross-product with compatible bindings)
+                let results = if pattern_results.is_empty() {
+                    vec![]
+                } else {
+                    let mut accumulated = pattern_results.remove(0);
+                    for next_pattern_matches in pattern_results {
+                        accumulated = join_binding_sets(&accumulated, &next_pattern_matches);
+                    }
+                    accumulated
                 };
 
-                let result = stmt.and_then(|stmt| {
-                    // Try to match against each pattern and join results
-                    let mut combined: Option<BindingSet> = None;
-                    for pattern in &all_patterns {
-                        if let Some(bs) =
-                            match_triple_pattern(pattern, &stmt, &prefixes_clone, timestamp)
-                        {
-                            combined = Some(match combined {
-                                Some(existing) => existing.join(&bs).unwrap_or(existing),
-                                None => bs,
-                            });
-                        }
-                    }
-                    combined
-                });
-
-                futures::future::ready(result)
+                futures::stream::iter(results)
             }));
 
         // Phase 1b: Join stream bindings with static bindings from RDF store

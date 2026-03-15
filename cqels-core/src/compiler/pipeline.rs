@@ -217,6 +217,15 @@ pub fn apply_binds(
 /// For each incoming `BindingSet`, tries to match optional patterns against
 /// current bindings. If patterns match, extends the `BindingSet` with new
 /// variable bindings. If not, passes through unchanged.
+///
+/// # Streaming-mode limitation
+///
+/// In streaming mode without a materialized dataset, OPTIONAL matching
+/// checks variable overlap only — it verifies that the optional pattern
+/// shares at least one bound variable with the current bindings.
+/// Constant values in patterns are not checked against actual data.
+/// When an RDF store is available, static patterns should be resolved
+/// there first (see Phase 1b in the compiled query pipeline).
 pub fn apply_optional(
     stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
     optional_groups: &[Vec<CqelsPatternGroup>],
@@ -321,6 +330,12 @@ fn try_match_optional_block(
 /// main query via a shared variable).  Disconnected optional patterns (no
 /// shared variables) return `false`, which causes the caller to pass through
 /// the original bindings unchanged — correct left-outer-join semantics.
+///
+/// # Streaming-mode limitation
+///
+/// Only variable presence is checked, not actual data matching against a
+/// materialized dataset. This is correct for pure streaming mode where no
+/// stored triples exist to query against.
 fn try_satisfy_pattern_from_bindings(
     pattern: &TriplePattern,
     bs: &BindingSet,
@@ -349,6 +364,12 @@ fn try_satisfy_pattern_from_bindings(
 ///
 /// For each incoming `BindingSet`, tries matching both left and right pattern
 /// branches. Emits results from either or both branches (true union).
+///
+/// # Streaming-mode limitation
+///
+/// Branch matching uses variable-overlap heuristics (`check_pattern_consistency`)
+/// rather than evaluating against a materialized dataset. Each branch "matches"
+/// if its patterns share at least one bound variable with the current bindings.
 pub fn apply_union(
     stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
     union_blocks: &[(Vec<CqelsPatternGroup>, Vec<CqelsPatternGroup>)],
@@ -481,6 +502,13 @@ fn check_pattern_consistency(
 ///
 /// For each incoming `BindingSet`, checks if the MINUS patterns can be
 /// satisfied. If they match, the binding set is **filtered out**.
+///
+/// # Streaming-mode limitation
+///
+/// MINUS matching uses variable-overlap heuristics — a binding is excluded
+/// if it shares at least one variable with the MINUS pattern. Actual value
+/// comparison against a MINUS dataset is deferred to when multi-dataset
+/// support is added.
 pub fn apply_minus(
     stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
     minus_blocks: &[Vec<TriplePattern>],

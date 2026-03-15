@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use futures::stream::Stream;
@@ -71,6 +72,32 @@ struct StreamState {
 struct QueryState {
     /// Sending `true` on this channel cancels the query's output stream.
     cancel_tx: watch::Sender<bool>,
+}
+
+/// Stream wrapper that removes a query from the registry when the inner stream ends.
+struct CleanupStream<S> {
+    inner: S,
+    queries: Arc<Mutex<HashMap<String, QueryState>>>,
+    query_id: String,
+    cleaned: bool,
+}
+
+impl<S: Stream + Unpin> Stream for CleanupStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_next(cx);
+        if matches!(result, Poll::Ready(None)) && !this.cleaned {
+            this.cleaned = true;
+            let queries = Arc::clone(&this.queries);
+            let id = this.query_id.clone();
+            tokio::spawn(async move {
+                queries.lock().await.remove(&id);
+            });
+        }
+        result
+    }
 }
 
 /// Reactive stream engine implementation using tokio channels.
@@ -172,6 +199,7 @@ impl ReactiveStreamEngine {
                 message: format!("query '{}' is already registered", query_id),
             });
         }
+        let cleanup_id = query_id.clone();
         queries.insert(query_id, QueryState { cancel_tx });
         drop(queries);
 
@@ -179,6 +207,14 @@ impl ReactiveStreamEngine {
             let cancelled = *cancel_rx.borrow();
             futures::future::ready(!cancelled)
         });
+
+        // Wrap with cleanup to remove from registry when stream ends
+        let wrapped = CleanupStream {
+            inner: wrapped,
+            queries: Arc::clone(&self.queries),
+            query_id: cleanup_id,
+            cleaned: false,
+        };
 
         Ok(Box::pin(wrapped))
     }
@@ -757,6 +793,66 @@ mod tests {
         assert!(first.is_ok());
         let binding = first.unwrap().unwrap();
         assert_eq!(binding.timestamp(), 0);
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_completed_stream_removes_query_from_registry() {
+        let engine = ReactiveStreamEngine::new();
+        engine.start().await.unwrap();
+
+        // Create a finite query that produces exactly 3 items
+        struct FiniteQuery {
+            id: String,
+        }
+
+        #[async_trait]
+        impl ContinuousQuery for FiniteQuery {
+            type Result = StreamElement;
+
+            fn query_id(&self) -> &str {
+                &self.id
+            }
+            fn query_string(&self) -> &str {
+                "FINITE"
+            }
+            fn query_type(&self) -> QueryType {
+                QueryType::Custom
+            }
+            fn execute(
+                &self,
+                _inputs: QueryInputs,
+            ) -> Pin<Box<dyn Stream<Item = StreamElement> + Send>> {
+                Box::pin(futures::stream::iter(vec![
+                    StreamElement::Record(StreamRecord::new("x", 1)),
+                    StreamElement::Record(StreamRecord::new("x", 2)),
+                    StreamElement::Record(StreamRecord::new("x", 3)),
+                ]))
+            }
+        }
+
+        let query = FiniteQuery {
+            id: "finite-q".to_string(),
+        };
+        let mut result_stream = engine.register_query(Box::new(query)).await.unwrap();
+
+        // Query should be registered
+        let ids = engine.registered_query_ids().await;
+        assert!(ids.contains(&"finite-q".to_string()));
+
+        // Consume all items
+        while result_stream.next().await.is_some() {}
+
+        // Give the spawned cleanup task a moment to run
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Query should be removed from registry
+        let ids = engine.registered_query_ids().await;
+        assert!(
+            !ids.contains(&"finite-q".to_string()),
+            "completed query should be removed from registry"
+        );
 
         engine.stop().await.unwrap();
     }

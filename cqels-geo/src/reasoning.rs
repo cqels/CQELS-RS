@@ -33,32 +33,32 @@ struct InferenceRule {
 const RULES: &[InferenceRule] = &[
     // sfWithin(x, y) => sfContains(y, x)
     InferenceRule {
-        from: vocabulary::SF_WITHIN,
-        to: vocabulary::SF_CONTAINS,
+        from: vocabulary::GEO_SF_WITHIN,
+        to: vocabulary::GEO_SF_CONTAINS,
         swap: true,
     },
     // sfContains(x, y) => sfWithin(y, x)
     InferenceRule {
-        from: vocabulary::SF_CONTAINS,
-        to: vocabulary::SF_WITHIN,
+        from: vocabulary::GEO_SF_CONTAINS,
+        to: vocabulary::GEO_SF_WITHIN,
         swap: true,
     },
     // sfEquals(x, y) => sfEquals(y, x)
     InferenceRule {
-        from: vocabulary::SF_EQUALS,
-        to: vocabulary::SF_EQUALS,
+        from: vocabulary::GEO_SF_EQUALS,
+        to: vocabulary::GEO_SF_EQUALS,
         swap: true,
     },
     // sfIntersects(x, y) => sfIntersects(y, x)
     InferenceRule {
-        from: vocabulary::SF_INTERSECTS,
-        to: vocabulary::SF_INTERSECTS,
+        from: vocabulary::GEO_SF_INTERSECTS,
+        to: vocabulary::GEO_SF_INTERSECTS,
         swap: true,
     },
     // sfDisjoint(x, y) => sfDisjoint(y, x)
     InferenceRule {
-        from: vocabulary::SF_DISJOINT,
-        to: vocabulary::SF_DISJOINT,
+        from: vocabulary::GEO_SF_DISJOINT,
+        to: vocabulary::GEO_SF_DISJOINT,
         swap: true,
     },
 ];
@@ -123,13 +123,13 @@ mod tests {
         let reasoner = GeoSparqlSimpleReasoner;
         let facts = vec![Statement::new(
             iri("http://example.org/a"),
-            IriTerm::new(vocabulary::SF_WITHIN),
+            IriTerm::new(vocabulary::GEO_SF_WITHIN),
             iri("http://example.org/b"),
         )];
 
         let inferred = reasoner.infer(&facts);
         assert_eq!(inferred.len(), 1);
-        assert_eq!(inferred[0].predicate.as_str(), vocabulary::SF_CONTAINS);
+        assert_eq!(inferred[0].predicate.as_str(), vocabulary::GEO_SF_CONTAINS);
         // Subject and object should be swapped
         assert_eq!(inferred[0].subject, iri("http://example.org/b"));
         assert_eq!(inferred[0].object, iri("http://example.org/a"));
@@ -140,13 +140,13 @@ mod tests {
         let reasoner = GeoSparqlSimpleReasoner;
         let facts = vec![Statement::new(
             iri("http://example.org/a"),
-            IriTerm::new(vocabulary::SF_CONTAINS),
+            IriTerm::new(vocabulary::GEO_SF_CONTAINS),
             iri("http://example.org/b"),
         )];
 
         let inferred = reasoner.infer(&facts);
         assert_eq!(inferred.len(), 1);
-        assert_eq!(inferred[0].predicate.as_str(), vocabulary::SF_WITHIN);
+        assert_eq!(inferred[0].predicate.as_str(), vocabulary::GEO_SF_WITHIN);
         assert_eq!(inferred[0].subject, iri("http://example.org/b"));
         assert_eq!(inferred[0].object, iri("http://example.org/a"));
     }
@@ -156,13 +156,13 @@ mod tests {
         let reasoner = GeoSparqlSimpleReasoner;
         let facts = vec![Statement::new(
             iri("http://example.org/a"),
-            IriTerm::new(vocabulary::SF_EQUALS),
+            IriTerm::new(vocabulary::GEO_SF_EQUALS),
             iri("http://example.org/b"),
         )];
 
         let inferred = reasoner.infer(&facts);
         assert_eq!(inferred.len(), 1);
-        assert_eq!(inferred[0].predicate.as_str(), vocabulary::SF_EQUALS);
+        assert_eq!(inferred[0].predicate.as_str(), vocabulary::GEO_SF_EQUALS);
         assert_eq!(inferred[0].subject, iri("http://example.org/b"));
         assert_eq!(inferred[0].object, iri("http://example.org/a"));
     }
@@ -172,13 +172,16 @@ mod tests {
         let reasoner = GeoSparqlSimpleReasoner;
         let facts = vec![Statement::new(
             iri("http://example.org/a"),
-            IriTerm::new(vocabulary::SF_INTERSECTS),
+            IriTerm::new(vocabulary::GEO_SF_INTERSECTS),
             iri("http://example.org/b"),
         )];
 
         let inferred = reasoner.infer(&facts);
         assert_eq!(inferred.len(), 1);
-        assert_eq!(inferred[0].predicate.as_str(), vocabulary::SF_INTERSECTS);
+        assert_eq!(
+            inferred[0].predicate.as_str(),
+            vocabulary::GEO_SF_INTERSECTS
+        );
     }
 
     #[test]
@@ -186,13 +189,13 @@ mod tests {
         let reasoner = GeoSparqlSimpleReasoner;
         let facts = vec![Statement::new(
             iri("http://example.org/a"),
-            IriTerm::new(vocabulary::SF_DISJOINT),
+            IriTerm::new(vocabulary::GEO_SF_DISJOINT),
             iri("http://example.org/b"),
         )];
 
         let inferred = reasoner.infer(&facts);
         assert_eq!(inferred.len(), 1);
-        assert_eq!(inferred[0].predicate.as_str(), vocabulary::SF_DISJOINT);
+        assert_eq!(inferred[0].predicate.as_str(), vocabulary::GEO_SF_DISJOINT);
     }
 
     #[test]
@@ -200,7 +203,7 @@ mod tests {
         let reasoner = GeoSparqlSimpleReasoner;
         let facts = vec![Statement::new(
             iri("http://example.org/a"),
-            IriTerm::new(vocabulary::SF_WITHIN),
+            IriTerm::new(vocabulary::GEO_SF_WITHIN),
             Term::Literal(cqels_model::term::LiteralTerm::new("POINT(1 2)")),
         )];
 

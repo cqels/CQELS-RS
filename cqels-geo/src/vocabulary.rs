@@ -26,7 +26,7 @@ pub const CRS84: &str = "http://www.opengis.net/def/crs/OGC/1.3/CRS84";
 /// WKT literal datatype IRI.
 pub const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
 
-// ─── Simple Features topological relation IRIs ───────────────────────────────
+// ─── Simple Features topological function IRIs (GEOF namespace) ──────────────
 
 pub const SF_WITHIN: &str = "http://www.opengis.net/def/function/geosparql/sfWithin";
 pub const SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfContains";
@@ -36,6 +36,14 @@ pub const SF_EQUALS: &str = "http://www.opengis.net/def/function/geosparql/sfEqu
 pub const SF_TOUCHES: &str = "http://www.opengis.net/def/function/geosparql/sfTouches";
 pub const SF_CROSSES: &str = "http://www.opengis.net/def/function/geosparql/sfCrosses";
 pub const SF_OVERLAPS: &str = "http://www.opengis.net/def/function/geosparql/sfOverlaps";
+
+// ─── Ontology-namespace relation IRIs (for RDF predicates) ──────────────────
+
+pub const GEO_SF_WITHIN: &str = "http://www.opengis.net/ont/geosparql#sfWithin";
+pub const GEO_SF_CONTAINS: &str = "http://www.opengis.net/ont/geosparql#sfContains";
+pub const GEO_SF_INTERSECTS: &str = "http://www.opengis.net/ont/geosparql#sfIntersects";
+pub const GEO_SF_DISJOINT: &str = "http://www.opengis.net/ont/geosparql#sfDisjoint";
+pub const GEO_SF_EQUALS: &str = "http://www.opengis.net/ont/geosparql#sfEquals";
 
 /// GeoSPARQL distance function IRI.
 pub const DISTANCE: &str = "http://www.opengis.net/def/function/geosparql/distance";

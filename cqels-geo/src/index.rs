@@ -191,7 +191,7 @@ impl GeoSpatialIndex {
             if let Some(indexed) = self.geometries.get(id) {
                 let indexed_val = crate::geometry::wkt_literal(&indexed.wkt_literal);
                 let eval_result =
-                    functions::evaluate_function(&canonical, &[query_geom, &indexed_val]);
+                    functions::evaluate_function(&canonical, &[&indexed_val, query_geom]);
                 if matches!(eval_result, Some(Value::Boolean(true))) {
                     results.push(id.clone());
                 }
@@ -332,6 +332,32 @@ mod tests {
         let snap = idx.snapshot_literals();
         assert_eq!(snap.len(), 3);
         assert!(snap.contains_key("p1"));
+    }
+
+    #[test]
+    fn test_query_matches_sf_within() {
+        let mut idx = make_index_with_points();
+        let query = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        let matches = idx.query_matches("geof:sfWithin", &query);
+        // p1 (0.5,0.5) and p2 (0.8,0.8) are within the polygon; p3 (5,5) is not
+        assert!(matches.contains(&"p1".to_string()));
+        assert!(matches.contains(&"p2".to_string()));
+        assert!(!matches.contains(&"p3".to_string()));
+    }
+
+    #[test]
+    fn test_query_matches_sf_contains() {
+        let mut idx = GeoSpatialIndex::new();
+        idx.put(
+            "poly",
+            &wkt_literal("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"),
+        );
+        idx.put("small", &wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"));
+        let query = wkt_literal("POINT(0.5 0.5)");
+        let matches = idx.query_matches("geof:sfContains", &query);
+        // sfContains(indexed_polygon, query_point) = true for both polygons
+        assert!(matches.contains(&"poly".to_string()));
+        assert!(matches.contains(&"small".to_string()));
     }
 
     #[test]
