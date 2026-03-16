@@ -89,9 +89,13 @@ impl<S> CleanupStream<S> {
             self.cleaned = true;
             let queries = Arc::clone(&self.queries);
             let id = self.query_id.clone();
-            tokio::spawn(async move {
-                queries.lock().await.remove(&id);
-            });
+            // Use try_current() to avoid panicking when dropped outside a
+            // Tokio runtime (e.g. after runtime shutdown).
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    queries.lock().await.remove(&id);
+                });
+            }
         }
     }
 }
@@ -295,6 +299,11 @@ impl StreamEngine for ReactiveStreamEngine {
         let (tx, _rx) = broadcast::channel(self.broadcast_capacity);
 
         let mut streams = self.streams.lock().await;
+        if streams.contains_key(name) {
+            return Err(CqelsError::Stream {
+                message: format!("stream '{}' is already registered", name),
+            });
+        }
         streams.insert(
             name.to_string(),
             StreamState {
@@ -510,6 +519,24 @@ mod tests {
         // After stop, streams map should be empty
         let streams = engine.streams.lock().await;
         assert!(streams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_stream_name_rejected() {
+        let engine = ReactiveStreamEngine::new();
+
+        let (_tx1, stream1) = create_stream_pair(32);
+        let (_tx2, stream2) = create_stream_pair(32);
+
+        engine.register_stream("dup", stream1).await.unwrap();
+        let result = engine.register_stream("dup", stream2).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CqelsError::Stream { message } => {
+                assert!(message.contains("already registered"));
+            }
+            other => panic!("expected Stream error, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -870,6 +897,23 @@ mod tests {
         );
 
         engine.stop().await.unwrap();
+    }
+
+    #[test]
+    fn test_drop_outside_runtime_does_not_panic() {
+        // Create a runtime, register a query, then drop the runtime
+        // before dropping the stream. This must not panic.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let stream = rt.block_on(async {
+            let engine = ReactiveStreamEngine::new();
+            engine.start().await.unwrap();
+            let query = MockContinuousQuery::new("outside-rt");
+            engine.register_query(Box::new(query)).await.unwrap()
+        });
+        // Drop the runtime first
+        drop(rt);
+        // Drop the stream outside any runtime — must not panic
+        drop(stream);
     }
 
     #[tokio::test]

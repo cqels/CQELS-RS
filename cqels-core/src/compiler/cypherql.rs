@@ -4,7 +4,10 @@
 //! can be executed against input streams. Pre-parses all expression strings
 //! (WHERE, HAVING, ORDER BY, RETURN) into `Expression` trees at compile time.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static CYPHER_QUERY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::expression::ast::Expression;
 use crate::expression::evaluator::ExpressionEvaluator;
@@ -120,10 +123,10 @@ impl CypherQueryCompiler {
             .collect();
 
         // Query ID
-        let query_id = definition
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("cypher-query-{}", hash_string(query_string)));
+        let query_id = definition.name.clone().unwrap_or_else(|| {
+            let n = CYPHER_QUERY_COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("cypher-query-{}-{n}", hash_string(query_string))
+        });
 
         Ok(CompiledCypherQuery {
             query_string: query_string.to_string(),
