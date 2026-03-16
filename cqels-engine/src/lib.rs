@@ -48,4 +48,4 @@ pub mod runtime;
 
 pub use cep::{Contiguity, NfaPatternProcessor, Pattern, PatternMatch, Quantifier};
 pub use engine::{create_stream_pair, receiver_to_stream, ReactiveStreamEngine, StreamEngine};
-pub use runtime::CqelsRuntime;
+pub use runtime::{CqelsRuntime, QueryRegistration};

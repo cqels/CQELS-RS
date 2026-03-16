@@ -16,12 +16,24 @@ use futures::Stream;
 
 use cqels_core::compiler::{CqelsQueryCompiler, CypherQueryCompiler};
 use cqels_core::parser::{CqelsQlParser, CypherQlParser};
+use cqels_core::query::ContinuousQuery;
 use cqels_core::store::RdfStore;
 use cqels_core::stream::{StreamElement, Timestamped};
 use cqels_model::{BindingSet, CqelsError, Statement};
 
 use crate::cep::{NfaPatternProcessor, Pattern, PatternMatch};
 use crate::engine::{ReactiveStreamEngine, StreamEngine};
+
+/// Handle returned from query registration, containing the query ID and result stream.
+///
+/// The `query_id` can be used later with [`CqelsRuntime::unregister_query`] to cancel
+/// the query. The `stream` yields query results as they are produced.
+pub struct QueryRegistration<T> {
+    /// The unique ID assigned to this query.
+    pub query_id: String,
+    /// The result stream for this query.
+    pub stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+}
 
 /// High-level runtime combining engine, store, parser, compiler, reasoning,
 /// and CEP into a unified API.
@@ -116,6 +128,21 @@ impl CqelsRuntime {
         self.engine.register_stream(name, stream).await
     }
 
+    /// Replaces a named stream with a new source.
+    ///
+    /// Unregisters the existing stream (if any) and registers the new one.
+    /// If reasoning is enabled, the new stream is automatically wrapped with
+    /// the RETE reasoning operator.
+    pub async fn replace_stream(
+        &self,
+        name: &str,
+        stream: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,
+    ) -> Result<(), CqelsError> {
+        // Ignore "not found" errors from unregister — the stream may not exist yet
+        let _ = self.engine.unregister_stream(name).await;
+        self.register_stream(name, stream).await
+    }
+
     /// Starts the engine, activating all registered streams.
     pub async fn start(&self) -> Result<(), CqelsError> {
         self.engine.start().await
@@ -157,11 +184,13 @@ impl CqelsRuntime {
     /// The runtime's RDF store is automatically passed to the compiler
     /// for resolving `STATIC { ... }` and `GRAPH <uri> { ... }` patterns.
     ///
-    /// Returns a stream of [`BindingSet`] results.
+    /// Returns a [`QueryRegistration`] containing the assigned query ID
+    /// and a stream of [`BindingSet`] results. Use the query ID with
+    /// [`unregister_query`](Self::unregister_query) to cancel the query later.
     pub async fn register_cqelsql_query(
         &self,
         query_string: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
+    ) -> Result<QueryRegistration<BindingSet>, CqelsError> {
         let definition =
             CqelsQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
                 message: format!("Parse error: {e}"),
@@ -176,7 +205,12 @@ impl CqelsRuntime {
             message: format!("Compile error: {e}"),
         })?;
 
-        self.engine.register_binding_query(Box::new(compiled)).await
+        let query_id = compiled.query_id().to_string();
+        let stream = self
+            .engine
+            .register_binding_query(Box::new(compiled))
+            .await?;
+        Ok(QueryRegistration { query_id, stream })
     }
 
     /// Parses, compiles, and registers a CypherQL query.
@@ -184,11 +218,13 @@ impl CqelsRuntime {
     /// The runtime's RDF store is automatically passed to the compiler
     /// for resolving static and named graph patterns.
     ///
-    /// Returns a stream of [`BindingSet`] results.
+    /// Returns a [`QueryRegistration`] containing the assigned query ID
+    /// and a stream of [`BindingSet`] results. Use the query ID with
+    /// [`unregister_query`](Self::unregister_query) to cancel the query later.
     pub async fn register_cypherql_query(
         &self,
         query_string: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
+    ) -> Result<QueryRegistration<BindingSet>, CqelsError> {
         let definition =
             CypherQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
                 message: format!("Parse error: {e}"),
@@ -203,7 +239,12 @@ impl CqelsRuntime {
             message: format!("Compile error: {e}"),
         })?;
 
-        self.engine.register_binding_query(Box::new(compiled)).await
+        let query_id = compiled.query_id().to_string();
+        let stream = self
+            .engine
+            .register_binding_query(Box::new(compiled))
+            .await?;
+        Ok(QueryRegistration { query_id, stream })
     }
 
     /// Registers a CEP pattern against a named stream.

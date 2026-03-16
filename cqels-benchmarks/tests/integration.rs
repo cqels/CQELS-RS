@@ -2165,7 +2165,8 @@ async fn test_runtime_cqelsql_query() {
         }
     "#;
 
-    let mut result_stream = runtime.register_cqelsql_query(query_str).await.unwrap();
+    let reg = runtime.register_cqelsql_query(query_str).await.unwrap();
+    let mut result_stream = reg.stream;
 
     let elem = stream_elem_literal(
         "http://example.org/s1",
@@ -2219,7 +2220,8 @@ async fn test_runtime_with_static_store() {
         }
     "#;
 
-    let mut result_stream = runtime.register_cqelsql_query(query_str).await.unwrap();
+    let reg = runtime.register_cqelsql_query(query_str).await.unwrap();
+    let mut result_stream = reg.stream;
 
     let elem = stream_elem_literal(
         "http://example.org/s1",
@@ -2387,7 +2389,8 @@ async fn test_runtime_reasoning_integration() {
         }
     "#;
 
-    let mut result_stream = runtime.register_cqelsql_query(query_str).await.unwrap();
+    let reg = runtime.register_cqelsql_query(query_str).await.unwrap();
+    let mut result_stream = reg.stream;
 
     // Send the original triple — reasoning should infer the "is Human" triple
     let elem = StreamElement::Rdf(RdfStreamElement::new(
