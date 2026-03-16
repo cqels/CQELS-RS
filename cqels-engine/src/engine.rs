@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
@@ -78,7 +78,7 @@ struct QueryState {
 /// ends naturally or the stream is dropped.
 struct CleanupStream<S> {
     inner: S,
-    queries: Arc<Mutex<HashMap<String, QueryState>>>,
+    queries: Arc<StdMutex<HashMap<String, QueryState>>>,
     query_id: String,
     cleaned: bool,
 }
@@ -87,14 +87,8 @@ impl<S> CleanupStream<S> {
     fn do_cleanup(&mut self) {
         if !self.cleaned {
             self.cleaned = true;
-            let queries = Arc::clone(&self.queries);
-            let id = self.query_id.clone();
-            // Use try_current() to avoid panicking when dropped outside a
-            // Tokio runtime (e.g. after runtime shutdown).
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    queries.lock().await.remove(&id);
-                });
+            if let Ok(mut guard) = self.queries.lock() {
+                guard.remove(&self.query_id);
             }
         }
     }
@@ -134,7 +128,10 @@ pub struct ReactiveStreamEngine {
     running: AtomicBool,
     broadcast_capacity: usize,
     /// Registry of active queries, keyed by query_id.
-    queries: Arc<Mutex<HashMap<String, QueryState>>>,
+    ///
+    /// Uses `std::sync::Mutex` (not tokio) so that `CleanupStream::Drop`
+    /// can synchronously remove entries without requiring an async runtime.
+    queries: Arc<StdMutex<HashMap<String, QueryState>>>,
 }
 
 impl Default for ReactiveStreamEngine {
@@ -150,7 +147,7 @@ impl ReactiveStreamEngine {
             pending: Arc::new(Mutex::new(Vec::new())),
             running: AtomicBool::new(false),
             broadcast_capacity: 4096,
-            queries: Arc::new(Mutex::new(HashMap::new())),
+            queries: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -212,7 +209,7 @@ impl ReactiveStreamEngine {
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
-        let mut queries = self.queries.lock().await;
+        let mut queries = self.queries.lock().unwrap();
         if queries.contains_key(&query_id) {
             return Err(CqelsError::Stream {
                 message: format!("query '{}' is already registered", query_id),
@@ -242,7 +239,7 @@ impl ReactiveStreamEngine {
     ///
     /// The query's output stream will terminate on its next item yield.
     pub async fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
-        let mut queries = self.queries.lock().await;
+        let mut queries = self.queries.lock().unwrap();
         match queries.remove(query_id) {
             Some(state) => {
                 let _ = state.cancel_tx.send(true);
@@ -256,7 +253,7 @@ impl ReactiveStreamEngine {
 
     /// Returns the IDs of all currently registered queries.
     pub async fn registered_query_ids(&self) -> Vec<String> {
-        let queries = self.queries.lock().await;
+        let queries = self.queries.lock().unwrap();
         queries.keys().cloned().collect()
     }
 
@@ -386,7 +383,7 @@ impl StreamEngine for ReactiveStreamEngine {
 
         // Cancel all registered queries
         {
-            let mut queries = self.queries.lock().await;
+            let mut queries = self.queries.lock().unwrap();
             for (_id, state) in queries.drain() {
                 let _ = state.cancel_tx.send(true);
             }
