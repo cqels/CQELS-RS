@@ -240,6 +240,7 @@ version = "0.1.0"
 dependencies = [
  "cqels-core",
  "cqels-engine",
+ "cqels-geo",
  "cqels-model",
  "cqels-reasoning",
  "criterion",
@@ -2260,6 +2261,13 @@ dependencies = [
  "log",
  "num-traits",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

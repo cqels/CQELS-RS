@@ -6,6 +6,7 @@ members = [
     "cqels-reasoning",
     "cqels-geo",
     "cqels-benchmarks",
+    "xtask",
 ]
 resolver = "2"
 
@@ -71,3 +72,4 @@ cqels-model = { path = "cqels-model" }
 cqels-core = { path = "cqels-core" }
 cqels-engine = { path = "cqels-engine" }
 cqels-reasoning = { path = "cqels-reasoning" }
+cqels-geo = { path = "cqels-geo" }

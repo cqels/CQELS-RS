@@ -4,7 +4,7 @@
 
 - Cargo path: `~/.cargo/bin/cargo` (not in default PATH)
 - MSRV: Rust 1.83 (see `rust-version` in workspace Cargo.toml)
-- Workspace members: cqels-model, cqels-core, cqels-engine, cqels-reasoning, cqels-benchmarks
+- Workspace members: cqels-model, cqels-core, cqels-engine, cqels-reasoning, cqels-geo, cqels-benchmarks, xtask
 - Repo: HiveIntel/cqels-rs on GitHub
 
 ## Build & Test Commands
@@ -38,8 +38,26 @@ Run ALL of these in order. Fix any failures before committing. Do NOT skip any s
 
 ## CI Pipeline
 
-CI runs 7 jobs: Check, Format, Clippy, Test, Documentation, MSRV (1.80), Benchmarks compile.
+CI runs 10 jobs split into PR-required and nightly/scheduled tiers.
 Config: `.github/workflows/ci.yml`
+
+### PR-required (push/PR events)
+- Format, Clippy, Documentation
+- PR Impact Suite (`cargo xtask test impact --base origin/main`)
+- Fast Workspace Tests (`cargo nextest run --workspace --lib --bins --tests`)
+
+### Nightly/scheduled (cron + workflow_dispatch)
+- Full Regression Sweep (`cargo xtask test full`)
+- Coverage (`cargo xtask coverage`, artifacts uploaded)
+- MSRV (1.83) check
+- Benchmarks Compile + Benchmarks Observe (artifacts uploaded)
+
+### xtask
+- `cargo xtask test pr` — full local PR check (fmt + clippy + doc + tests + impact)
+- `cargo xtask test impact --base origin/main` — impact-based regression suite
+- `cargo xtask test full` — all workspace tests
+- `cargo xtask coverage` — code coverage with cargo-llvm-cov
+- `cargo xtask bench-observe` — benchmark observation run
 
 ### MSRV Notes
 - Benchmarks excluded from MSRV check (criterion deps have high MSRV)

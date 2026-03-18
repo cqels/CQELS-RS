@@ -11,6 +11,7 @@ cqels-model.workspace = true
 cqels-core.workspace = true
 cqels-engine.workspace = true
 cqels-reasoning.workspace = true
+cqels-geo.workspace = true
 tokio.workspace = true
 futures.workspace = true
 criterion.workspace = true

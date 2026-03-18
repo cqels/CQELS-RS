@@ -89,13 +89,27 @@ cqels-core           Stream processing core (windows, operators, parsers)
 | [Complex Event Processing](docs/cep.md) | Intermediate | NFA pattern matching and detection |
 | [Reasoning](docs/reasoning.md) | Advanced | RETE network, rules, inference |
 | [Advanced Guide](docs/advanced.md) | Advanced | Custom operators, performance tuning, engine runtime |
+| [Testing](docs/testing.md) | Reference | Regression suites, `xtask` workflows, CI policy |
 | [API Reference](docs/api-reference.md) | Reference | All public types and traits |
 
 Full API docs: `cargo doc --workspace --no-deps --open`
 
+## Testing Workflow
+
+The supported contributor workflow uses `xtask`:
+
+```bash
+cargo xtask test pr
+cargo xtask test impact --base origin/main
+cargo xtask test full
+```
+
+See [docs/testing.md](docs/testing.md) for the full layered regression policy,
+issue-regression rules, and CI process.
+
 ## Requirements
 
-- Rust 1.75+
+- Rust 1.83+
 - Edition 2021
 
 ## License
