@@ -293,6 +293,7 @@ impl StreamEngine for ReactiveStreamEngine {
         name: &str,
         stream: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,
     ) -> Result<(), CqelsError> {
+        tracing::info!(stream_name = %name, "registering stream");
         let (tx, _rx) = broadcast::channel(self.broadcast_capacity);
 
         let mut streams = self.streams.lock().await;
@@ -326,6 +327,7 @@ impl StreamEngine for ReactiveStreamEngine {
         query: Box<dyn ContinuousQuery<Result = StreamElement>>,
     ) -> Result<Pin<Box<dyn Stream<Item = StreamElement> + Send>>, CqelsError> {
         let query_id = query.query_id().to_string();
+        tracing::info!(query_id = %query_id, "registering query");
         let inputs = self.build_query_inputs().await;
         let raw_stream = query.execute(inputs);
         self.wrap_with_cancellation(query_id, raw_stream).await
@@ -350,9 +352,11 @@ impl StreamEngine for ReactiveStreamEngine {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
+            tracing::debug!("engine already running, start is a no-op");
             return Ok(());
         }
 
+        tracing::info!("engine started");
         self.activate_pending().await;
         Ok(())
     }
@@ -382,8 +386,10 @@ impl StreamEngine for ReactiveStreamEngine {
         }
 
         // Cancel all registered queries
+        let query_count;
         {
             let mut queries = self.queries.lock().unwrap();
+            query_count = queries.len();
             for (_id, state) in queries.drain() {
                 let _ = state.cancel_tx.send(true);
             }
@@ -391,6 +397,7 @@ impl StreamEngine for ReactiveStreamEngine {
 
         // Abort all forwarding task handles before clearing
         let mut streams = self.streams.lock().await;
+        let stream_count = streams.len();
         for (_name, state) in streams.drain() {
             if let Some(handle) = state._handle {
                 handle.abort();
@@ -400,6 +407,11 @@ impl StreamEngine for ReactiveStreamEngine {
         let mut pending = self.pending.lock().await;
         pending.clear();
 
+        tracing::info!(
+            queries_cancelled = query_count,
+            streams_stopped = stream_count,
+            "engine stopped"
+        );
         Ok(())
     }
 

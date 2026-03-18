@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         "test" => run_test_subcommand(args),
         "coverage" => run_coverage(),
         "bench-observe" => run_bench_observe(),
+        "bench-save-baseline" => run_bench_save_baseline(),
         other => bail!("unknown xtask command: {other}"),
     }
 }
@@ -43,7 +44,8 @@ fn print_usage() {
   cargo xtask test impact [--base <git-ref>]
   cargo xtask test full
   cargo xtask coverage
-  cargo xtask bench-observe"
+  cargo xtask bench-observe
+  cargo xtask bench-save-baseline"
     );
 }
 
@@ -194,11 +196,174 @@ fn run_bench_observe() -> Result<()> {
         ],
     )?;
 
-    let summary =
-        "Bench observation completed.\n\nArtifacts:\n- target/criterion\n- target/xtask/bench-observe\n"
-            .to_string();
-    fs::write(out_dir.join("summary.txt"), summary).context("writing bench summary")?;
+    // Collect benchmark results from Criterion estimates.json files
+    let results = collect_criterion_results()?;
+    let current_path = out_dir.join("results.json");
+    let baseline_path = PathBuf::from("bench-baseline.json");
+
+    // Write current results
+    let results_json = serde_json_minimal(&results);
+    fs::write(&current_path, &results_json).context("writing bench results")?;
+
+    // Compare against baseline if it exists
+    let mut summary = String::from("Bench observation completed.\n\n");
+    if baseline_path.exists() {
+        let baseline_data = fs::read_to_string(&baseline_path).context("reading baseline")?;
+        let baseline = parse_bench_results(&baseline_data);
+        let regression_threshold = 1.10; // 10% regression threshold
+
+        let mut regressions = Vec::new();
+        for (name, current_ns) in &results {
+            if let Some(baseline_ns) = baseline.get(name.as_str()) {
+                let ratio = *current_ns / baseline_ns;
+                if ratio > regression_threshold {
+                    regressions.push(format!(
+                        "  REGRESSION: {name}: {:.2}x slower ({:.0}ns -> {:.0}ns)",
+                        ratio, baseline_ns, current_ns
+                    ));
+                }
+            }
+        }
+
+        if regressions.is_empty() {
+            summary.push_str("No regressions detected (threshold: 10%).\n");
+        } else {
+            summary.push_str(&format!(
+                "WARNING: {} regression(s) detected:\n{}\n",
+                regressions.len(),
+                regressions.join("\n")
+            ));
+        }
+    } else {
+        summary
+            .push_str("No baseline found. Run `cargo xtask bench-save-baseline` to create one.\n");
+    }
+
+    summary.push_str("\nArtifacts:\n- target/criterion\n- target/xtask/bench-observe\n");
+    fs::write(out_dir.join("summary.txt"), &summary).context("writing bench summary")?;
+    print!("{summary}");
     Ok(())
+}
+
+fn run_bench_save_baseline() -> Result<()> {
+    let results_path = PathBuf::from("target/xtask/bench-observe/results.json");
+    let baseline_path = PathBuf::from("bench-baseline.json");
+
+    if !results_path.exists() {
+        bail!("No results found. Run `cargo xtask bench-observe` first.");
+    }
+
+    fs::copy(&results_path, &baseline_path).context("saving baseline")?;
+    println!("Baseline saved to {}", baseline_path.display());
+    Ok(())
+}
+
+/// Collects benchmark results from Criterion's estimates.json files.
+fn collect_criterion_results() -> Result<Vec<(String, f64)>> {
+    let criterion_dir = PathBuf::from("target/criterion");
+    let mut results = Vec::new();
+
+    if !criterion_dir.exists() {
+        return Ok(results);
+    }
+
+    // Walk the criterion directory looking for estimates.json files
+    collect_estimates_recursive(&criterion_dir, "", &mut results)?;
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(results)
+}
+
+fn collect_estimates_recursive(
+    dir: &PathBuf,
+    prefix: &str,
+    results: &mut Vec<(String, f64)>,
+) -> Result<()> {
+    let new_dir = dir.join("new");
+    let estimates = new_dir.join("estimates.json");
+
+    if estimates.exists() {
+        if let Ok(data) = fs::read_to_string(&estimates) {
+            // Extract point_estimate.point_estimate from the JSON
+            if let Some(ns) = extract_point_estimate(&data) {
+                let name = if prefix.is_empty() {
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                } else {
+                    prefix.to_string()
+                };
+                results.push((name, ns));
+            }
+        }
+    }
+
+    // Recurse into subdirectories
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if name == "new" || name == "base" || name == "change" || name == "report" {
+                    continue;
+                }
+                let child_prefix = if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                collect_estimates_recursive(&path, &child_prefix, results)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extracts the mean point estimate (nanoseconds) from Criterion estimates.json.
+fn extract_point_estimate(json: &str) -> Option<f64> {
+    // Simple extraction: find "mean":{"confidence_interval":{...},"point_estimate":NUMBER
+    let mean_idx = json.find("\"mean\"")?;
+    let after_mean = &json[mean_idx..];
+    let pe_idx = after_mean.find("\"point_estimate\"")?;
+    let after_pe = &after_mean[pe_idx + "\"point_estimate\"".len()..];
+    let colon_idx = after_pe.find(':')?;
+    let after_colon = after_pe[colon_idx + 1..].trim_start();
+    // Read the number until comma, brace, or bracket
+    let end = after_colon
+        .find([',', '}', ']'])
+        .unwrap_or(after_colon.len());
+    after_colon[..end].trim().parse::<f64>().ok()
+}
+
+/// Minimal JSON serialization for benchmark results.
+fn serde_json_minimal(results: &[(String, f64)]) -> String {
+    let entries: Vec<String> = results
+        .iter()
+        .map(|(name, ns)| format!("  \"{name}\": {ns:.2}"))
+        .collect();
+    format!("{{\n{}\n}}\n", entries.join(",\n"))
+}
+
+/// Parses benchmark results from a JSON file.
+fn parse_bench_results(json: &str) -> HashMap<String, f64> {
+    let mut results = HashMap::new();
+    // Simple line-by-line parsing of our minimal JSON format
+    for line in json.lines() {
+        let line = line.trim().trim_end_matches(',');
+        if let Some(rest) = line.strip_prefix('"') {
+            if let Some(name_end) = rest.find('"') {
+                let name = &rest[..name_end];
+                if let Some(colon_idx) = rest.find(':') {
+                    if let Ok(val) = rest[colon_idx + 1..].trim().parse::<f64>() {
+                        results.insert(name.to_string(), val);
+                    }
+                }
+            }
+        }
+    }
+    results
 }
 
 fn collect_changed_files(base: &str) -> Result<Vec<String>> {

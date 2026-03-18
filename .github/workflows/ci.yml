@@ -75,6 +75,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo nextest run --workspace --lib --bins --tests
 
+  deny:
+    name: Cargo Deny
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # ─── Cross-platform verification (PR-required) ──────────────────────
+
+  test-macos:
+    name: Tests (macOS)
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  test-windows:
+    name: Tests (Windows)
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  # ─── WASM compilation check (PR-required) ───────────────────────────
+
+  wasm:
+    name: WASM Check
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p cqels-model --target wasm32-wasip1
+
+  # ─── Nightly / scheduled jobs ───────────────────────────────────────
+
   nightly-full:
     name: Full Regression Sweep
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -114,6 +160,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.83
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --exclude cqels-benchmarks --locked
+
+  nightly-audit:
+    name: Security Audit
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   nightly-bench-compile:
     name: Benchmarks Compile

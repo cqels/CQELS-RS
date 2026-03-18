@@ -191,6 +191,7 @@ impl CqelsRuntime {
         &self,
         query_string: &str,
     ) -> Result<QueryRegistration<BindingSet>, CqelsError> {
+        tracing::info!("registering CqelsQL query");
         let definition =
             CqelsQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
                 message: format!("Parse error: {e}"),
@@ -206,6 +207,7 @@ impl CqelsRuntime {
         })?;
 
         let query_id = compiled.query_id().to_string();
+        tracing::info!(query_id = %query_id, "CqelsQL query compiled");
         let stream = self
             .engine
             .register_binding_query(Box::new(compiled))
@@ -225,6 +227,7 @@ impl CqelsRuntime {
         &self,
         query_string: &str,
     ) -> Result<QueryRegistration<BindingSet>, CqelsError> {
+        tracing::info!("registering CypherQL query");
         let definition =
             CypherQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
                 message: format!("Parse error: {e}"),
@@ -240,6 +243,7 @@ impl CqelsRuntime {
         })?;
 
         let query_id = compiled.query_id().to_string();
+        tracing::info!(query_id = %query_id, "CypherQL query compiled");
         let stream = self
             .engine
             .register_binding_query(Box::new(compiled))
