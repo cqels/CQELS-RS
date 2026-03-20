@@ -169,3 +169,138 @@ impl ReasoningConfigBuilder {
         self.try_build().expect("rule_set is required")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pattern::{PatternTerm, TriplePattern, TripleTemplate};
+    use crate::rule::{Rule, RuleSet};
+
+    fn make_rule_set() -> RuleSet {
+        let rule = Rule::builder()
+            .id("test-rule")
+            .pattern(TriplePattern::new(
+                PatternTerm::var("s"),
+                PatternTerm::var("p"),
+                PatternTerm::var("o"),
+            ))
+            .template(TripleTemplate::new(
+                PatternTerm::var("s"),
+                PatternTerm::var("p"),
+                PatternTerm::var("o"),
+            ))
+            .build();
+        RuleSet::new(vec![rule])
+    }
+
+    #[test]
+    fn test_builder_defaults() {
+        let config = ReasoningConfig::builder().rule_set(make_rule_set()).build();
+        assert_eq!(config.default_window(), Duration::from_secs(300));
+        assert!(!config.enable_recursive_inference());
+        assert_eq!(config.max_recursion_depth(), 10);
+        assert!(config.emit_input_triples());
+        assert!(!config.track_provenance());
+    }
+
+    #[test]
+    fn test_try_build_missing_rule_set() {
+        let result = ReasoningConfig::builder().try_build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_try_build_success() {
+        let result = ReasoningConfig::builder()
+            .rule_set(make_rule_set())
+            .try_build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_max_recursion_depth_clamped_to_one() {
+        let config = ReasoningConfig::builder()
+            .rule_set(make_rule_set())
+            .max_recursion_depth(0)
+            .build();
+        assert_eq!(config.max_recursion_depth(), 1);
+    }
+
+    #[test]
+    fn test_max_recursion_depth_normal() {
+        let config = ReasoningConfig::builder()
+            .rule_set(make_rule_set())
+            .max_recursion_depth(5)
+            .build();
+        assert_eq!(config.max_recursion_depth(), 5);
+    }
+
+    #[test]
+    fn test_builder_custom_window() {
+        let config = ReasoningConfig::builder()
+            .rule_set(make_rule_set())
+            .default_window(Duration::from_secs(60))
+            .build();
+        assert_eq!(config.default_window(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_builder_recursive_inference() {
+        let config = ReasoningConfig::builder()
+            .rule_set(make_rule_set())
+            .enable_recursive_inference(true)
+            .build();
+        assert!(config.enable_recursive_inference());
+    }
+
+    #[test]
+    fn test_builder_conflict_resolution() {
+        let config = ReasoningConfig::builder()
+            .rule_set(make_rule_set())
+            .conflict_resolution(ConflictResolution::All)
+            .build();
+        assert_eq!(config.conflict_resolution(), ConflictResolution::All);
+    }
+
+    #[test]
+    fn test_builder_emit_input_triples() {
+        let config = ReasoningConfig::builder()
+            .rule_set(make_rule_set())
+            .emit_input_triples(false)
+            .build();
+        assert!(!config.emit_input_triples());
+    }
+
+    #[test]
+    fn test_builder_track_provenance() {
+        let config = ReasoningConfig::builder()
+            .rule_set(make_rule_set())
+            .track_provenance(true)
+            .build();
+        assert!(config.track_provenance());
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = ReasoningConfig::default_config(make_rule_set());
+        assert_eq!(config.default_window(), Duration::from_secs(300));
+        assert_eq!(config.max_recursion_depth(), 10);
+    }
+
+    #[test]
+    fn test_debug_format() {
+        let config = ReasoningConfig::builder().rule_set(make_rule_set()).build();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("ReasoningConfig"));
+        assert!(debug.contains("rules"));
+        assert!(debug.contains("window"));
+    }
+
+    #[test]
+    fn test_rule_set_accessor() {
+        let rs = make_rule_set();
+        let size = rs.size();
+        let config = ReasoningConfig::builder().rule_set(rs).build();
+        assert_eq!(config.rule_set().size(), size);
+    }
+}

@@ -148,4 +148,97 @@ mod tests {
         s2.sort();
         assert_eq!(s2, vec![2, 3, 4]);
     }
+
+    #[tokio::test]
+    async fn test_istream_empty_update() {
+        let updates = vec![
+            WindowUpdate::new(vec![], vec![], 0, 1000, 100),
+            WindowUpdate::new(vec![1], vec![], 1000, 2000, 200),
+        ];
+        let stream = Box::pin(futures::stream::iter(updates));
+        let results: Vec<i32> = IStreamOperator::apply(stream).collect().await;
+        assert_eq!(results, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_dstream_empty_update() {
+        let updates = vec![WindowUpdate::new(vec![1, 2], vec![], 0, 1000, 100)];
+        let stream = Box::pin(futures::stream::iter(updates));
+        let results: Vec<i32> = DStreamOperator::apply(stream).collect().await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_istream_multiple_updates() {
+        let updates = vec![
+            WindowUpdate::new(vec![10, 20], vec![5], 0, 1000, 100),
+            WindowUpdate::new(vec![30], vec![10], 1000, 2000, 200),
+            WindowUpdate::new(vec![40, 50], vec![20, 30], 2000, 3000, 300),
+        ];
+        let stream = Box::pin(futures::stream::iter(updates));
+        let results: Vec<i32> = IStreamOperator::apply(stream).collect().await;
+        assert_eq!(results, vec![10, 20, 30, 40, 50]);
+    }
+
+    #[tokio::test]
+    async fn test_dstream_multiple_updates() {
+        let updates = vec![
+            WindowUpdate::new(vec![10, 20], vec![5], 0, 1000, 100),
+            WindowUpdate::new(vec![30], vec![10], 1000, 2000, 200),
+            WindowUpdate::new(vec![40, 50], vec![20, 30], 2000, 3000, 300),
+        ];
+        let stream = Box::pin(futures::stream::iter(updates));
+        let results: Vec<i32> = DStreamOperator::apply(stream).collect().await;
+        assert_eq!(results, vec![5, 10, 20, 30]);
+    }
+
+    #[tokio::test]
+    async fn test_rstream_empty_stream() {
+        let updates: Vec<WindowUpdate<i32>> = vec![];
+        let stream = Box::pin(futures::stream::iter(updates));
+        let snapshots: Vec<WindowSnapshot<i32>> = RStreamOperator::apply(stream).collect().await;
+        assert!(snapshots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_rstream_removes_all() {
+        let updates = vec![
+            WindowUpdate::new(vec![1, 2, 3], vec![], 0, 1000, 100),
+            WindowUpdate::new(vec![], vec![1, 2, 3], 1000, 2000, 200),
+        ];
+        let stream = Box::pin(futures::stream::iter(updates));
+        let snapshots: Vec<WindowSnapshot<i32>> = RStreamOperator::apply(stream).collect().await;
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].contents.len(), 3);
+        assert!(snapshots[1].contents.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_rstream_window_metadata() {
+        let updates = vec![WindowUpdate::new(vec![1], vec![], 5000, 10000, 7500)];
+        let stream = Box::pin(futures::stream::iter(updates));
+        let snapshots: Vec<WindowSnapshot<i32>> = RStreamOperator::apply(stream).collect().await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].window_start, 5000);
+        assert_eq!(snapshots[0].window_end, 10000);
+        assert_eq!(snapshots[0].timestamp, 7500);
+    }
+
+    #[test]
+    fn test_window_update_new() {
+        let update = WindowUpdate::new(vec![1, 2], vec![3], 100, 200, 150);
+        assert_eq!(update.added, vec![1, 2]);
+        assert_eq!(update.removed, vec![3]);
+        assert_eq!(update.window_start, 100);
+        assert_eq!(update.window_end, 200);
+        assert_eq!(update.timestamp, 150);
+    }
+
+    #[test]
+    fn test_window_update_clone() {
+        let update = WindowUpdate::new(vec![1], vec![2], 0, 100, 50);
+        let cloned = update.clone();
+        assert_eq!(cloned.added, vec![1]);
+        assert_eq!(cloned.removed, vec![2]);
+    }
 }

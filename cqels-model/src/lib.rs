@@ -55,6 +55,7 @@ pub mod value;
 
 pub use binding::BindingSet;
 pub use error::{CqelsError, CqelsResult, ParseErrorDetail, ParseErrorKind};
+pub use serialization::{bindings_to_ntriples, to_ntriples, to_sparql_json, to_sparql_json_string};
 pub use statement::Statement;
-pub use term::Term;
+pub use term::{BlankNodeTerm, IriTerm, LiteralTerm, Term};
 pub use value::Value;

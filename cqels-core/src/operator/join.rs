@@ -553,4 +553,212 @@ mod tests {
         // Should find paths of length 1, 2, 3
         assert!(!paths.is_empty());
     }
+
+    #[test]
+    fn test_windowed_join_left_then_right() {
+        let mut state: WindowedJoinState<String, String> =
+            WindowedJoinState::new(Duration::from_secs(10));
+        let join_fn = |l: &String, r: &String| Some(format!("{l}-{r}"));
+
+        let results = state.add_left("A".into(), 1000, &join_fn);
+        assert!(results.is_empty());
+
+        let results = state.add_left("B".into(), 2000, &join_fn);
+        assert!(results.is_empty());
+
+        // Right element should join with both left elements
+        let results = state.add_right("X".into(), 3000, &join_fn);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_windowed_join_right_then_left() {
+        let mut state: WindowedJoinState<i32, i32> =
+            WindowedJoinState::new(Duration::from_secs(10));
+        let join_fn = |l: &i32, r: &i32| Some(l * r);
+
+        state.add_right(5, 1000, &join_fn);
+        state.add_right(10, 2000, &join_fn);
+
+        let results = state.add_left(3, 3000, &join_fn);
+        assert_eq!(results.len(), 2);
+        let values: Vec<i32> = results.iter().map(|r| r.value).collect();
+        assert!(values.contains(&15)); // 3*5
+        assert!(values.contains(&30)); // 3*10
+    }
+
+    #[test]
+    fn test_windowed_join_watermark_eviction() {
+        let mut state: WindowedJoinState<i32, i32> = WindowedJoinState::new(Duration::from_secs(5));
+        let join_fn = |l: &i32, r: &i32| Some(l + r);
+
+        state.add_left(1, 1000, &join_fn);
+        state.add_left(2, 2000, &join_fn);
+
+        // Advance watermark to evict elements before cutoff (7000 - 5000 = 2000)
+        state.advance_watermark(7000);
+
+        // Right element at 8000 should not match left at 1000 (evicted)
+        let results = state.add_right(10, 8000, &join_fn);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_windowed_join_selective_fn() {
+        let mut state: WindowedJoinState<i32, i32> =
+            WindowedJoinState::new(Duration::from_secs(10));
+        // Only join when left == right
+        let join_fn = |l: &i32, r: &i32| if l == r { Some(*l) } else { None };
+
+        state.add_left(1, 1000, &join_fn);
+        state.add_left(2, 1500, &join_fn);
+        state.add_left(3, 2000, &join_fn);
+
+        let results = state.add_right(2, 3000, &join_fn);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].value, 2);
+    }
+
+    #[test]
+    fn test_interval_join_left_arrives_first() {
+        let mut state: IntervalJoinState<&str, &str> =
+            IntervalJoinState::new(Duration::from_secs(1), Duration::from_secs(5));
+        let join_fn = |l: &&str, r: &&str| Some(format!("{l}+{r}"));
+
+        state.add_left("A", 1000, &join_fn);
+
+        // Right at 3000 is in [1000+1000, 1000+5000] = [2000, 6000]
+        let results = state.add_right("X", 3000, &join_fn);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].value, "A+X");
+
+        // Right at 500 is NOT in [2000, 6000]
+        let results = state.add_right("Y", 500, &join_fn);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_interval_join_watermark_eviction() {
+        let mut state: IntervalJoinState<i32, i32> =
+            IntervalJoinState::new(Duration::from_secs(0), Duration::from_secs(2));
+        let join_fn = |l: &i32, r: &i32| Some(l + r);
+
+        state.add_left(1, 1000, &join_fn);
+        state.add_right(2, 1500, &join_fn);
+
+        state.advance_watermark(5000);
+
+        // After eviction, new arrivals shouldn't match old evicted data
+        let results = state.add_right(3, 6000, &join_fn);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_graph_pattern_join_get_objects_missing() {
+        let state = GraphPatternJoinState::new();
+        assert!(state.get_objects("nonexistent", "pred").is_empty());
+    }
+
+    #[test]
+    fn test_graph_pattern_join_get_subjects_missing() {
+        let state = GraphPatternJoinState::new();
+        assert!(state.get_subjects("nonexistent", "pred").is_empty());
+    }
+
+    #[test]
+    fn test_graph_pattern_join_has_edge_false() {
+        let state = GraphPatternJoinState::new();
+        assert!(!state.has_edge("x", "y"));
+    }
+
+    #[test]
+    fn test_graph_pattern_join_multiple_objects() {
+        let mut state = GraphPatternJoinState::new();
+        state.add_statement(&make_stmt("http://a", "http://knows", "http://b"), 100);
+        state.add_statement(&make_stmt("http://a", "http://knows", "http://c"), 200);
+
+        let objects = state.get_objects("<http://a>", "<http://knows>");
+        assert_eq!(objects.len(), 2);
+    }
+
+    #[test]
+    fn test_graph_pattern_eviction_preserves_remaining() {
+        let mut state = GraphPatternJoinState::new();
+        state.add_statement(&make_stmt("http://a", "http://p", "http://b"), 100);
+        state.add_statement(&make_stmt("http://c", "http://p", "http://d"), 200);
+        state.add_statement(&make_stmt("http://e", "http://p", "http://f"), 300);
+
+        state.evict_before(250);
+        assert_eq!(state.edges.len(), 1);
+        assert!(state.has_edge("<http://e>", "<http://p>"));
+        assert!(!state.has_edge("<http://a>", "<http://p>"));
+    }
+
+    #[test]
+    fn test_graph_pattern_default() {
+        let state = GraphPatternJoinState::default();
+        assert!(state.edges.is_empty());
+    }
+
+    #[test]
+    fn test_variable_length_path_min_hops() {
+        let mut state = GraphPatternJoinState::new();
+        state.add_statement(&make_stmt("http://a", "http://link", "http://b"), 0);
+        state.add_statement(&make_stmt("http://b", "http://link", "http://c"), 0);
+
+        // min_hops=2 means single-hop paths should not be included
+        let op = VariableLengthPathOperator::new(2, 3).with_relationship_type("<http://link>");
+        let paths = op.find_paths("<http://a>", &state);
+        // All paths should have at least 3 nodes (2 hops)
+        for path in &paths {
+            assert!(path.len() >= 3);
+        }
+    }
+
+    #[test]
+    fn test_variable_length_path_shortest_only() {
+        let mut state = GraphPatternJoinState::new();
+        state.add_statement(&make_stmt("http://a", "http://link", "http://b"), 0);
+        state.add_statement(&make_stmt("http://b", "http://link", "http://c"), 0);
+
+        let op = VariableLengthPathOperator::new(1, 5)
+            .with_relationship_type("<http://link>")
+            .with_shortest_path_only(true);
+        let paths = op.find_paths("<http://a>", &state);
+        // With shortest_path_only, should get only the first valid path
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn test_variable_length_path_no_relationship_type() {
+        let mut state = GraphPatternJoinState::new();
+        state.add_statement(&make_stmt("http://a", "http://knows", "http://b"), 0);
+        state.add_statement(&make_stmt("http://a", "http://likes", "http://c"), 0);
+
+        let op = VariableLengthPathOperator::new(1, 2);
+        let paths = op.find_paths("<http://a>", &state);
+        // Should traverse all predicates
+        assert!(paths.len() >= 2);
+    }
+
+    #[test]
+    fn test_tagged_union() {
+        let left: TaggedUnion<i32, String> = TaggedUnion::Left(42);
+        let right: TaggedUnion<i32, String> = TaggedUnion::Right("hello".into());
+        let left_clone = left.clone();
+        assert!(matches!(left_clone, TaggedUnion::Left(42)));
+        assert!(matches!(right, TaggedUnion::Right(_)));
+    }
+
+    #[test]
+    fn test_join_result_fields() {
+        let jr = JoinResult {
+            value: 42,
+            timestamp: 1000,
+        };
+        assert_eq!(jr.value, 42);
+        assert_eq!(jr.timestamp, 1000);
+        let cloned = jr.clone();
+        assert_eq!(cloned.value, jr.value);
+    }
 }
