@@ -1213,4 +1213,213 @@ mod tests {
         // Both A events should start partial matches, both completing with B
         assert_eq!(matches.len(), 2);
     }
+
+    #[tokio::test]
+    async fn test_not_followed_by() {
+        // A not followed (relaxed) by B, then C
+        let pattern = Pattern::<Event>::begin("start")
+            .where_cond(|e| e.name == "A")
+            .not_followed_by("forbidden")
+            .where_cond(|e| e.name == "B")
+            .followed_by("end")
+            .where_cond(|e| e.name == "C");
+
+        let processor = NfaPatternProcessor::new(pattern);
+
+        // A then X then C — B never appears, so match succeeds
+        let events = vec![
+            Event::new("A", 1.0, 100),
+            Event::new("X", 0.0, 150),
+            Event::new("C", 3.0, 200),
+        ];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_not_followed_by_fails_when_present() {
+        let pattern = Pattern::<Event>::begin("start")
+            .where_cond(|e| e.name == "A")
+            .not_followed_by("forbidden")
+            .where_cond(|e| e.name == "B")
+            .followed_by("end")
+            .where_cond(|e| e.name == "C");
+
+        let processor = NfaPatternProcessor::new(pattern);
+
+        // A then B then C — B appears so negation kills the match
+        let events = vec![
+            Event::new("A", 1.0, 100),
+            Event::new("B", 2.0, 150),
+            Event::new("C", 3.0, 200),
+        ];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_followed_by_any() {
+        let pattern = Pattern::<Event>::begin("start")
+            .where_cond(|e| e.name == "A")
+            .followed_by_any("end")
+            .where_cond(|e| e.name == "B");
+
+        let processor = NfaPatternProcessor::new(pattern);
+        let events = vec![
+            Event::new("A", 1.0, 100),
+            Event::new("X", 0.0, 150),
+            Event::new("A", 2.0, 175),
+            Event::new("B", 3.0, 200),
+        ];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        // Non-deterministic relaxed: both A events should match with B
+        assert!(matches.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_one_or_more_quantifier() {
+        let pattern = Pattern::<Event>::begin("events")
+            .where_cond(|e| e.name == "A")
+            .one_or_more();
+
+        let processor = NfaPatternProcessor::new(pattern);
+        let events = vec![
+            Event::new("A", 1.0, 100),
+            Event::new("A", 2.0, 200),
+            Event::new("A", 3.0, 300),
+            Event::new("B", 0.0, 400),
+        ];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        // one_or_more: at least one A, greedy
+        assert!(!matches.is_empty());
+        assert!(matches.iter().all(|m| m.size() >= 1));
+    }
+
+    #[tokio::test]
+    async fn test_times_range_quantifier() {
+        let pattern = Pattern::<Event>::begin("events")
+            .where_cond(|e| e.name == "A")
+            .times_range(2, 4);
+
+        let processor = NfaPatternProcessor::new(pattern);
+        let events = vec![
+            Event::new("A", 1.0, 100),
+            Event::new("A", 2.0, 200),
+            Event::new("A", 3.0, 300),
+        ];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        // Should match with 2 or 3 A events (within range 2..=4)
+        assert!(!matches.is_empty());
+        assert!(matches.iter().all(|m| m.size() >= 2 && m.size() <= 4));
+    }
+
+    #[tokio::test]
+    async fn test_negation_with_time_window() {
+        // A, not B within 500ms, then C
+        let pattern = Pattern::<Event>::begin("start")
+            .where_cond(|e| e.name == "A")
+            .not_next("forbidden")
+            .where_cond(|e| e.name == "B")
+            .next("end")
+            .where_cond(|e| e.name == "C")
+            .within(Duration::from_millis(500));
+
+        let processor = NfaPatternProcessor::new(pattern);
+
+        // A then C within window, no B
+        let events = vec![Event::new("A", 1.0, 100), Event::new("C", 3.0, 300)];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_complex_three_state_with_context() {
+        // Detect increasing value sequence: A -> B -> C where each value > previous
+        let pattern = Pattern::<Event>::begin("first")
+            .where_cond(|e| e.name == "A")
+            .followed_by("second")
+            .where_cond(|e| e.name == "B")
+            .where_context(|event, prev| {
+                prev.last().map(|p| event.value > p.value).unwrap_or(false)
+            })
+            .followed_by("third")
+            .where_cond(|e| e.name == "C")
+            .where_context(|event, prev| {
+                prev.last().map(|p| event.value > p.value).unwrap_or(false)
+            });
+
+        let processor = NfaPatternProcessor::new(pattern);
+        let events = vec![
+            Event::new("A", 10.0, 100),
+            Event::new("B", 20.0, 200), // 20 > 10, passes
+            Event::new("C", 30.0, 300), // 30 > 20, passes
+        ];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].size(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_complex_three_state_context_rejects() {
+        let pattern = Pattern::<Event>::begin("first")
+            .where_cond(|e| e.name == "A")
+            .followed_by("second")
+            .where_cond(|e| e.name == "B")
+            .where_context(|event, prev| {
+                prev.last().map(|p| event.value > p.value).unwrap_or(false)
+            })
+            .followed_by("third")
+            .where_cond(|e| e.name == "C")
+            .where_context(|event, prev| {
+                prev.last().map(|p| event.value > p.value).unwrap_or(false)
+            });
+
+        let processor = NfaPatternProcessor::new(pattern);
+        let events = vec![
+            Event::new("A", 10.0, 100),
+            Event::new("B", 20.0, 200), // 20 > 10, passes
+            Event::new("C", 15.0, 300), // 15 < 20, fails context
+        ];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pattern_match_api() {
+        let pattern = Pattern::<Event>::begin("start")
+            .where_cond(|e| e.name == "A")
+            .next("end")
+            .where_cond(|e| e.name == "B");
+
+        let processor = NfaPatternProcessor::new(pattern);
+        let events = vec![Event::new("A", 1.0, 100), Event::new("B", 2.0, 200)];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        assert_eq!(matches.len(), 1);
+
+        let m = &matches[0];
+        assert_eq!(m.first().unwrap().name, "A");
+        assert_eq!(m.last().unwrap().name, "B");
+        assert_eq!(m.start_timestamp(), 100);
+        assert_eq!(m.end_timestamp(), 200);
+        assert_eq!(m.duration(), 100);
+        assert_eq!(m.size(), 2);
+    }
 }

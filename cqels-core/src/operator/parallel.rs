@@ -1,19 +1,41 @@
-/// Configuration for parallel execution.
+/// Configuration for parallel execution of stream operators.
 ///
-/// Maps to Java's `ParallelExecutionConfig`.
+/// Controls how the engine distributes stream processing across threads:
+/// - **`parallelism`**: Number of worker threads (defaults to available CPUs).
+/// - **`auto_parallelize`**: When `true`, streams exceeding `min_stream_size`
+///   are automatically distributed across workers.
+/// - **`min_stream_size`**: Threshold below which parallelization is skipped
+///   (default: 1000 elements). Avoids overhead for small batches.
+/// - **`aggregation_backend`**: Choose `Legacy` for full aggregate support
+///   or `Swag` for high-throughput sliding-window aggregation (SUM/AVG/MAX/MIN/COUNT only).
+///
+/// # Example
+///
+/// ```
+/// use cqels_core::operator::parallel::ParallelExecutionConfig;
+///
+/// let config = ParallelExecutionConfig::builder()
+///     .parallelism(8)
+///     .min_stream_size(500)
+///     .auto_parallelize(true)
+///     .build();
+///
+/// assert!(config.should_parallelize(1000));
+/// assert!(!config.should_parallelize(100));
+/// ```
 #[derive(Clone, Debug)]
 pub struct ParallelExecutionConfig {
-    /// Number of parallel workers.
+    /// Number of parallel workers (defaults to available CPUs).
     pub parallelism: usize,
-    /// Prefetch buffer size per worker.
+    /// Prefetch buffer size per worker (default: 256).
     pub prefetch: usize,
-    /// Whether to automatically parallelize large streams.
+    /// Whether to automatically parallelize large streams (default: `true`).
     pub auto_parallelize: bool,
-    /// Minimum stream size before parallelization kicks in.
+    /// Minimum stream size before parallelization kicks in (default: 1000).
     pub min_stream_size: usize,
-    /// Which aggregation backend to use.
+    /// Which aggregation backend to use (default: `Legacy`).
     pub aggregation_backend: AggregationBackend,
-    /// SWAG-specific configuration.
+    /// SWAG-specific configuration (used when `aggregation_backend` is `Swag`).
     pub swag_config: SwagConfig,
 }
 
@@ -88,7 +110,12 @@ impl ParallelExecutionConfigBuilder {
 
 /// Aggregation backend selection.
 ///
-/// Maps to Java's `AggregationBackend` enum.
+/// - **`Legacy`**: Standard aggregation with full support for all aggregate
+///   functions (SUM, AVG, MIN, MAX, COUNT, GROUP_CONCAT, SAMPLE, etc.).
+/// - **`Swag`**: High-performance Sliding Window AGgregation using the
+///   two-stacks-lite algorithm. Supports only commutative/invertible
+///   aggregates: SUM, AVG, MAX, MIN, COUNT. Falls back to `Legacy` for
+///   unsupported operations when `SwagConfig::fallback_to_legacy` is `true`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AggregationBackend {

@@ -77,9 +77,29 @@ pub struct RankedElement<T> {
     pub rank: usize,
 }
 
-/// Top-K operator that maintains the top K elements by a scoring function.
+/// Top-K operator that maintains the K highest- or lowest-scoring elements.
 ///
-/// Maps to Java's `TopKOperator`.
+/// Uses a bounded [`BinaryHeap`] to process elements in O(log K) time per
+/// insertion. When the heap exceeds K elements, the worst element is evicted.
+///
+/// # Complexity
+///
+/// - **`add`**: O(log K) per element.
+/// - **`get_top_k`**: O(K log K) — sorts the heap for ranked output.
+/// - **Memory**: O(K) — only K elements retained at any time.
+///
+/// # Example
+///
+/// ```
+/// use cqels_core::operator::ranking::{TopKOperator, SortDirection};
+///
+/// let mut topk = TopKOperator::new(3, |x: &i32| *x as f64, SortDirection::Descending);
+/// for i in 0..10 {
+///     topk.add(i);
+/// }
+/// let top = topk.get_top_k();
+/// assert_eq!(top, vec![&9, &8, &7]);
+/// ```
 pub struct TopKOperator<T, F: Fn(&T) -> f64> {
     k: usize,
     scorer: F,

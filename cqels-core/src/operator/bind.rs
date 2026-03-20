@@ -6,7 +6,26 @@ use cqels_model::{BindingSet, Value};
 
 /// Bind operator that adds new variable bindings computed from expressions.
 ///
-/// Maps to Java's `BindOperator`.
+/// Given a variable name and an expression closure, this operator evaluates
+/// the closure against each incoming [`BindingSet`] and inserts the result
+/// as a new binding. If the expression returns `None`, the binding set passes
+/// through unchanged.
+///
+/// # Example
+///
+/// ```
+/// use cqels_core::operator::bind::BindOperator;
+/// use cqels_model::{BindingSet, Value};
+///
+/// let bind = BindOperator::new("doubled", |bs: &BindingSet| {
+///     bs.get("x").and_then(|v| v.as_integer()).map(|i| Value::Integer(i * 2))
+/// });
+///
+/// let mut bs = BindingSet::new(0);
+/// bs.insert("x", Value::Integer(5));
+/// bind.evaluate(&mut bs);
+/// assert_eq!(bs.get("doubled"), Some(&Value::Integer(10)));
+/// ```
 pub struct BindOperator<F: Fn(&BindingSet) -> Option<Value> + Send + Sync> {
     variable: String,
     expression: F,

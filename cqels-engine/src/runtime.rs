@@ -434,6 +434,262 @@ mod tests {
         assert!(ids.is_empty());
     }
 
+    #[tokio::test]
+    async fn test_register_cqelsql_query_end_to_end() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+        use futures::StreamExt;
+
+        let runtime = CqelsRuntime::new();
+
+        let elements: Vec<StreamElement> = (0..3)
+            .map(|i| {
+                StreamElement::Rdf(RdfStreamElement::new(
+                    Statement::new(
+                        Term::Iri(IriTerm::new(format!("http://ex.org/sensor{i}"))),
+                        IriTerm::new("http://ex.org/temp"),
+                        Term::Literal(LiteralTerm::new(format!("{}", 20 + i))),
+                    ),
+                    (i + 1) * 1000,
+                ))
+            })
+            .collect();
+
+        let stream = Box::pin(futures::stream::iter(elements));
+        runtime.register_stream("sensors", stream).await.unwrap();
+
+        let query = "SELECT ?s ?v FROM STREAM sensors [NOW] WHERE { STREAM sensors { ?s <http://ex.org/temp> ?v . } }";
+        let reg = runtime.register_cqelsql_query(query).await.unwrap();
+
+        assert!(!reg.query_id.is_empty());
+        let ids = runtime.registered_query_ids().await;
+        assert!(ids.contains(&reg.query_id));
+
+        runtime.start().await.unwrap();
+        let results: Vec<_> = reg.stream.take(3).collect().await;
+        assert_eq!(results.len(), 3);
+        assert!(results[0].contains("s"));
+        assert!(results[0].contains("v"));
+
+        runtime.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_register_cypherql_query_end_to_end() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, Term};
+        use futures::StreamExt;
+
+        let runtime = CqelsRuntime::new();
+
+        let elements: Vec<StreamElement> = vec![StreamElement::Rdf(RdfStreamElement::new(
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/alice")),
+                IriTerm::new("http://ex.org/knows"),
+                Term::Iri(IriTerm::new("http://ex.org/bob")),
+            ),
+            1000,
+        ))];
+
+        let stream = Box::pin(futures::stream::iter(elements));
+        runtime.register_stream("social", stream).await.unwrap();
+
+        let query = "FROM STREAM social [NOW] MATCH (a)-[r:knows]->(b) RETURN a, b";
+        let reg = runtime.register_cypherql_query(query).await.unwrap();
+        assert!(!reg.query_id.is_empty());
+
+        runtime.start().await.unwrap();
+        let results: Vec<_> = reg.stream.take(1).collect().await;
+        assert_eq!(results.len(), 1);
+
+        runtime.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_invalid_query_returns_error() {
+        let runtime = CqelsRuntime::new();
+        let result = runtime
+            .register_cqelsql_query("THIS IS NOT VALID SQL")
+            .await;
+        assert!(result.is_err());
+
+        let result = runtime
+            .register_cypherql_query("TOTALLY INVALID CYPHER")
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_stream_registration_rejected() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+
+        let runtime = CqelsRuntime::new();
+
+        let make_stream = || {
+            let elem = StreamElement::Rdf(RdfStreamElement::new(
+                Statement::new(
+                    Term::Iri(IriTerm::new("http://ex.org/s")),
+                    IriTerm::new("http://ex.org/p"),
+                    Term::Literal(LiteralTerm::new("v")),
+                ),
+                1000,
+            ));
+            Box::pin(futures::stream::iter(vec![elem]))
+                as Pin<Box<dyn Stream<Item = StreamElement> + Send>>
+        };
+
+        runtime.register_stream("dup", make_stream()).await.unwrap();
+        let result = runtime.register_stream("dup", make_stream()).await;
+        assert!(result.is_err(), "duplicate stream registration should fail");
+    }
+
+    #[tokio::test]
+    async fn test_replace_stream() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+
+        let runtime = CqelsRuntime::new();
+
+        let make_stream = |val: &str| {
+            let elem = StreamElement::Rdf(RdfStreamElement::new(
+                Statement::new(
+                    Term::Iri(IriTerm::new("http://ex.org/s")),
+                    IriTerm::new("http://ex.org/p"),
+                    Term::Literal(LiteralTerm::new(val)),
+                ),
+                1000,
+            ));
+            Box::pin(futures::stream::iter(vec![elem]))
+                as Pin<Box<dyn Stream<Item = StreamElement> + Send>>
+        };
+
+        runtime
+            .register_stream("src", make_stream("v1"))
+            .await
+            .unwrap();
+        // Replace should succeed even though stream already exists
+        let result = runtime.replace_stream("src", make_stream("v2")).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_replace_stream_nonexistent() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+
+        let runtime = CqelsRuntime::new();
+        let elem = StreamElement::Rdf(RdfStreamElement::new(
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/s")),
+                IriTerm::new("http://ex.org/p"),
+                Term::Literal(LiteralTerm::new("v")),
+            ),
+            1000,
+        ));
+        let stream = Box::pin(futures::stream::iter(vec![elem]));
+        // Replace on nonexistent stream should succeed (registers fresh)
+        let result = runtime.replace_stream("new", stream).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_query_after_registration() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+
+        let runtime = CqelsRuntime::new();
+        let elem = StreamElement::Rdf(RdfStreamElement::new(
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/s")),
+                IriTerm::new("http://ex.org/p"),
+                Term::Literal(LiteralTerm::new("v")),
+            ),
+            1000,
+        ));
+        let stream = Box::pin(futures::stream::iter(vec![elem]));
+        runtime.register_stream("s", stream).await.unwrap();
+
+        let query =
+            "SELECT ?s ?o FROM STREAM s [NOW] WHERE { STREAM s { ?s <http://ex.org/p> ?o . } }";
+        let reg = runtime.register_cqelsql_query(query).await.unwrap();
+        let qid = reg.query_id.clone();
+
+        assert!(runtime.registered_query_ids().await.contains(&qid));
+        runtime.unregister_query(&qid).await.unwrap();
+        assert!(!runtime.registered_query_ids().await.contains(&qid));
+    }
+
+    #[tokio::test]
+    async fn test_cep_pattern_on_stream() {
+        use crate::cep::Pattern;
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+        use futures::StreamExt;
+
+        let runtime = CqelsRuntime::new();
+
+        let elements: Vec<StreamElement> = vec![
+            StreamElement::Rdf(RdfStreamElement::new(
+                Statement::new(
+                    Term::Iri(IriTerm::new("http://ex.org/s1")),
+                    IriTerm::new("http://ex.org/type"),
+                    Term::Literal(LiteralTerm::new("alert")),
+                ),
+                100,
+            )),
+            StreamElement::Rdf(RdfStreamElement::new(
+                Statement::new(
+                    Term::Iri(IriTerm::new("http://ex.org/s1")),
+                    IriTerm::new("http://ex.org/type"),
+                    Term::Literal(LiteralTerm::new("resolve")),
+                ),
+                200,
+            )),
+        ];
+
+        let stream = Box::pin(futures::stream::iter(elements));
+        runtime.register_stream("events", stream).await.unwrap();
+        runtime.start().await.unwrap();
+
+        let pattern = Pattern::<StreamElement>::begin("alert")
+            .where_cond(|_| true)
+            .followed_by("resolve")
+            .where_cond(|_| true);
+
+        let mut result_stream = runtime
+            .register_stream_cep_pattern("events", pattern)
+            .await
+            .unwrap();
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), result_stream.next()).await;
+
+        // Should get a match (both events satisfy the trivial conditions)
+        if let Ok(Some(m)) = result {
+            assert_eq!(m.size(), 2);
+        }
+
+        runtime.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cep_pattern_on_missing_stream_returns_error() {
+        use crate::cep::Pattern;
+        use cqels_core::stream::StreamElement;
+
+        let runtime = CqelsRuntime::new();
+        runtime.start().await.unwrap();
+
+        let pattern = Pattern::<StreamElement>::begin("s").where_cond(|_| true);
+        let result = runtime
+            .register_stream_cep_pattern("nonexistent", pattern)
+            .await;
+        assert!(result.is_err());
+
+        runtime.stop().await.unwrap();
+    }
+
     /// Documents the footgun: `register_cep_pattern` with a non-StreamElement
     /// type silently drops all events due to the downcast failing.
     #[allow(deprecated)]

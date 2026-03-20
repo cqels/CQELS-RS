@@ -1,8 +1,35 @@
 //! Shared pipeline utilities for query compilation and execution.
 //!
-//! Functions that are common to both CqelsQL and CypherQL query compilers:
-//! triple pattern matching, filtering, binding, aggregation, ordering,
-//! projection, and distinct.
+//! This module provides the building blocks used by both
+//! [`CompiledCqelsQuery`](super::compiled::CompiledCqelsQuery) and
+//! [`CompiledCypherQuery`](super::compiled::CompiledCypherQuery) during
+//! query execution. The pipeline processes a stream of [`BindingSet`]
+//! values through the following phases:
+//!
+//! 1. **Pattern matching** — [`match_triple_pattern`] / [`match_cypher_pattern`]:
+//!    Matches incoming RDF statements against query patterns, producing initial
+//!    variable bindings.
+//! 2. **Filtering** — [`apply_filters`]: Evaluates FILTER/WHERE expressions
+//!    and drops non-matching bindings.
+//! 3. **Binding** — [`apply_binds`]: Computes BIND/RETURN expressions and
+//!    inserts new variable values.
+//! 4. **OPTIONAL** — [`apply_optional`]: Left-outer-join with optional pattern
+//!    groups. Extends bindings when patterns match, passes through unchanged
+//!    otherwise.
+//! 5. **UNION** — [`apply_union`]: Duplicates bindings across matching union
+//!    branches.
+//! 6. **MINUS** — [`apply_minus`]: Anti-join that removes bindings matching
+//!    MINUS patterns.
+//! 7. **Aggregation** — [`apply_group_by_aggregates`]: Groups bindings by
+//!    GROUP BY keys and applies aggregate functions (SUM, COUNT, AVG, etc.).
+//! 8. **Ordering & limiting** — [`apply_order_and_limit`]: Sorts results by
+//!    ORDER BY expressions and applies LIMIT.
+//! 9. **Projection** — [`apply_projection`]: Retains only SELECT/RETURN
+//!    variables, discarding internal bindings.
+//! 10. **Distinct** — [`apply_distinct`]: Deduplicates result bindings.
+//!
+//! Each function operates on `Pin<Box<dyn Stream<Item = BindingSet> + Send>>`
+//! and returns the same type, allowing composable pipeline construction.
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
@@ -175,7 +202,10 @@ fn match_constant(resolved: &str, term: &Term) -> bool {
     }
 }
 
-/// Applies filter expressions to a stream of binding sets.
+/// Applies FILTER expressions to a stream of binding sets.
+///
+/// Each binding set is retained only if **all** filter expressions evaluate
+/// to `true`. Filters that reference unbound variables evaluate to `false`.
 pub fn apply_filters(
     stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
     filters: &[Expression],
@@ -190,7 +220,10 @@ pub fn apply_filters(
     }))
 }
 
-/// Applies bind expressions to a stream of binding sets.
+/// Applies BIND expressions to a stream of binding sets.
+///
+/// For each `(expression, variable)` pair, evaluates the expression against
+/// the current bindings and inserts the result under the given variable name.
 pub fn apply_binds(
     stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
     binds: &[(Expression, String)],
@@ -1096,7 +1129,11 @@ fn compute_aggregate(
     }
 }
 
-/// Applies ORDER BY and LIMIT to a batch of binding sets.
+/// Applies ORDER BY and LIMIT to a collected batch of binding sets.
+///
+/// Sorts the batch by ORDER BY expressions (supporting multiple keys with
+/// ascending/descending direction), then truncates to LIMIT if specified.
+/// This requires the full batch to be materialized in memory.
 pub fn apply_order_and_limit(
     mut elements: Vec<BindingSet>,
     order_by: &[(Expression, SortDirection)],
@@ -1133,7 +1170,10 @@ pub fn apply_order_and_limit(
     elements
 }
 
-/// Applies SELECT projection to a stream of binding sets.
+/// Applies SELECT/RETURN projection to a stream of binding sets.
+///
+/// Retains only the specified variables in each binding set, discarding
+/// all internal/intermediate bindings. Timestamps are preserved.
 pub fn apply_projection(
     stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
     select_vars: &[String],
@@ -1160,6 +1200,10 @@ pub fn apply_projection(
 }
 
 /// Applies DISTINCT to a stream of binding sets.
+///
+/// Deduplicates bindings using a deterministic string key derived from
+/// sorted variable names and values. Maintains a `HashSet` in memory
+/// for the lifetime of the stream.
 pub fn apply_distinct(
     stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
 ) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {

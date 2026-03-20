@@ -184,4 +184,57 @@ mod tests {
         let result = resolver.resolve(vec![a1, a2], &rule_set);
         assert_eq!(result.len(), 2);
     }
+
+    #[test]
+    fn test_conflict_all_empty_activations() {
+        let resolver = ConflictResolver::new(ConflictResolution::All);
+        let rule_set = RuleSet::new(vec![]);
+        let result = resolver.resolve(vec![], &rule_set);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_conflict_priority_empty_activations() {
+        let resolver = ConflictResolver::new(ConflictResolution::Priority);
+        let rule_set = RuleSet::new(vec![]);
+        let result = resolver.resolve(vec![], &rule_set);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_conflict_resolver_strategy_accessor() {
+        let resolver = ConflictResolver::new(ConflictResolution::Priority);
+        assert_eq!(resolver.strategy(), ConflictResolution::Priority);
+
+        let resolver = ConflictResolver::new(ConflictResolution::All);
+        assert_eq!(resolver.strategy(), ConflictResolution::All);
+    }
+
+    #[test]
+    fn test_conflict_priority_three_rules_same_triple() {
+        let resolver = ConflictResolver::new(ConflictResolution::Priority);
+
+        let rules: Vec<Rule> = (0..3)
+            .map(|i| {
+                Rule::builder()
+                    .id(format!("r{i}"))
+                    .priority(10 - i) // priorities: 10, 9, 8
+                    .template(TripleTemplate::new(
+                        PatternTerm::constant(iri("http://ex.org/a")),
+                        PatternTerm::constant(iri("http://ex.org/p")),
+                        PatternTerm::constant(iri("http://ex.org/b")),
+                    ))
+                    .build()
+            })
+            .collect();
+
+        let rule_set = RuleSet::new(rules);
+        let activations: Vec<Activation> = (0..3)
+            .map(|i| Activation::new(i, HashMap::new(), Vec::new(), 1000))
+            .collect();
+
+        let result = resolver.resolve(activations, &rule_set);
+        // Only highest priority rule should fire (others produce same triple)
+        assert_eq!(result.len(), 1);
+    }
 }

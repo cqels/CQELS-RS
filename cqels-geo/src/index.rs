@@ -370,4 +370,102 @@ mod tests {
         assert!(idx.put("ewkt", &wkt_literal("SRID=4326;POINT(0.75 0.75)")));
         assert_eq!(idx.size(), 2);
     }
+
+    #[test]
+    fn test_put_replaces_existing() {
+        let mut idx = GeoSpatialIndex::new();
+        idx.put("p1", &wkt_literal("POINT(1 1)"));
+        idx.put("p1", &wkt_literal("POINT(2 2)"));
+        assert_eq!(idx.size(), 1);
+        let snap = idx.snapshot_literals();
+        assert!(snap["p1"].contains("2 2"));
+    }
+
+    #[test]
+    fn test_query_candidates_empty_index() {
+        let mut idx = GeoSpatialIndex::new();
+        let query = wkt_literal("POINT(1 1)");
+        let candidates = idx.query_candidates(&query);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_query_candidates_invalid_query_geom() {
+        let mut idx = make_index_with_points();
+        let candidates = idx.query_candidates(&Value::Null);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_query_matches_empty_index() {
+        let mut idx = GeoSpatialIndex::new();
+        let query = wkt_literal("POINT(1 1)");
+        let matches = idx.query_matches("geof:sfIntersects", &query);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_query_matches_sf_equals() {
+        let mut idx = GeoSpatialIndex::new();
+        idx.put("p1", &wkt_literal("POINT(1 1)"));
+        idx.put("p2", &wkt_literal("POINT(2 2)"));
+        let query = wkt_literal("POINT(1 1)");
+        let matches = idx.query_matches("geof:sfEquals", &query);
+        assert!(matches.contains(&"p1".to_string()));
+        assert!(!matches.contains(&"p2".to_string()));
+    }
+
+    #[test]
+    fn test_linestring_geometry() {
+        let mut idx = GeoSpatialIndex::new();
+        assert!(idx.put("line", &wkt_literal("LINESTRING(0 0, 1 1, 2 0)")));
+        assert_eq!(idx.size(), 1);
+        let query = wkt_literal("POINT(0.5 0.5)");
+        let candidates = idx.query_candidates(&query);
+        assert!(candidates.contains(&"line".to_string()));
+    }
+
+    #[test]
+    fn test_polygon_overlap_candidates() {
+        let mut idx = GeoSpatialIndex::new();
+        idx.put("poly1", &wkt_literal("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))"));
+        idx.put("poly2", &wkt_literal("POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))"));
+        idx.put(
+            "poly3",
+            &wkt_literal("POLYGON((10 10, 12 10, 12 12, 10 12, 10 10))"),
+        );
+        let query = wkt_literal("POLYGON((0.5 0.5, 1.5 0.5, 1.5 1.5, 0.5 1.5, 0.5 0.5))");
+        let candidates = idx.query_candidates(&query);
+        // poly1 and poly2 overlap the query envelope, poly3 does not
+        assert!(candidates.contains(&"poly1".to_string()));
+        assert!(candidates.contains(&"poly2".to_string()));
+        assert!(!candidates.contains(&"poly3".to_string()));
+    }
+
+    #[test]
+    fn test_remove_then_query() {
+        let mut idx = make_index_with_points();
+        idx.remove("p1");
+        idx.remove("p2");
+        let query = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        let matches = idx.query_matches("geof:sfIntersects", &query);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_default_trait() {
+        let idx = GeoSpatialIndex::default();
+        assert_eq!(idx.size(), 0);
+    }
+
+    #[test]
+    fn test_normalize_function_local_name() {
+        assert_eq!(normalize_function_local_name("geof:sfWithin"), "sfwithin");
+        // Full IRIs use rfind(':') which finds the last colon
+        assert_eq!(normalize_function_local_name("sfWithin"), "sfwithin");
+        assert_eq!(
+            normalize_function_local_name("GEOF:sfDisjoint"),
+            "sfdisjoint"
+        );
+    }
 }

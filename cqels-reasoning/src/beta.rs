@@ -493,4 +493,139 @@ mod tests {
         assert_eq!(node.left_memory_size(), 0);
         assert_eq!(node.right_memory_size(), 0);
     }
+
+    #[test]
+    fn test_beta_node_multiple_join_keys() {
+        // Join on two shared variables
+        let mut node = BetaNode::new(vec!["x".to_string(), "y".to_string()], 0, 1);
+
+        let mut left = HashMap::new();
+        left.insert("x".to_string(), iri("http://ex.org/a"));
+        left.insert("y".to_string(), iri("http://ex.org/b"));
+        left.insert("extra_left".to_string(), iri("http://ex.org/c"));
+        node.add_left(left);
+
+        // Right has same x and y — should join
+        let mut right = HashMap::new();
+        right.insert("x".to_string(), iri("http://ex.org/a"));
+        right.insert("y".to_string(), iri("http://ex.org/b"));
+        right.insert("extra_right".to_string(), iri("http://ex.org/d"));
+        let results = node.add_right(right);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].len(), 4); // x, y, extra_left, extra_right
+        assert_eq!(results[0].get("extra_left"), Some(&iri("http://ex.org/c")));
+        assert_eq!(results[0].get("extra_right"), Some(&iri("http://ex.org/d")));
+    }
+
+    #[test]
+    fn test_beta_node_multiple_join_keys_partial_mismatch() {
+        let mut node = BetaNode::new(vec!["x".to_string(), "y".to_string()], 0, 1);
+
+        let mut left = HashMap::new();
+        left.insert("x".to_string(), iri("http://ex.org/a"));
+        left.insert("y".to_string(), iri("http://ex.org/b"));
+        node.add_left(left);
+
+        // Right has same x but different y
+        let mut right = HashMap::new();
+        right.insert("x".to_string(), iri("http://ex.org/a"));
+        right.insert("y".to_string(), iri("http://ex.org/different"));
+        let results = node.add_right(right);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_beta_node_many_to_many_join() {
+        let mut node = BetaNode::new(vec!["x".to_string()], 0, 1);
+
+        // Add multiple left entries with same join key
+        for i in 0..3 {
+            let mut left = HashMap::new();
+            left.insert("x".to_string(), iri("http://ex.org/shared"));
+            left.insert("left_val".to_string(), iri(&format!("http://ex.org/L{i}")));
+            node.add_left(left);
+        }
+
+        // Add right with same join key — should join with all 3 lefts
+        let mut right = HashMap::new();
+        right.insert("x".to_string(), iri("http://ex.org/shared"));
+        right.insert("right_val".to_string(), iri("http://ex.org/R"));
+        let results = node.add_right(right);
+        assert_eq!(results.len(), 3);
+
+        // Add another right — should join with all 3 lefts
+        let mut right2 = HashMap::new();
+        right2.insert("x".to_string(), iri("http://ex.org/shared"));
+        right2.insert("right_val".to_string(), iri("http://ex.org/R2"));
+        let results2 = node.add_right(right2);
+        assert_eq!(results2.len(), 3);
+
+        assert_eq!(node.left_memory_size(), 3);
+        assert_eq!(node.right_memory_size(), 2);
+    }
+
+    #[test]
+    fn test_beta_node_left_first_then_right() {
+        let mut node = BetaNode::new(vec!["x".to_string()], 0, 1);
+
+        // Add left first — no right entries, no results
+        let mut left = HashMap::new();
+        left.insert("x".to_string(), iri("http://ex.org/a"));
+        let r1 = node.add_left(left);
+        assert!(r1.is_empty());
+
+        // Add right — should find left in memory and join
+        let mut right = HashMap::new();
+        right.insert("x".to_string(), iri("http://ex.org/a"));
+        let r2 = node.add_right(right);
+        assert_eq!(r2.len(), 1);
+    }
+
+    #[test]
+    fn test_beta_node_right_first_then_left() {
+        let mut node = BetaNode::new(vec!["x".to_string()], 0, 1);
+
+        // Add right first
+        let mut right = HashMap::new();
+        right.insert("x".to_string(), iri("http://ex.org/a"));
+        let r1 = node.add_right(right);
+        assert!(r1.is_empty());
+
+        // Add left — should find right in memory and join
+        let mut left = HashMap::new();
+        left.insert("x".to_string(), iri("http://ex.org/a"));
+        let r2 = node.add_left(left);
+        assert_eq!(r2.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_bindings_disjoint() {
+        let mut left = HashMap::new();
+        left.insert("a".to_string(), iri("http://ex.org/1"));
+
+        let mut right = HashMap::new();
+        right.insert("b".to_string(), iri("http://ex.org/2"));
+
+        let merged = merge_bindings(&left, &right).unwrap();
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_bindings_empty() {
+        let left: HashMap<String, Term> = HashMap::new();
+        let right: HashMap<String, Term> = HashMap::new();
+        let merged = merge_bindings(&left, &right).unwrap();
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_beta_node_accessors() {
+        let node = BetaNode::new(vec!["x".to_string(), "y".to_string()], 2, 5);
+        assert_eq!(node.left_pattern_index(), 2);
+        assert_eq!(node.right_pattern_index(), 5);
+        assert_eq!(node.shared_variables(), &["x", "y"]);
+        assert_eq!(node.left_memory_size(), 0);
+        assert_eq!(node.right_memory_size(), 0);
+    }
 }
