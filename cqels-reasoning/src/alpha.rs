@@ -200,4 +200,140 @@ mod tests {
         assert_eq!(matches.len(), 1); // Only p1 matches
         assert_eq!(matches[0].node.pattern_index(), 0);
     }
+
+    #[test]
+    fn test_alpha_node_accessors() {
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        );
+        let node = AlphaNode::new(pattern.clone(), 7);
+        assert_eq!(node.pattern_index(), 7);
+        assert_eq!(*node.pattern(), pattern);
+    }
+
+    #[test]
+    fn test_alpha_node_equality() {
+        let p = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        );
+        let n1 = AlphaNode::new(p.clone(), 0);
+        let n2 = AlphaNode::new(p.clone(), 0);
+        let n3 = AlphaNode::new(p, 1);
+        assert_eq!(n1, n2);
+        assert_ne!(n1, n3);
+    }
+
+    #[test]
+    fn test_alpha_node_hash() {
+        use std::collections::HashSet;
+        let p = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        );
+        let n1 = AlphaNode::new(p.clone(), 0);
+        let n2 = AlphaNode::new(p, 0);
+        let mut set = HashSet::new();
+        set.insert(n1);
+        set.insert(n2);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_alpha_network_empty() {
+        let network = AlphaNetwork::new(vec![]);
+        assert_eq!(network.size(), 0);
+        assert!(network.nodes().is_empty());
+
+        let stmt = Statement::new(
+            iri("http://ex.org/a"),
+            IriTerm::new("http://ex.org/p"),
+            iri("http://ex.org/b"),
+        );
+        let matches = network.evaluate(&stmt);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_alpha_network_compile() {
+        let patterns = vec![
+            TriplePattern::new(
+                PatternTerm::var("s"),
+                PatternTerm::constant(iri("http://ex.org/type")),
+                PatternTerm::var("o"),
+            ),
+            TriplePattern::new(
+                PatternTerm::var("a"),
+                PatternTerm::var("b"),
+                PatternTerm::var("c"),
+            ),
+        ];
+        let network = AlphaNetwork::compile(patterns);
+        assert_eq!(network.size(), 2);
+        assert_eq!(network.nodes()[0].pattern_index(), 0);
+        assert_eq!(network.nodes()[1].pattern_index(), 1);
+    }
+
+    #[test]
+    fn test_alpha_network_debug() {
+        let network = AlphaNetwork::compile(vec![TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        )]);
+        let debug = format!("{:?}", network);
+        assert!(debug.contains("AlphaNetwork"));
+        assert!(debug.contains("nodes_count"));
+    }
+
+    #[test]
+    fn test_alpha_match_bindings() {
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        );
+        let network = AlphaNetwork::compile(vec![pattern]);
+
+        let stmt = Statement::new(
+            iri("http://ex.org/alice"),
+            IriTerm::new("http://ex.org/knows"),
+            iri("http://ex.org/bob"),
+        );
+        let matches = network.evaluate(&stmt);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].bindings.get("s"),
+            Some(&iri("http://ex.org/alice"))
+        );
+        assert_eq!(
+            matches[0].bindings.get("p"),
+            Some(&iri("http://ex.org/knows"))
+        );
+        assert_eq!(
+            matches[0].bindings.get("o"),
+            Some(&iri("http://ex.org/bob"))
+        );
+    }
+
+    #[test]
+    fn test_alpha_node_no_match_on_object() {
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::constant(iri("http://ex.org/Person")),
+        );
+        let node = AlphaNode::new(pattern, 0);
+
+        let stmt = Statement::new(
+            iri("http://ex.org/alice"),
+            IriTerm::new("http://ex.org/type"),
+            iri("http://ex.org/Animal"), // Doesn't match Person
+        );
+        assert!(node.evaluate(&stmt).is_none());
+    }
 }

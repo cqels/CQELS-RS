@@ -353,4 +353,162 @@ mod tests {
         bindings.insert("o".to_string(), iri("http://ex.org/o"));
         assert!(template.instantiate(&bindings).is_none());
     }
+
+    #[test]
+    fn test_pattern_term_display() {
+        let var = PatternTerm::var("s");
+        assert_eq!(var.to_string(), "?s");
+
+        let constant = PatternTerm::constant(iri("http://ex.org/x"));
+        assert_eq!(constant.to_string(), "<http://ex.org/x>");
+    }
+
+    #[test]
+    fn test_pattern_term_accessors() {
+        let var = PatternTerm::var("name");
+        assert!(var.is_variable());
+        assert!(!var.is_constant());
+        assert_eq!(var.variable_name(), Some("name"));
+
+        let constant = PatternTerm::constant(iri("http://ex.org/x"));
+        assert!(!constant.is_variable());
+        assert!(constant.is_constant());
+        assert_eq!(constant.variable_name(), None);
+    }
+
+    #[test]
+    fn test_pattern_has_constant_methods() {
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(iri("http://ex.org/type")),
+            PatternTerm::var("o"),
+        );
+        assert!(!pattern.has_constant_subject());
+        assert!(pattern.has_constant_predicate());
+        assert!(!pattern.has_constant_object());
+    }
+
+    #[test]
+    fn test_pattern_display() {
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(iri("http://ex.org/p")),
+            PatternTerm::var("o"),
+        );
+        let display = pattern.to_string();
+        assert!(display.contains("?s"));
+        assert!(display.contains("http://ex.org/p"));
+        assert!(display.contains("?o"));
+    }
+
+    #[test]
+    fn test_pattern_variable_names_dedup() {
+        // Same variable in subject and object
+        let pattern = TriplePattern::new(
+            PatternTerm::var("x"),
+            PatternTerm::var("p"),
+            PatternTerm::var("x"),
+        );
+        let names = pattern.variable_names();
+        assert_eq!(names.len(), 2); // x and p, not x, p, x
+        assert!(names.contains(&"x".to_string()));
+        assert!(names.contains(&"p".to_string()));
+    }
+
+    #[test]
+    fn test_pattern_no_variables() {
+        let pattern = TriplePattern::new(
+            PatternTerm::constant(iri("http://ex.org/s")),
+            PatternTerm::constant(iri("http://ex.org/p")),
+            PatternTerm::constant(iri("http://ex.org/o")),
+        );
+        assert!(pattern.variable_names().is_empty());
+
+        // Exact match
+        let stmt = Statement::new(
+            iri("http://ex.org/s"),
+            IriTerm::new("http://ex.org/p"),
+            iri("http://ex.org/o"),
+        );
+        assert!(pattern.matches(&stmt));
+    }
+
+    #[test]
+    fn test_pattern_matches_shorthand() {
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        );
+        let stmt = Statement::new(
+            iri("http://ex.org/a"),
+            IriTerm::new("http://ex.org/b"),
+            iri("http://ex.org/c"),
+        );
+        assert!(pattern.matches(&stmt));
+    }
+
+    #[test]
+    fn test_pattern_match_literal_object() {
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(iri("http://ex.org/label")),
+            PatternTerm::var("o"),
+        );
+        let stmt = Statement::new(
+            iri("http://ex.org/x"),
+            IriTerm::new("http://ex.org/label"),
+            lit("Hello World"),
+        );
+        let bindings = pattern.match_statement(&stmt).unwrap();
+        assert_eq!(bindings.get("o"), Some(&lit("Hello World")));
+    }
+
+    #[test]
+    fn test_template_all_constants() {
+        let template = TripleTemplate::new(
+            PatternTerm::constant(iri("http://ex.org/s")),
+            PatternTerm::constant(iri("http://ex.org/p")),
+            PatternTerm::constant(iri("http://ex.org/o")),
+        );
+        let bindings = HashMap::new();
+        let stmt = template.instantiate(&bindings).unwrap();
+        assert_eq!(stmt.subject, iri("http://ex.org/s"));
+        assert_eq!(stmt.predicate.as_str(), "http://ex.org/p");
+        assert_eq!(stmt.object, iri("http://ex.org/o"));
+    }
+
+    #[test]
+    fn test_template_display() {
+        let template = TripleTemplate::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(iri("http://ex.org/p")),
+            PatternTerm::var("o"),
+        );
+        let display = template.to_string();
+        assert!(display.contains("?s"));
+        assert!(display.contains("?o"));
+    }
+
+    #[test]
+    fn test_pattern_clone_and_eq() {
+        let p1 = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::constant(iri("http://ex.org/p")),
+            PatternTerm::var("o"),
+        );
+        let p2 = p1.clone();
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_pattern_term_clone_and_eq() {
+        let t1 = PatternTerm::var("x");
+        let t2 = t1.clone();
+        assert_eq!(t1, t2);
+
+        let t3 = PatternTerm::constant(iri("http://ex.org/a"));
+        let t4 = PatternTerm::constant(iri("http://ex.org/b"));
+        assert_ne!(t3, t4);
+    }
 }

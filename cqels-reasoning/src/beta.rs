@@ -628,4 +628,67 @@ mod tests {
         assert_eq!(node.left_memory_size(), 0);
         assert_eq!(node.right_memory_size(), 0);
     }
+
+    #[test]
+    fn test_beta_node_debug() {
+        let node = BetaNode::new(vec!["x".to_string()], 0, 1);
+        let debug = format!("{:?}", node);
+        assert!(debug.contains("BetaNode"));
+        assert!(debug.contains("shared_variables"));
+    }
+
+    #[test]
+    fn test_merge_bindings_overlapping_same_value() {
+        let mut left = HashMap::new();
+        left.insert("x".to_string(), iri("http://ex.org/a"));
+        left.insert("y".to_string(), iri("http://ex.org/b"));
+
+        let mut right = HashMap::new();
+        right.insert("x".to_string(), iri("http://ex.org/a")); // same value
+        right.insert("y".to_string(), iri("http://ex.org/b")); // same value
+
+        let merged = merge_bindings(&left, &right).unwrap();
+        assert_eq!(merged.len(), 2); // no duplicates
+    }
+
+    #[test]
+    fn test_beta_node_no_shared_variables() {
+        // Cartesian product join (no shared variables)
+        let mut node = BetaNode::new(vec![], 0, 1);
+
+        let mut left = HashMap::new();
+        left.insert("a".to_string(), iri("http://ex.org/1"));
+        node.add_left(left);
+
+        let mut right = HashMap::new();
+        right.insert("b".to_string(), iri("http://ex.org/2"));
+        let results = node.add_right(right);
+
+        // With no shared variables, join key is empty string for both
+        // So they should match
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].len(), 2);
+    }
+
+    #[test]
+    fn test_beta_node_memory_sizes_after_operations() {
+        let mut node = BetaNode::new(vec!["x".to_string()], 0, 1);
+
+        let mut left1 = HashMap::new();
+        left1.insert("x".to_string(), iri("http://ex.org/a"));
+        node.add_left(left1);
+
+        let mut left2 = HashMap::new();
+        left2.insert("x".to_string(), iri("http://ex.org/b"));
+        node.add_left(left2);
+
+        assert_eq!(node.left_memory_size(), 2);
+        assert_eq!(node.right_memory_size(), 0);
+
+        let mut right1 = HashMap::new();
+        right1.insert("x".to_string(), iri("http://ex.org/a"));
+        node.add_right(right1);
+
+        assert_eq!(node.right_memory_size(), 1);
+    }
 }

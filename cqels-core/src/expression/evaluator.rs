@@ -664,4 +664,284 @@ mod tests {
         let bs3 = make_bindings(&[("temp", Value::Integer(150))]);
         assert_eq!(eval.evaluate(&expr, &bs3), Value::Boolean(false));
     }
+
+    #[test]
+    fn test_evaluate_subtraction() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Sub,
+            left: Box::new(Expression::Literal(Value::Integer(10))),
+            right: Box::new(Expression::Literal(Value::Integer(3))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Integer(7));
+    }
+
+    #[test]
+    fn test_evaluate_multiplication() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Mul,
+            left: Box::new(Expression::Literal(Value::Integer(4))),
+            right: Box::new(Expression::Literal(Value::Integer(5))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Integer(20));
+    }
+
+    #[test]
+    fn test_evaluate_modulo() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Mod,
+            left: Box::new(Expression::Literal(Value::Integer(10))),
+            right: Box::new(Expression::Literal(Value::Integer(3))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Integer(1));
+    }
+
+    #[test]
+    fn test_evaluate_modulo_by_zero() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Mod,
+            left: Box::new(Expression::Literal(Value::Integer(10))),
+            right: Box::new(Expression::Literal(Value::Integer(0))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Null);
+    }
+
+    #[test]
+    fn test_evaluate_mixed_int_float_arithmetic() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Add,
+            left: Box::new(Expression::Literal(Value::Integer(5))),
+            right: Box::new(Expression::Literal(Value::Float(2.5))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Float(7.5));
+    }
+
+    #[test]
+    fn test_evaluate_string_starts_with() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::StartsWith,
+            left: Box::new(Expression::Literal(Value::String("hello world".into()))),
+            right: Box::new(Expression::Literal(Value::String("hello".into()))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_evaluate_string_ends_with() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::EndsWith,
+            left: Box::new(Expression::Literal(Value::String("hello world".into()))),
+            right: Box::new(Expression::Literal(Value::String("world".into()))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_evaluate_unary_plus() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::UnaryOp {
+            op: UnaryOp::UnaryPlus,
+            operand: Box::new(Expression::Literal(Value::Integer(5))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Integer(5));
+    }
+
+    #[test]
+    fn test_evaluate_unary_plus_null() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::UnaryOp {
+            op: UnaryOp::UnaryPlus,
+            operand: Box::new(Expression::Variable("x".to_string())),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Null);
+    }
+
+    #[test]
+    fn test_evaluate_negate_float() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::UnaryOp {
+            op: UnaryOp::Negate,
+            operand: Box::new(Expression::Literal(Value::Float(2.5))),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Float(-2.5));
+    }
+
+    #[test]
+    fn test_evaluate_negate_null() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::UnaryOp {
+            op: UnaryOp::Negate,
+            operand: Box::new(Expression::Variable("x".to_string())),
+        };
+        let bs = BindingSet::new(0);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Null);
+    }
+
+    #[test]
+    fn test_evaluate_not_null() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::UnaryOp {
+            op: UnaryOp::Not,
+            operand: Box::new(Expression::Variable("x".to_string())),
+        };
+        let bs = BindingSet::new(0); // x is unbound
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Null);
+    }
+
+    #[test]
+    fn test_evaluate_bound_with_null_value() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::Bound("x".to_string());
+        let bs = make_bindings(&[("x", Value::Null)]);
+        // BOUND returns false for null-valued bindings
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_evaluate_bound_dollar_prefix() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::Bound("$x".to_string());
+        let bs = make_bindings(&[("x", Value::Integer(1))]);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_evaluate_variable_dollar_prefix() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::Variable("$y".to_string());
+        let bs = make_bindings(&[("y", Value::Integer(99))]);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Integer(99));
+    }
+
+    #[test]
+    fn test_evaluate_aggregate_count_non_null() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::Aggregate {
+            function: AggregateExprFunction::Count,
+            argument: Box::new(Expression::Variable("x".to_string())),
+            distinct: false,
+        };
+        let bs = make_bindings(&[("x", Value::Integer(5))]);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Integer(1));
+    }
+
+    #[test]
+    fn test_evaluate_aggregate_count_null() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::Aggregate {
+            function: AggregateExprFunction::Count,
+            argument: Box::new(Expression::Variable("x".to_string())),
+            distinct: false,
+        };
+        let bs = BindingSet::new(0); // x is unbound
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Integer(0));
+    }
+
+    #[test]
+    fn test_evaluate_aggregate_sum() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::Aggregate {
+            function: AggregateExprFunction::Sum,
+            argument: Box::new(Expression::Variable("x".to_string())),
+            distinct: false,
+        };
+        let bs = make_bindings(&[("x", Value::Integer(42))]);
+        // Single-row: just returns the value
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Integer(42));
+    }
+
+    #[test]
+    fn test_evaluate_comparison_lte_gte() {
+        let eval = ExpressionEvaluator::new();
+
+        let lte = Expression::BinaryOp {
+            op: BinaryOp::Lte,
+            left: Box::new(Expression::Literal(Value::Integer(5))),
+            right: Box::new(Expression::Literal(Value::Integer(5))),
+        };
+        assert_eq!(
+            eval.evaluate(&lte, &BindingSet::new(0)),
+            Value::Boolean(true)
+        );
+
+        let gte = Expression::BinaryOp {
+            op: BinaryOp::Gte,
+            left: Box::new(Expression::Literal(Value::Integer(5))),
+            right: Box::new(Expression::Literal(Value::Integer(5))),
+        };
+        assert_eq!(
+            eval.evaluate(&gte, &BindingSet::new(0)),
+            Value::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_evaluate_neq() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Neq,
+            left: Box::new(Expression::Literal(Value::Integer(1))),
+            right: Box::new(Expression::Literal(Value::Integer(2))),
+        };
+        assert_eq!(
+            eval.evaluate(&expr, &BindingSet::new(0)),
+            Value::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_evaluate_default() {
+        let eval = ExpressionEvaluator::default();
+        assert!(eval.prefixes().is_empty());
+    }
+
+    #[test]
+    fn test_evaluate_as_bool_null_is_false() {
+        let eval = ExpressionEvaluator::new();
+        // Unbound variable evaluates to null, which is false in EBV
+        let expr = Expression::Variable("x".to_string());
+        assert!(!eval.evaluate_as_bool(&expr, &BindingSet::new(0)));
+    }
+
+    #[test]
+    fn test_evaluate_string_contains_non_string() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Contains,
+            left: Box::new(Expression::Literal(Value::Integer(42))),
+            right: Box::new(Expression::Literal(Value::String("4".into()))),
+        };
+        let bs = BindingSet::new(0);
+        // Non-string operand → Null
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Null);
+    }
+
+    #[test]
+    fn test_evaluate_if_null_condition() {
+        let eval = ExpressionEvaluator::new();
+        let expr = Expression::If {
+            condition: Box::new(Expression::Variable("x".to_string())), // null
+            then_expr: Box::new(Expression::Literal(Value::String("yes".into()))),
+            else_expr: Box::new(Expression::Literal(Value::String("no".into()))),
+        };
+        let bs = BindingSet::new(0);
+        // null is falsy → else branch
+        assert_eq!(eval.evaluate(&expr, &bs), Value::String("no".into()));
+    }
 }

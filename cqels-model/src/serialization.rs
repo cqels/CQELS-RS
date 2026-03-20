@@ -443,4 +443,165 @@ mod tests {
         assert!(nt.contains(&format!("\"42\"^^<{XSD_INTEGER}>")));
         assert!(nt.ends_with(".\n"));
     }
+
+    #[test]
+    fn test_sparql_json_multiple_results() {
+        let mut bs1 = BindingSet::new(0);
+        bs1.insert("x", Value::Integer(1));
+        let mut bs2 = BindingSet::new(0);
+        bs2.insert("x", Value::Integer(2));
+        bs2.insert("y", Value::String("extra".into()));
+
+        let json = to_sparql_json(&[bs1, bs2]);
+        let vars = json["head"]["vars"].as_array().unwrap();
+        // Both x and y should appear in vars (union across all results)
+        assert!(vars.contains(&json!("x")));
+        assert!(vars.contains(&json!("y")));
+        let bindings = json["results"]["bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 2);
+        // First result has no "y"
+        assert!(bindings[0].get("y").is_none());
+        // Second result has "y"
+        assert!(bindings[1].get("y").is_some());
+    }
+
+    #[test]
+    fn test_sparql_json_float_value() {
+        let mut bs = BindingSet::new(0);
+        bs.insert("f", Value::Float(2.5));
+        let json = to_sparql_json(&[bs]);
+        let b = &json["results"]["bindings"][0];
+        assert_eq!(b["f"]["datatype"], XSD_DOUBLE);
+        assert_eq!(b["f"]["value"], "2.5");
+    }
+
+    #[test]
+    fn test_sparql_json_boolean_false() {
+        let mut bs = BindingSet::new(0);
+        bs.insert("b", Value::Boolean(false));
+        let json = to_sparql_json(&[bs]);
+        let b = &json["results"]["bindings"][0];
+        assert_eq!(b["b"]["value"], "false");
+        assert_eq!(b["b"]["datatype"], XSD_BOOLEAN);
+    }
+
+    #[test]
+    fn test_sparql_json_plain_literal() {
+        let mut bs = BindingSet::new(0);
+        bs.insert(
+            "lit",
+            Value::Term(Term::Literal(LiteralTerm::new("plain text"))),
+        );
+        let json = to_sparql_json(&[bs]);
+        let b = &json["results"]["bindings"][0];
+        assert_eq!(b["lit"]["type"], "literal");
+        assert_eq!(b["lit"]["value"], "plain text");
+        // No datatype or xml:lang for plain literal
+        assert!(b["lit"].get("datatype").is_none());
+        assert!(b["lit"].get("xml:lang").is_none());
+    }
+
+    #[test]
+    fn test_ntriples_empty() {
+        let nt = to_ntriples(&[]);
+        assert!(nt.is_empty());
+    }
+
+    #[test]
+    fn test_ntriples_carriage_return_escape() {
+        let stmt = Statement::new(
+            Term::Iri(IriTerm::new("http://example.org/s")),
+            IriTerm::new("http://example.org/p"),
+            Term::Literal(LiteralTerm::new("line\r")),
+        );
+        let nt = to_ntriples(&[stmt]);
+        assert!(nt.contains("\\r"));
+    }
+
+    #[test]
+    fn test_bindings_to_ntriples_missing_variable() {
+        let mut bs = BindingSet::new(0);
+        bs.insert(
+            "s",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/s"))),
+        );
+        // Missing "p" and "o" — should produce empty output
+        let nt = bindings_to_ntriples(&[bs], "s", "p", "o");
+        assert!(nt.is_empty());
+    }
+
+    #[test]
+    fn test_bindings_to_ntriples_literal_subject_skipped() {
+        let mut bs = BindingSet::new(0);
+        bs.insert(
+            "s",
+            Value::Term(Term::Literal(LiteralTerm::new("not-a-subject"))),
+        );
+        bs.insert(
+            "p",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/p"))),
+        );
+        bs.insert("o", Value::Integer(42));
+        // Literal subject is invalid in RDF — should be skipped
+        let nt = bindings_to_ntriples(&[bs], "s", "p", "o");
+        assert!(nt.is_empty());
+    }
+
+    #[test]
+    fn test_bindings_to_ntriples_string_predicate() {
+        let mut bs = BindingSet::new(0);
+        bs.insert(
+            "s",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/s"))),
+        );
+        bs.insert("p", Value::String("http://example.org/p".into()));
+        bs.insert("o", Value::String("hello".into()));
+        let nt = bindings_to_ntriples(&[bs], "s", "p", "o");
+        assert!(nt.contains("<http://example.org/p>"));
+    }
+
+    #[test]
+    fn test_bindings_to_ntriples_blank_node_subject() {
+        let mut bs = BindingSet::new(0);
+        bs.insert("s", Value::Term(Term::BlankNode(BlankNodeTerm::new("b0"))));
+        bs.insert(
+            "p",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/p"))),
+        );
+        bs.insert(
+            "o",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/o"))),
+        );
+        let nt = bindings_to_ntriples(&[bs], "s", "p", "o");
+        assert!(nt.starts_with("_:b0"));
+    }
+
+    #[test]
+    fn test_bindings_to_ntriples_multiple() {
+        let mut bs1 = BindingSet::new(0);
+        bs1.insert(
+            "s",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/a"))),
+        );
+        bs1.insert(
+            "p",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/p"))),
+        );
+        bs1.insert("o", Value::Integer(1));
+
+        let mut bs2 = BindingSet::new(0);
+        bs2.insert(
+            "s",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/b"))),
+        );
+        bs2.insert(
+            "p",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/q"))),
+        );
+        bs2.insert("o", Value::Integer(2));
+
+        let nt = bindings_to_ntriples(&[bs1, bs2], "s", "p", "o");
+        let lines: Vec<&str> = nt.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
 }

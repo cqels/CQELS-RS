@@ -331,4 +331,197 @@ mod tests {
         wm.clear();
         assert!(wm.is_empty());
     }
+
+    #[test]
+    fn test_fact_index_clear() {
+        let mut index = FactIndex::new();
+        index.add(
+            iri("http://ex.org/a"),
+            stmt("http://ex.org/a", "http://ex.org/p", "http://ex.org/b"),
+        );
+        assert_eq!(index.size(), 1);
+        index.clear();
+        assert_eq!(index.size(), 0);
+    }
+
+    #[test]
+    fn test_fact_index_contains_key() {
+        let mut index = FactIndex::new();
+        let key = iri("http://ex.org/a");
+        assert!(!index.contains_key(&key));
+
+        index.add(
+            key.clone(),
+            stmt("http://ex.org/a", "http://ex.org/p", "http://ex.org/b"),
+        );
+        assert!(index.contains_key(&key));
+    }
+
+    #[test]
+    fn test_fact_index_multiple_stmts_same_key() {
+        let mut index = FactIndex::new();
+        let key = iri("http://ex.org/a");
+        let s1 = stmt("http://ex.org/a", "http://ex.org/p", "http://ex.org/b");
+        let s2 = stmt("http://ex.org/a", "http://ex.org/q", "http://ex.org/c");
+        index.add(key.clone(), s1);
+        index.add(key.clone(), s2);
+        assert_eq!(index.size(), 2);
+        assert_eq!(index.get(&key).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_fact_index_get_missing() {
+        let index = FactIndex::new();
+        assert!(index.get(&iri("http://ex.org/missing")).is_none());
+    }
+
+    #[test]
+    fn test_working_memory_remove_fact() {
+        let mut wm = WorkingMemory::new();
+        let s1 = stmt("http://ex.org/a", "http://ex.org/p", "http://ex.org/b");
+        let s2 = stmt("http://ex.org/c", "http://ex.org/p", "http://ex.org/d");
+        wm.add_fact(s1.clone(), 1000);
+        wm.add_fact(s2.clone(), 2000);
+        assert_eq!(wm.size(), 2);
+
+        wm.remove_fact(&s1);
+        assert_eq!(wm.size(), 1);
+        assert!(!wm.contains(&s1));
+        assert!(wm.contains(&s2));
+    }
+
+    #[test]
+    fn test_working_memory_all_facts() {
+        let mut wm = WorkingMemory::new();
+        let s1 = stmt("http://ex.org/a", "http://ex.org/p", "http://ex.org/b");
+        let s2 = stmt("http://ex.org/c", "http://ex.org/p", "http://ex.org/d");
+        wm.add_fact(s1.clone(), 1000);
+        wm.add_fact(s2.clone(), 2000);
+
+        let all = wm.all_facts();
+        assert_eq!(all.len(), 2);
+        assert!(all.contains(&s1));
+        assert!(all.contains(&s2));
+    }
+
+    #[test]
+    fn test_working_memory_default() {
+        let wm = WorkingMemory::default();
+        assert!(wm.is_empty());
+        assert_eq!(wm.size(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_pattern_all_variables() {
+        let mut wm = WorkingMemory::new();
+        wm.add_fact(
+            stmt("http://ex.org/a", "http://ex.org/p", "http://ex.org/b"),
+            1000,
+        );
+        wm.add_fact(
+            stmt("http://ex.org/c", "http://ex.org/q", "http://ex.org/d"),
+            2000,
+        );
+
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        );
+        let results = wm.get_matching_facts(&pattern);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_working_memory_pattern_constant_object() {
+        let mut wm = WorkingMemory::new();
+        wm.add_fact(
+            stmt(
+                "http://ex.org/alice",
+                "http://ex.org/type",
+                "http://ex.org/Person",
+            ),
+            1000,
+        );
+        wm.add_fact(
+            stmt(
+                "http://ex.org/bob",
+                "http://ex.org/type",
+                "http://ex.org/Animal",
+            ),
+            2000,
+        );
+
+        let pattern = TriplePattern::new(
+            PatternTerm::var("s"),
+            PatternTerm::var("p"),
+            PatternTerm::constant(iri("http://ex.org/Person")),
+        );
+        let results = wm.get_matching_facts(&pattern);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_working_memory_pattern_constant_subject() {
+        let mut wm = WorkingMemory::new();
+        wm.add_fact(
+            stmt("http://ex.org/alice", "http://ex.org/p1", "http://ex.org/b"),
+            1000,
+        );
+        wm.add_fact(
+            stmt("http://ex.org/alice", "http://ex.org/p2", "http://ex.org/c"),
+            2000,
+        );
+        wm.add_fact(
+            stmt("http://ex.org/bob", "http://ex.org/p1", "http://ex.org/d"),
+            3000,
+        );
+
+        let pattern = TriplePattern::new(
+            PatternTerm::constant(iri("http://ex.org/alice")),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        );
+        let results = wm.get_matching_facts(&pattern);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_working_memory_evict_empty() {
+        let mut wm = WorkingMemory::new();
+        let evicted = wm.evict_before(5000);
+        assert!(evicted.is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_evict_none_expired() {
+        let mut wm = WorkingMemory::new();
+        wm.add_fact(
+            stmt("http://ex.org/a", "http://ex.org/p", "http://ex.org/b"),
+            5000,
+        );
+        let evicted = wm.evict_before(1000);
+        assert!(evicted.is_empty());
+        assert_eq!(wm.size(), 1);
+    }
+
+    #[test]
+    fn test_working_memory_evict_indexes_consistent() {
+        let mut wm = WorkingMemory::new();
+        let s1 = stmt("http://ex.org/a", "http://ex.org/p", "http://ex.org/b");
+        wm.add_fact(s1.clone(), 1000);
+        wm.evict_before(2000);
+
+        // After eviction, the fact should not be found via any index
+        assert!(!wm.contains(&s1));
+        assert_eq!(wm.size(), 0);
+
+        // Pattern query should also return empty
+        let pattern = TriplePattern::new(
+            PatternTerm::constant(iri("http://ex.org/a")),
+            PatternTerm::var("p"),
+            PatternTerm::var("o"),
+        );
+        assert!(wm.get_matching_facts(&pattern).is_empty());
+    }
 }
