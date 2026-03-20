@@ -38,32 +38,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Verify packaging for all crates
+        run: |
+          for crate in cqels-model cqels-core cqels-reasoning cqels-geo cqels-engine; do
+            echo "--- Verifying $crate ---"
+            cargo package -p "$crate" --allow-dirty
+          done
       - name: Publish cqels-model
-        run: cargo publish -p cqels-model --no-verify
+        run: cargo publish -p cqels-model
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Wait for crates.io index update
         run: sleep 30
       - name: Publish cqels-core
-        run: cargo publish -p cqels-core --no-verify
+        run: cargo publish -p cqels-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Wait for crates.io index update
         run: sleep 30
       - name: Publish cqels-reasoning
-        run: cargo publish -p cqels-reasoning --no-verify
+        run: cargo publish -p cqels-reasoning
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Wait for crates.io index update
         run: sleep 30
       - name: Publish cqels-geo
-        run: cargo publish -p cqels-geo --no-verify
+        run: cargo publish -p cqels-geo
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Wait for crates.io index update
         run: sleep 30
       - name: Publish cqels-engine
-        run: cargo publish -p cqels-engine --no-verify
+        run: cargo publish -p cqels-engine
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 

@@ -189,7 +189,20 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Restore benchmark baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: bench-baseline.json
+          key: bench-baseline-
+          restore-keys: bench-baseline-
       - run: cargo xtask bench-observe
+      - name: Save current results as baseline for next run
+        run: cargo xtask bench-save-baseline
+      - name: Persist benchmark baseline
+        uses: actions/cache/save@v4
+        with:
+          path: bench-baseline.json
+          key: bench-baseline-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         with:
           name: benchmark-artifacts
