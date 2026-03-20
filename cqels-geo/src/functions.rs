@@ -36,6 +36,8 @@ fn function_registry() -> &'static HashMap<String, GeoFn> {
 }
 
 // ─── Dispatch wrappers ───────────────────────────────────────────────────────
+// These adapt the public functions to the `GeoFn` signature (`fn(&[&Value]) -> Option<Value>`)
+// used by the function registry.
 
 fn dispatch_distance(args: &[&Value]) -> Option<Value> {
     if args.len() < 3 {

@@ -76,8 +76,22 @@ fn prefix_map() -> &'static HashMap<&'static str, &'static str> {
 
 /// Resolves a prefixed name (e.g. `"geo:wktLiteral"`) to a full IRI string.
 ///
+/// Supported prefixes: `rdf`, `rdfs`, `owl`, `xsd`, `geo`, `geof`, `uom`.
+///
 /// Returns `None` if the input is invalid, the prefix is unknown, or the
 /// local name is empty.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::vocabulary::resolve_prefixed_name;
+///
+/// assert_eq!(
+///     resolve_prefixed_name("geof:sfWithin"),
+///     Some("http://www.opengis.net/def/function/geosparql/sfWithin".to_string()),
+/// );
+/// assert_eq!(resolve_prefixed_name("unknown:foo"), None);
+/// ```
 pub fn resolve_prefixed_name(prefixed: &str) -> Option<String> {
     let prefixed = prefixed.trim();
     let colon = prefixed.find(':')?;
@@ -102,6 +116,18 @@ pub fn resolve_prefixed_name(prefixed: &str) -> Option<String> {
 /// - Converts full GEOF namespace URIs to `geof:localName`
 ///
 /// Returns an empty string if the input is empty/null.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::vocabulary::canonical_function_name;
+///
+/// assert_eq!(canonical_function_name("geof:sfWithin"), "geof:sfwithin");
+/// assert_eq!(
+///     canonical_function_name("<http://www.opengis.net/def/function/geosparql/sfWithin>"),
+///     "geof:sfwithin",
+/// );
+/// ```
 pub fn canonical_function_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {

@@ -91,7 +91,7 @@ pub struct RankedElement<T> {
 /// # Example
 ///
 /// ```
-/// use cqels_core::operator::ranking::{TopKOperator, SortDirection};
+/// use cqels_core::operator::{TopKOperator, SortDirection};
 ///
 /// let mut topk = TopKOperator::new(3, |x: &i32| *x as f64, SortDirection::Descending);
 /// for i in 0..10 {

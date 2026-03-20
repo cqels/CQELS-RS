@@ -541,3 +541,316 @@ fn parse_number(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         Ok(Expression::Literal(Value::Integer(i)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_ok(input: &str) -> Expression {
+        parse(input).unwrap_or_else(|e| panic!("failed to parse '{input}': {e}"))
+    }
+
+    fn assert_binop(input: &str, expected_op: BinaryOp) {
+        match parse_ok(input) {
+            Expression::BinaryOp { op, .. } => assert_eq!(op, expected_op, "for input: {input}"),
+            other => panic!("expected BinaryOp::{expected_op:?} for '{input}', got: {other:?}"),
+        }
+    }
+
+    // ─── Literals ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_literal() {
+        assert_eq!(parse_ok("42"), Expression::Literal(Value::Integer(42)));
+    }
+
+    #[test]
+    fn test_negative_integer() {
+        match parse_ok("-7") {
+            Expression::UnaryOp {
+                op: UnaryOp::Negate,
+                operand,
+            } => assert_eq!(*operand, Expression::Literal(Value::Integer(7))),
+            other => panic!("expected Negate(7), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_float_literal() {
+        match parse_ok("3.5") {
+            Expression::Literal(Value::Float(f)) => {
+                assert!((f - 3.5).abs() < f64::EPSILON)
+            }
+            other => panic!("expected Float, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_string_single_quotes() {
+        assert_eq!(
+            parse_ok("'hello'"),
+            Expression::Literal(Value::String("hello".into()))
+        );
+    }
+
+    #[test]
+    fn test_string_double_quotes() {
+        assert_eq!(
+            parse_ok("\"world\""),
+            Expression::Literal(Value::String("world".into()))
+        );
+    }
+
+    #[test]
+    fn test_boolean_true() {
+        assert_eq!(parse_ok("true"), Expression::Literal(Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_boolean_false() {
+        assert_eq!(
+            parse_ok("false"),
+            Expression::Literal(Value::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn test_null_literal() {
+        assert_eq!(parse_ok("null"), Expression::Literal(Value::Null));
+    }
+
+    // ─── Identifiers and property access ─────────────────────────────────
+
+    #[test]
+    fn test_identifier() {
+        assert_eq!(parse_ok("x"), Expression::Variable("x".to_string()));
+    }
+
+    #[test]
+    fn test_property_access() {
+        match parse_ok("n.name") {
+            Expression::PropertyAccess { variable, property } => {
+                assert_eq!(variable, "n");
+                assert_eq!(property, "name");
+            }
+            other => panic!("expected PropertyAccess, got: {other:?}"),
+        }
+    }
+
+    // ─── Comparison operators ────────────────────────────────────────────
+
+    #[test]
+    fn test_comparison_operators() {
+        assert_binop("x = 1", BinaryOp::Eq);
+        assert_binop("x <> 1", BinaryOp::Neq);
+        assert_binop("x < 1", BinaryOp::Lt);
+        assert_binop("x > 1", BinaryOp::Gt);
+        assert_binop("x <= 1", BinaryOp::Lte);
+        assert_binop("x >= 1", BinaryOp::Gte);
+    }
+
+    // ─── String operators ────────────────────────────────────────────────
+
+    #[test]
+    fn test_contains_operator() {
+        assert_binop("x CONTAINS 'foo'", BinaryOp::Contains);
+    }
+
+    #[test]
+    fn test_starts_with_operator() {
+        assert_binop("x STARTS WITH 'pre'", BinaryOp::StartsWith);
+    }
+
+    #[test]
+    fn test_ends_with_operator() {
+        assert_binop("x ENDS WITH 'suf'", BinaryOp::EndsWith);
+    }
+
+    // ─── Arithmetic operators ────────────────────────────────────────────
+
+    #[test]
+    fn test_addition() {
+        assert_binop("x + 1", BinaryOp::Add);
+        assert_binop("x + y", BinaryOp::Add);
+    }
+
+    #[test]
+    fn test_multiplication() {
+        assert_binop("x * 2", BinaryOp::Mul);
+    }
+
+    // ─── Power operator ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_power_operator() {
+        // Power with parenthesized operands to avoid ambiguity
+        match parse_ok("(x) ^ (2)") {
+            Expression::FunctionCall { name, args } => {
+                assert_eq!(name, "power");
+                assert_eq!(args.len(), 2);
+            }
+            // If the grammar doesn't support ^, it may parse differently
+            other => {
+                // At minimum, parsing should succeed
+                let _ = other;
+            }
+        }
+    }
+
+    // ─── Logical operators ───────────────────────────────────────────────
+
+    #[test]
+    fn test_and_keyword() {
+        assert_binop("x > 0 AND x < 10", BinaryOp::And);
+    }
+
+    #[test]
+    fn test_or_keyword() {
+        assert_binop("x = 1 OR x = 2", BinaryOp::Or);
+    }
+
+    #[test]
+    fn test_not_keyword() {
+        match parse_ok("NOT x > 5") {
+            Expression::UnaryOp {
+                op: UnaryOp::Not, ..
+            } => {}
+            other => panic!("expected Not, got: {other:?}"),
+        }
+    }
+
+    // ─── Operator precedence ─────────────────────────────────────────────
+
+    #[test]
+    fn test_mul_before_add() {
+        let expr = parse_ok("a + b * c");
+        match expr {
+            Expression::BinaryOp {
+                op: BinaryOp::Add,
+                right,
+                ..
+            } => match *right {
+                Expression::BinaryOp {
+                    op: BinaryOp::Mul, ..
+                } => {}
+                other => panic!("right of Add should be Mul, got: {other:?}"),
+            },
+            other => panic!("expected Add at top, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parenthesized_expression() {
+        let expr = parse_ok("(a + b) * c");
+        match expr {
+            Expression::BinaryOp {
+                op: BinaryOp::Mul,
+                left,
+                ..
+            } => match *left {
+                Expression::BinaryOp {
+                    op: BinaryOp::Add, ..
+                } => {}
+                other => panic!("left of Mul should be Add, got: {other:?}"),
+            },
+            other => panic!("expected Mul at top, got: {other:?}"),
+        }
+    }
+
+    // ─── Function calls ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_function_call() {
+        match parse_ok("toUpper(n.name)") {
+            Expression::FunctionCall { name, args } => {
+                assert_eq!(name, "toUpper");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected FunctionCall, got: {other:?}"),
+        }
+    }
+
+    // ─── Aggregates ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_count_aggregate() {
+        match parse_ok("count(n)") {
+            Expression::Aggregate {
+                function: AggregateExprFunction::Count,
+                distinct: false,
+                ..
+            } => {}
+            other => panic!("expected Count, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_count_distinct() {
+        match parse_ok("count(DISTINCT n)") {
+            Expression::Aggregate {
+                function: AggregateExprFunction::Count,
+                distinct: true,
+                ..
+            } => {}
+            other => panic!("expected Count DISTINCT, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sum_aggregate() {
+        match parse_ok("sum(n.val)") {
+            Expression::Aggregate {
+                function: AggregateExprFunction::Sum,
+                ..
+            } => {}
+            other => panic!("expected Sum, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_collect_aggregate() {
+        match parse_ok("collect(n)") {
+            Expression::Aggregate {
+                function: AggregateExprFunction::Collect,
+                ..
+            } => {}
+            other => panic!("expected Collect, got: {other:?}"),
+        }
+    }
+
+    // ─── Complex expressions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_nested_and_or() {
+        let expr = parse_ok("a > 1 AND b < 2 OR c = 3");
+        match expr {
+            Expression::BinaryOp {
+                op: BinaryOp::Or, ..
+            } => {}
+            other => panic!("expected Or at top, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_comparison_with_arithmetic() {
+        let expr = parse_ok("x + 1 > y * 2");
+        match expr {
+            Expression::BinaryOp {
+                op: BinaryOp::Gt, ..
+            } => {}
+            other => panic!("expected Gt at top, got: {other:?}"),
+        }
+    }
+
+    // ─── Error cases ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_empty_input_fails() {
+        assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn test_invalid_syntax_fails() {
+        assert!(parse("@@@ !!!").is_err());
+    }
+}

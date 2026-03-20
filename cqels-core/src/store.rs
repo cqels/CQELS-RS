@@ -9,7 +9,7 @@ use std::sync::Arc;
 use oxigraph::store::Store;
 use oxrdf::{GraphNameRef, NamedNodeRef, QuadRef};
 
-use cqels_model::{BindingSet, Statement};
+use cqels_model::{BindingSet, CqelsError, Statement};
 
 use crate::compiler::pipeline::match_triple_pattern;
 use crate::parser::ast::TriplePattern;
@@ -35,10 +35,11 @@ pub trait RdfStore: Send + Sync {
     ) -> Vec<BindingSet>;
 
     /// Loads statements into the default graph.
-    fn load_statements(&self, statements: &[Statement]) -> Result<(), String>;
+    fn load_statements(&self, statements: &[Statement]) -> Result<(), CqelsError>;
 
     /// Loads statements into a named graph.
-    fn load_named_graph(&self, graph_uri: &str, statements: &[Statement]) -> Result<(), String>;
+    fn load_named_graph(&self, graph_uri: &str, statements: &[Statement])
+        -> Result<(), CqelsError>;
 }
 
 /// An RDF store backed by oxigraph's in-memory store.
@@ -48,8 +49,10 @@ pub struct OxigraphRdfStore {
 
 impl OxigraphRdfStore {
     /// Creates a new empty in-memory store.
-    pub fn new() -> Result<Self, String> {
-        let store = Store::new().map_err(|e| e.to_string())?;
+    pub fn new() -> Result<Self, CqelsError> {
+        let store = Store::new().map_err(|e| CqelsError::Evaluation {
+            message: format!("oxigraph store creation failed: {e}"),
+        })?;
         Ok(Self { store })
     }
 }
@@ -78,24 +81,28 @@ impl RdfStore for OxigraphRdfStore {
         query_store_pattern(&self.store, Some(graph_uri), pattern, prefixes)
     }
 
-    fn load_statements(&self, statements: &[Statement]) -> Result<(), String> {
+    fn load_statements(&self, statements: &[Statement]) -> Result<(), CqelsError> {
         for stmt in statements {
-            let quad: oxrdf::Quad = stmt
-                .try_into()
-                .map_err(|e: cqels_model::CqelsError| e.to_string())?;
+            let quad: oxrdf::Quad = stmt.try_into()?;
             self.store
                 .insert(QuadRef::from(&quad))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CqelsError::Evaluation {
+                    message: format!("store insert failed: {e}"),
+                })?;
         }
         Ok(())
     }
 
-    fn load_named_graph(&self, graph_uri: &str, statements: &[Statement]) -> Result<(), String> {
-        let graph_node = oxrdf::NamedNode::new(graph_uri).map_err(|e| e.to_string())?;
+    fn load_named_graph(
+        &self,
+        graph_uri: &str,
+        statements: &[Statement],
+    ) -> Result<(), CqelsError> {
+        let graph_node = oxrdf::NamedNode::new(graph_uri).map_err(|e| CqelsError::Evaluation {
+            message: format!("invalid graph URI: {e}"),
+        })?;
         for stmt in statements {
-            let quad: oxrdf::Quad = stmt
-                .try_into()
-                .map_err(|e: cqels_model::CqelsError| e.to_string())?;
+            let quad: oxrdf::Quad = stmt.try_into()?;
             // Override the graph name with the specified named graph
             let new_quad = oxrdf::Quad::new(
                 quad.subject,
@@ -105,7 +112,9 @@ impl RdfStore for OxigraphRdfStore {
             );
             self.store
                 .insert(QuadRef::from(&new_quad))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CqelsError::Evaluation {
+                    message: format!("store insert failed: {e}"),
+                })?;
         }
         Ok(())
     }
@@ -181,7 +190,7 @@ fn query_store_pattern(
 }
 
 /// Creates a new `OxigraphRdfStore` wrapped in an `Arc` for use with the compiler.
-pub fn create_rdf_store() -> Result<Arc<dyn RdfStore>, String> {
+pub fn create_rdf_store() -> Result<Arc<dyn RdfStore>, CqelsError> {
     Ok(Arc::new(OxigraphRdfStore::new()?))
 }
 

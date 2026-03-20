@@ -112,9 +112,12 @@ impl ReasoningConfigBuilder {
         self
     }
 
+    /// Sets the maximum recursion depth for recursive inference.
+    ///
+    /// The depth must be at least 1. Values less than 1 are silently clamped
+    /// to 1 to prevent misconfiguration.
     pub fn max_recursion_depth(mut self, depth: usize) -> Self {
-        assert!(depth >= 1, "Max recursion depth must be positive");
-        self.max_recursion_depth = depth;
+        self.max_recursion_depth = depth.max(1);
         self
     }
 

@@ -59,10 +59,17 @@ impl CqelsRuntime {
     /// Creates a new runtime with an in-memory oxigraph store.
     ///
     /// Returns an error if the default RDF store cannot be created.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use cqels_engine::CqelsRuntime;
+    ///
+    /// let runtime = CqelsRuntime::try_new().expect("store creation should succeed");
+    /// assert!(!runtime.has_reasoning());
+    /// ```
     pub fn try_new() -> Result<Self, CqelsError> {
-        let store = cqels_core::store::create_rdf_store().map_err(|e| CqelsError::Evaluation {
-            message: format!("RDF store creation failed: {e}"),
-        })?;
+        let store = cqels_core::store::create_rdf_store()?;
         Ok(Self {
             engine: ReactiveStreamEngine::new(),
             store,
@@ -71,6 +78,8 @@ impl CqelsRuntime {
     }
 
     /// Creates a new runtime with an in-memory oxigraph store.
+    ///
+    /// # Panics
     ///
     /// Panics if the default RDF store cannot be created. Prefer
     /// [`try_new()`](Self::try_new) if you need error handling.
@@ -166,7 +175,7 @@ impl CqelsRuntime {
     }
 
     /// Loads RDF statements into the default graph of the store.
-    pub fn load_statements(&self, statements: &[Statement]) -> Result<(), String> {
+    pub fn load_statements(&self, statements: &[Statement]) -> Result<(), CqelsError> {
         self.store.load_statements(statements)
     }
 
@@ -175,7 +184,7 @@ impl CqelsRuntime {
         &self,
         graph_uri: &str,
         statements: &[Statement],
-    ) -> Result<(), String> {
+    ) -> Result<(), CqelsError> {
         self.store.load_named_graph(graph_uri, statements)
     }
 

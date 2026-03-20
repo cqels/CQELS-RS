@@ -12,7 +12,7 @@
 /// # Example
 ///
 /// ```
-/// use cqels_core::operator::parallel::ParallelExecutionConfig;
+/// use cqels_core::operator::ParallelExecutionConfig;
 ///
 /// let config = ParallelExecutionConfig::builder()
 ///     .parallelism(8)

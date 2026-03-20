@@ -462,3 +462,279 @@ fn parse_aggregate(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression>
         distinct: false,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_ok(input: &str) -> Expression {
+        parse(input).unwrap_or_else(|e| panic!("failed to parse '{input}': {e}"))
+    }
+
+    fn assert_binop(input: &str, expected_op: BinaryOp) {
+        match parse_ok(input) {
+            Expression::BinaryOp { op, .. } => assert_eq!(op, expected_op, "for input: {input}"),
+            other => panic!("expected BinaryOp::{expected_op:?} for '{input}', got: {other:?}"),
+        }
+    }
+
+    // ─── Literals ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_literal() {
+        assert_eq!(parse_ok("42"), Expression::Literal(Value::Integer(42)));
+    }
+
+    #[test]
+    fn test_negative_integer_literal() {
+        match parse_ok("-7") {
+            Expression::UnaryOp {
+                op: UnaryOp::Negate,
+                operand,
+            } => assert_eq!(*operand, Expression::Literal(Value::Integer(7))),
+            other => panic!("expected Negate(7), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_float_literal() {
+        match parse_ok("3.5") {
+            Expression::Literal(Value::Float(f)) => assert!((f - 3.5).abs() < f64::EPSILON),
+            other => panic!("expected Float(3.5), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_string_literal() {
+        assert_eq!(
+            parse_ok("\"hello world\""),
+            Expression::Literal(Value::String("hello world".into()))
+        );
+    }
+
+    #[test]
+    fn test_boolean_true() {
+        assert_eq!(parse_ok("true"), Expression::Literal(Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_boolean_false() {
+        assert_eq!(
+            parse_ok("false"),
+            Expression::Literal(Value::Boolean(false))
+        );
+    }
+
+    // ─── Variables ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_variable_question_mark() {
+        assert_eq!(parse_ok("?x"), Expression::Variable("?x".to_string()));
+    }
+
+    #[test]
+    fn test_variable_dollar() {
+        assert_eq!(parse_ok("$var"), Expression::Variable("$var".to_string()));
+    }
+
+    // ─── Comparison operators ────────────────────────────────────────────
+
+    #[test]
+    fn test_comparison_operators() {
+        assert_binop("?x = 1", BinaryOp::Eq);
+        assert_binop("?x != 1", BinaryOp::Neq);
+        assert_binop("?x < 1", BinaryOp::Lt);
+        assert_binop("?x > 1", BinaryOp::Gt);
+        assert_binop("?x <= 1", BinaryOp::Lte);
+        assert_binop("?x >= 1", BinaryOp::Gte);
+    }
+
+    // ─── Arithmetic operators ────────────────────────────────────────────
+
+    #[test]
+    fn test_addition() {
+        assert_binop("?x + 1", BinaryOp::Add);
+        assert_binop("?x + ?y", BinaryOp::Add);
+    }
+
+    #[test]
+    fn test_multiplication() {
+        assert_binop("?x * 2", BinaryOp::Mul);
+    }
+
+    // ─── Logical operators ───────────────────────────────────────────────
+
+    #[test]
+    fn test_logical_and() {
+        assert_binop("?x > 0 && ?x < 10", BinaryOp::And);
+    }
+
+    #[test]
+    fn test_logical_or() {
+        assert_binop("?x = 1 || ?x = 2", BinaryOp::Or);
+    }
+
+    #[test]
+    fn test_logical_not() {
+        match parse_ok("!true") {
+            Expression::UnaryOp {
+                op: UnaryOp::Not, ..
+            } => {}
+            other => panic!("expected Not, got: {other:?}"),
+        }
+    }
+
+    // ─── Operator precedence ─────────────────────────────────────────────
+
+    #[test]
+    fn test_mul_before_add() {
+        // ?a + ?b * ?c should parse as ?a + (?b * ?c)
+        let expr = parse_ok("?a + ?b * ?c");
+        match expr {
+            Expression::BinaryOp {
+                op: BinaryOp::Add,
+                right,
+                ..
+            } => match *right {
+                Expression::BinaryOp {
+                    op: BinaryOp::Mul, ..
+                } => {}
+                other => panic!("right of Add should be Mul, got: {other:?}"),
+            },
+            other => panic!("expected Add at top, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parenthesized_expression() {
+        // (?a + ?b) * ?c should parse as Mul(Add(...), ...)
+        let expr = parse_ok("(?a + ?b) * ?c");
+        match expr {
+            Expression::BinaryOp {
+                op: BinaryOp::Mul,
+                left,
+                ..
+            } => match *left {
+                Expression::BinaryOp {
+                    op: BinaryOp::Add, ..
+                } => {}
+                other => panic!("left of Mul should be Add, got: {other:?}"),
+            },
+            other => panic!("expected Mul at top, got: {other:?}"),
+        }
+    }
+
+    // ─── Unary operators ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_unary_negate_variable() {
+        match parse_ok("-?x") {
+            Expression::UnaryOp {
+                op: UnaryOp::Negate,
+                ..
+            } => {}
+            other => panic!("expected Negate, got: {other:?}"),
+        }
+    }
+
+    // ─── Function calls ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_function_call_single_arg() {
+        match parse_ok("strlen(?name)") {
+            Expression::FunctionCall { name, args } => {
+                assert_eq!(name, "strlen");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected FunctionCall, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bound_call() {
+        match parse_ok("bound(?x)") {
+            Expression::Bound(var) => assert_eq!(var, "?x"),
+            other => panic!("expected Bound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_if_expression() {
+        match parse_ok("IF(?x > 0, ?x, 0)") {
+            Expression::If { .. } => {}
+            other => panic!("expected If, got: {other:?}"),
+        }
+    }
+
+    // ─── Aggregates ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_count_star() {
+        match parse_ok("COUNT(*)") {
+            Expression::Aggregate {
+                function: AggregateExprFunction::Count,
+                ..
+            } => {}
+            other => panic!("expected Count aggregate, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sum_variable() {
+        match parse_ok("SUM(?val)") {
+            Expression::Aggregate {
+                function: AggregateExprFunction::Sum,
+                ..
+            } => {}
+            other => panic!("expected Sum aggregate, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_avg_variable() {
+        match parse_ok("AVG(?val)") {
+            Expression::Aggregate {
+                function: AggregateExprFunction::Avg,
+                ..
+            } => {}
+            other => panic!("expected Avg aggregate, got: {other:?}"),
+        }
+    }
+
+    // ─── Complex expressions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_nested_and_or() {
+        // ?a > 1 && ?b < 2 || ?c = 3
+        let expr = parse_ok("?a > 1 && ?b < 2 || ?c = 3");
+        match expr {
+            Expression::BinaryOp {
+                op: BinaryOp::Or, ..
+            } => {}
+            other => panic!("expected Or at top (lower precedence), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_chained_comparisons_with_arithmetic() {
+        let expr = parse_ok("?x + 1 > ?y * 2");
+        match expr {
+            Expression::BinaryOp {
+                op: BinaryOp::Gt, ..
+            } => {}
+            other => panic!("expected Gt at top, got: {other:?}"),
+        }
+    }
+
+    // ─── Error cases ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_empty_input_fails() {
+        assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn test_invalid_syntax_fails() {
+        assert!(parse("??? +++").is_err());
+    }
+}

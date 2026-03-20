@@ -14,7 +14,7 @@ use cqels_model::{BindingSet, Value};
 /// # Example
 ///
 /// ```
-/// use cqels_core::operator::bind::BindOperator;
+/// use cqels_core::operator::BindOperator;
 /// use cqels_model::{BindingSet, Value};
 ///
 /// let bind = BindOperator::new("doubled", |bs: &BindingSet| {
