@@ -1,3 +1,9 @@
+//! Top-level RETE network that orchestrates reasoning over RDF streams.
+//!
+//! [`ReteNetwork`] compiles a [`ReasoningConfig`] into an alpha+beta
+//! network and processes incoming [`RdfStreamElement`]s, producing
+//! [`InferredRdfStreamElement`] values with provenance metadata.
+
 use std::collections::HashSet;
 use std::fmt;
 

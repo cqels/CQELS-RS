@@ -1,3 +1,10 @@
+//! Join operators for combining two streams within time windows.
+//!
+//! Provides [`WindowedJoinState`] for symmetric time-window joins,
+//! [`IntervalJoinState`] for asymmetric interval joins,
+//! [`GraphPatternJoinState`] for incremental RDF graph pattern matching,
+//! and [`VariableLengthPathOperator`] for bounded BFS traversal.
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
@@ -18,11 +25,16 @@ where
     }
 }
 
-/// Tagged union for left/right stream elements.
+/// Tagged union for distinguishing left and right stream elements.
+///
+/// Used to merge two typed streams into a single stream for processing
+/// by join operators that need to identify the source of each element.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum TaggedUnion<L, R> {
+    /// Element from the left stream.
     Left(L),
+    /// Element from the right stream.
     Right(R),
 }
 

@@ -1,15 +1,35 @@
+//! Ranking and Top-K operators for stream result ordering.
+//!
+//! Provides [`TopKOperator`] for maintaining the K highest- or
+//! lowest-scoring elements using a bounded binary heap, along with
+//! [`SortKey`] and [`SortDirection`] for specifying sort criteria.
+
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-/// Sort direction for ranking.
+/// Sort direction for ranking and ORDER BY operations.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::operator::ranking::{SortDirection, SortKey};
+///
+/// let key = SortKey::asc("temperature");
+/// assert_eq!(key.direction, SortDirection::Ascending);
+///
+/// let key = SortKey::desc("timestamp");
+/// assert_eq!(key.direction, SortDirection::Descending);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SortDirection {
+    /// Smallest values first.
     Ascending,
+    /// Largest values first.
     Descending,
 }
 
-/// A sort key specification.
+/// A sort key specification pairing a variable name with a direction.
 #[derive(Clone, Debug)]
 pub struct SortKey {
     pub name: String,
@@ -17,6 +37,16 @@ pub struct SortKey {
 }
 
 impl SortKey {
+    /// Creates an ascending sort key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cqels_core::operator::ranking::SortKey;
+    ///
+    /// let key = SortKey::asc("temperature");
+    /// assert_eq!(key.name, "temperature");
+    /// ```
     pub fn asc(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -24,6 +54,16 @@ impl SortKey {
         }
     }
 
+    /// Creates a descending sort key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cqels_core::operator::ranking::SortKey;
+    ///
+    /// let key = SortKey::desc("score");
+    /// assert_eq!(key.name, "score");
+    /// ```
     pub fn desc(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),

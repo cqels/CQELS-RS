@@ -1,3 +1,9 @@
+//! Configuration for the RETE reasoning engine.
+//!
+//! [`ReasoningConfig`] controls rule sets, conflict resolution strategy,
+//! window duration for fact expiration, and truth maintenance settings.
+//! Use the builder API via [`ReasoningConfig::builder()`].
+
 use std::fmt;
 use std::time::Duration;
 

@@ -1,3 +1,10 @@
+//! RSP-QL stream operators: IStream, DStream, and RStream.
+//!
+//! Implements the three streaming semantics from the RSP-QL model:
+//! [`IStreamOperator`] emits newly added elements, [`DStreamOperator`]
+//! emits removed elements, and [`RStreamOperator`] emits complete window
+//! snapshots on every update.
+
 use std::collections::HashSet;
 use std::hash::Hash;
 use std::pin::Pin;

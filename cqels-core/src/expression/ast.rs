@@ -89,32 +89,48 @@ impl fmt::Display for Expression {
     }
 }
 
-/// Binary operators.
+/// Binary operators for expression evaluation.
+///
+/// Covers logical (`And`, `Or`), comparison (`Eq`, `Lt`, etc.),
+/// arithmetic (`Add`, `Sub`, `Mul`, `Div`, `Mod`), and string
+/// (`Contains`, `StartsWith`, `EndsWith`) operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BinaryOp {
-    // Logical
+    /// Logical AND (`&&`).
     And,
+    /// Logical OR (`||`).
     Or,
 
-    // Comparison
+    /// Equality (`=`).
     Eq,
+    /// Inequality (`!=`).
     Neq,
+    /// Less than (`<`).
     Lt,
+    /// Greater than (`>`).
     Gt,
+    /// Less than or equal (`<=`).
     Lte,
+    /// Greater than or equal (`>=`).
     Gte,
 
-    // Arithmetic
+    /// Addition (`+`).
     Add,
+    /// Subtraction (`-`).
     Sub,
+    /// Multiplication (`*`).
     Mul,
+    /// Division (`/`).
     Div,
+    /// Modulo (`%`).
     Mod,
 
-    // String
+    /// String contains.
     Contains,
+    /// String starts with.
     StartsWith,
+    /// String ends with.
     EndsWith,
 }
 
@@ -141,12 +157,15 @@ impl fmt::Display for BinaryOp {
     }
 }
 
-/// Unary operators.
+/// Unary operators for expression evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnaryOp {
+    /// Logical negation (`!`).
     Not,
+    /// Arithmetic negation (`-`).
     Negate,
+    /// Unary plus (`+`, identity for numeric values).
     UnaryPlus,
 }
 
@@ -161,15 +180,24 @@ impl fmt::Display for UnaryOp {
 }
 
 /// Aggregate function type used in expression AST.
+///
+/// Represents the aggregate operations available in SPARQL/Cypher queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AggregateExprFunction {
+    /// Count of elements.
     Count,
+    /// Sum of numeric values.
     Sum,
+    /// Arithmetic average.
     Avg,
+    /// Minimum value.
     Min,
+    /// Maximum value.
     Max,
+    /// Collect values into a list (Cypher).
     Collect,
+    /// Concatenate string values with a separator (SPARQL).
     GroupConcat,
 }
 

@@ -1,3 +1,9 @@
+//! Working memory and fact indexing for the RETE reasoning engine.
+//!
+//! [`WorkingMemory`] stores the current set of active facts with time-based
+//! indexing for windowed eviction and positional indexes ([`FactIndex`]) for
+//! efficient pattern-based retrieval by subject, predicate, or object.
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cqels_model::{Statement, Term};
@@ -6,6 +12,24 @@ use crate::pattern::TriplePattern;
 
 /// Single-dimension index mapping a Term value to the set of statements
 /// containing that value in a particular position (subject, predicate, or object).
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::FactIndex;
+/// use cqels_model::{Term, IriTerm, Statement};
+///
+/// let mut idx = FactIndex::new();
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://ex.org/alice")),
+///     IriTerm::new("http://ex.org/type"),
+///     Term::Iri(IriTerm::new("http://ex.org/Person")),
+/// );
+/// let key = Term::Iri(IriTerm::new("http://ex.org/alice"));
+/// idx.add(key.clone(), stmt.clone());
+/// assert_eq!(idx.size(), 1);
+/// assert!(idx.contains_key(&key));
+/// ```
 #[derive(Debug, Default)]
 pub struct FactIndex {
     index: HashMap<Term, HashSet<Statement>>,

@@ -1,3 +1,10 @@
+//! Sliding Window AGgregation (SWAG) via the Two-Stacks-Lite algorithm.
+//!
+//! Provides the [`SwagOp`] monoidal trait and concrete operations
+//! ([`SwagCountOp`], [`SwagSumOp`], [`SwagMeanOp`], [`SwagMaxOp`],
+//! [`SwagMinOp`]), plus the [`TwoStacksLiteWindow`] data structure for
+//! amortized O(1) push, pop, and query over sliding windows.
+
 use std::marker::PhantomData;
 
 /// Core SWAG (Sliding Window Aggregation) operation trait.

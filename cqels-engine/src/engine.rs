@@ -1,3 +1,10 @@
+//! Stream engine trait and reactive implementation.
+//!
+//! Defines the [`StreamEngine`] async trait for registering streams,
+//! submitting continuous queries, and managing lifecycle. The concrete
+//! [`ReactiveStreamEngine`] implementation uses tokio broadcast channels
+//! for fan-out stream distribution and cancellation-aware query wrapping.
+
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};

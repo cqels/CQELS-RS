@@ -1,3 +1,8 @@
+//! Parallel execution configuration for stream operators.
+//!
+//! [`ParallelExecutionConfig`] controls thread count, auto-parallelization
+//! thresholds, and the aggregation backend (legacy or SWAG).
+
 /// Configuration for parallel execution of stream operators.
 ///
 /// Controls how the engine distributes stream processing across threads:

@@ -1,3 +1,9 @@
+//! Rule definitions for the RETE reasoning engine.
+//!
+//! A [`Rule`] specifies a condition (antecedent triple patterns) and a
+//! consequent (templates for inferred triples). Rules are grouped into a
+//! [`RuleSet`] and compiled into the RETE network for incremental matching.
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;

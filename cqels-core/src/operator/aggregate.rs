@@ -1,3 +1,12 @@
+//! Incremental aggregate functions for windowed stream processing.
+//!
+//! Provides the [`AggregateFunction`] trait for fold-style aggregation,
+//! [`RetractableAggregateFunction`] for O(1) element removal in sliding
+//! windows, and concrete implementations: [`CountAggregate`], [`SumAggregate`],
+//! [`AvgAggregate`], [`MinAggregate`], [`MaxAggregate`]. The
+//! [`WindowedAggregateOperator`] partitions elements by time window and
+//! optional group key.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;

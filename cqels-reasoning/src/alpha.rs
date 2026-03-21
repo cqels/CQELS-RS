@@ -1,3 +1,10 @@
+//! Alpha network for single-pattern matching in the RETE algorithm.
+//!
+//! Each [`AlphaNode`] tests incoming RDF statements against a single
+//! [`TriplePattern`]. The [`AlphaNetwork`] evaluates all alpha nodes in
+//! parallel, producing [`AlphaMatch`] results with variable bindings that
+//! feed into the beta network for cross-pattern joins.
+
 use std::collections::HashMap;
 use std::fmt;
 

@@ -1,3 +1,9 @@
+//! Beta network for cross-pattern join in the RETE algorithm.
+//!
+//! [`BetaNode`]s join variable bindings from two alpha nodes via shared
+//! variables. The [`BetaNetwork`] orchestrates the full match-join-activate
+//! pipeline: alpha matching → beta joining → activation production.
+
 use std::collections::HashMap;
 use std::fmt;
 

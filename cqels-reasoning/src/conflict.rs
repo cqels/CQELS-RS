@@ -1,3 +1,9 @@
+//! Conflict resolution strategies for the RETE reasoning engine.
+//!
+//! When multiple rules match simultaneously, the [`ConflictResolver`]
+//! selects which [`Activation`]s to fire based on the configured
+//! [`ConflictResolution`] strategy (priority-based or fire-all).
+
 use std::collections::HashSet;
 use std::fmt;
 
@@ -28,6 +34,15 @@ pub enum ConflictResolution {
 }
 
 /// Resolves conflicts between activations based on the configured strategy.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::{ConflictResolution, ConflictResolver};
+///
+/// let resolver = ConflictResolver::new(ConflictResolution::All);
+/// assert_eq!(resolver.strategy(), ConflictResolution::All);
+/// ```
 pub struct ConflictResolver {
     strategy: ConflictResolution,
 }

@@ -1,3 +1,11 @@
+//! Complex Event Processing (CEP) via NFA-based pattern matching.
+//!
+//! Build event patterns using the [`Pattern`] fluent API, then compile
+//! and evaluate them with [`NfaPatternProcessor`]. Supports strict,
+//! relaxed, and non-deterministic [`Contiguity`]; [`Quantifier`]s
+//! (one, one-or-more, times-N); negation; context conditions; and
+//! time-window constraints.
+
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;

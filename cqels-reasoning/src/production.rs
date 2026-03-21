@@ -1,3 +1,9 @@
+//! Production nodes (activations) for the RETE reasoning engine.
+//!
+//! An [`Activation`] represents a fully matched rule with concrete variable
+//! bindings, ready to fire and produce inferred RDF statements by
+//! instantiating the rule's consequent templates.
+
 use std::collections::HashMap;
 use std::fmt;
 
