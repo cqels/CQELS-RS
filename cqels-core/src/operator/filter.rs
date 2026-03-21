@@ -1,3 +1,9 @@
+//! FILTER operator for predicate-based stream filtering.
+//!
+//! [`FilterOperator`] evaluates a boolean predicate on each incoming
+//! [`BindingSet`], passing through only those that satisfy the condition.
+//! Implements the SPARQL `FILTER(expr)` semantics.
+
 use std::pin::Pin;
 
 use futures::stream::{Stream, StreamExt};
@@ -31,6 +37,7 @@ pub struct FilterOperator<F: Fn(&BindingSet) -> bool + Send + Sync> {
 }
 
 impl<F: Fn(&BindingSet) -> bool + Send + Sync> FilterOperator<F> {
+    /// Creates a new filter operator with the given predicate closure.
     pub fn new(predicate: F) -> Self {
         Self { predicate }
     }

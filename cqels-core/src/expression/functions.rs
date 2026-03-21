@@ -263,7 +263,8 @@ fn fn_encode_for_uri(args: &[Value]) -> Value {
                     let mut buf = [0u8; 4];
                     for byte in c.encode_utf8(&mut buf).as_bytes() {
                         use std::fmt::Write;
-                        write!(encoded, "%{:02X}", byte).unwrap();
+                        // write! to String is infallible
+                        let _ = write!(encoded, "%{:02X}", byte);
                     }
                 }
             }
@@ -590,7 +591,8 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut hex = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write;
-        write!(hex, "{:02x}", byte).unwrap();
+        // write! to String is infallible
+        let _ = write!(hex, "{:02x}", byte);
     }
     hex
 }

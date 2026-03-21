@@ -1,3 +1,11 @@
+//! Triple patterns and templates for the RETE reasoning engine.
+//!
+//! [`TriplePattern`] matches RDF statements by binding variables to
+//! actual term values. [`TripleTemplate`] instantiates new statements
+//! from variable bindings, used in rule consequents to produce inferred
+//! triples. Both use [`PatternTerm`] to represent variable or constant
+//! positions.
+
 use std::collections::HashMap;
 use std::fmt;
 

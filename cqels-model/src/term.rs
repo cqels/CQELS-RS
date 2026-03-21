@@ -1,3 +1,10 @@
+//! RDF term types — IRIs, blank nodes, and literals.
+//!
+//! Provides [`Term`] (the top-level enum), [`IriTerm`], [`BlankNodeTerm`],
+//! and [`LiteralTerm`] — the building blocks of RDF [`super::Statement`]s.
+//! Includes conversions to and from `oxrdf` types for interoperability
+//! with the Oxigraph ecosystem.
+
 use std::fmt;
 
 use oxrdf::{BlankNode, Literal, NamedNode};
@@ -53,12 +60,14 @@ pub struct IriTerm {
 }
 
 impl IriTerm {
+    /// Creates a new IRI term from any string-like value.
     pub fn new(value: impl Into<String>) -> Self {
         Self {
             value: value.into(),
         }
     }
 
+    /// Returns the IRI as a string slice.
     pub fn as_str(&self) -> &str {
         &self.value
     }
@@ -87,10 +96,12 @@ pub struct BlankNodeTerm {
 }
 
 impl BlankNodeTerm {
+    /// Creates a new blank node with the given identifier.
     pub fn new(id: impl Into<String>) -> Self {
         Self { id: id.into() }
     }
 
+    /// Returns the blank node identifier.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -133,6 +144,7 @@ pub struct LiteralTerm {
 }
 
 impl LiteralTerm {
+    /// Creates a new plain literal with the given lexical value.
     pub fn new(value: impl Into<String>) -> Self {
         Self {
             value: value.into(),
@@ -141,24 +153,29 @@ impl LiteralTerm {
         }
     }
 
+    /// Sets the datatype IRI (e.g., `xsd:integer`). Returns `self` for chaining.
     pub fn with_datatype(mut self, datatype: impl Into<String>) -> Self {
         self.datatype = Some(datatype.into());
         self
     }
 
+    /// Sets the language tag (e.g., `"en"`, `"fr"`). Returns `self` for chaining.
     pub fn with_language(mut self, language: impl Into<String>) -> Self {
         self.language = Some(language.into());
         self
     }
 
+    /// Returns the lexical value of this literal.
     pub fn value(&self) -> &str {
         &self.value
     }
 
+    /// Returns the datatype IRI, if set.
     pub fn datatype(&self) -> Option<&str> {
         self.datatype.as_deref()
     }
 
+    /// Returns the language tag, if set.
     pub fn language(&self) -> Option<&str> {
         self.language.as_deref()
     }

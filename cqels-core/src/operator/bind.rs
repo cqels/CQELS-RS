@@ -1,3 +1,9 @@
+//! BIND operator for computed variable bindings.
+//!
+//! [`BindOperator`] evaluates an expression closure against each incoming
+//! [`BindingSet`] and inserts the result as a new variable binding,
+//! implementing the SPARQL `BIND(expr AS ?var)` semantics.
+
 use std::pin::Pin;
 
 use futures::stream::{Stream, StreamExt};
@@ -32,6 +38,7 @@ pub struct BindOperator<F: Fn(&BindingSet) -> Option<Value> + Send + Sync> {
 }
 
 impl<F: Fn(&BindingSet) -> Option<Value> + Send + Sync> BindOperator<F> {
+    /// Creates a new bind operator that computes `variable` from `expression`.
     pub fn new(variable: impl Into<String>, expression: F) -> Self {
         Self {
             variable: variable.into(),

@@ -1,3 +1,10 @@
+//! Continuous query trait and input stream management.
+//!
+//! Defines the [`ContinuousQuery`] trait that all query implementations
+//! (SPARQL, Cypher, custom) must implement, along with [`QueryInputs`]
+//! for managing named input streams and [`QueryType`] for identifying
+//! the query language.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
@@ -13,8 +20,11 @@ use crate::stream::StreamElement;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum QueryType {
+    /// SPARQL-based continuous query (RSP-QL/CQELS-QL).
     Sparql,
+    /// Cypher-based continuous query (openCypher over streams).
     Cypher,
+    /// A user-defined custom query language.
     Custom,
 }
 
@@ -31,17 +41,30 @@ impl fmt::Display for QueryType {
 /// Container for named input streams for a continuous query.
 ///
 /// Maps to Java's `QueryInputs<T extends StreamElement>`.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::query::QueryInputs;
+///
+/// let mut inputs = QueryInputs::new();
+/// let stream = Box::pin(futures::stream::empty());
+/// inputs.add_stream("sensor_data", stream);
+/// assert!(inputs.has_stream("sensor_data"));
+/// ```
 pub struct QueryInputs {
     streams: HashMap<String, Pin<Box<dyn Stream<Item = StreamElement> + Send>>>,
 }
 
 impl QueryInputs {
+    /// Creates an empty input container.
     pub fn new() -> Self {
         Self {
             streams: HashMap::new(),
         }
     }
 
+    /// Registers a named input stream.
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
@@ -50,6 +73,7 @@ impl QueryInputs {
         self.streams.insert(name.into(), stream);
     }
 
+    /// Removes and returns the stream with the given name.
     pub fn take_stream(
         &mut self,
         name: &str,
@@ -57,10 +81,12 @@ impl QueryInputs {
         self.streams.remove(name)
     }
 
+    /// Returns `true` if a stream with the given name is registered.
     pub fn has_stream(&self, name: &str) -> bool {
         self.streams.contains_key(name)
     }
 
+    /// Returns an iterator over registered stream names.
     pub fn stream_names(&self) -> impl Iterator<Item = &str> {
         self.streams.keys().map(|s| s.as_str())
     }

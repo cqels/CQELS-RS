@@ -1,3 +1,10 @@
+//! Typed values for expression evaluation and binding sets.
+//!
+//! [`Value`] wraps the various typed representations (integer, float,
+//! boolean, string, RDF term, null) needed when evaluating SPARQL or
+//! Cypher expressions. It supports numeric promotion, partial ordering,
+//! and conversion to/from RDF [`Term`]s.
+
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -55,6 +62,16 @@ pub enum Value {
 
 impl Value {
     /// Creates a Value from an RDF Term.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cqels_model::{Value, Term, IriTerm};
+    ///
+    /// let term = Term::Iri(IriTerm::new("http://example.org/x"));
+    /// let value = Value::from_term(term);
+    /// assert!(value.is_iri());
+    /// ```
     pub fn from_term(term: Term) -> Self {
         Value::Term(term)
     }

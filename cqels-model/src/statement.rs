@@ -1,3 +1,9 @@
+//! RDF statements (triples and quads).
+//!
+//! A [`Statement`] represents an RDF triple (subject–predicate–object) or
+//! quad (triple in a named graph). Statements are the fundamental data unit
+//! flowing through CQELS streams and the reasoning engine.
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};

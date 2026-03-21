@@ -1,3 +1,9 @@
+//! Error types for the CQELS engine.
+//!
+//! Provides [`CqelsError`] — the unified error enum used across all crates —
+//! and [`ParseErrorDetail`] for structured parse/syntax error reporting with
+//! optional source-location information.
+
 use std::fmt;
 
 use thiserror::Error;

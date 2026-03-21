@@ -1,3 +1,10 @@
+//! Variable binding sets for query result rows.
+//!
+//! A [`BindingSet`] maps variable names to [`Value`]s with an associated
+//! timestamp, representing a single result row from query evaluation.
+//! Binding sets support compatibility checks and joins for combining
+//! results across graph patterns.
+
 use std::collections::HashMap;
 use std::fmt;
 
