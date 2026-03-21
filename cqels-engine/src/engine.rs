@@ -15,6 +15,29 @@ use cqels_model::{BindingSet, CqelsError};
 /// Core stream engine trait.
 ///
 /// Maps to Java's `StreamEngine` interface.
+///
+/// # Examples
+///
+/// ```no_run
+/// use cqels_engine::{StreamEngine, ReactiveStreamEngine, create_stream_pair};
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), cqels_model::CqelsError> {
+/// let engine = ReactiveStreamEngine::new();
+///
+/// // Register a stream
+/// let (tx, stream) = create_stream_pair(32);
+/// engine.register_stream("sensors", stream).await?;
+///
+/// // Start the engine
+/// engine.start().await?;
+/// assert!(engine.is_running());
+///
+/// // Stop the engine
+/// engine.stop().await?;
+/// # Ok(())
+/// # }
+/// ```
 #[async_trait]
 pub trait StreamEngine: Send + Sync {
     /// Registers a named input stream.
@@ -120,6 +143,28 @@ impl<S> Drop for CleanupStream<S> {
 /// Each registered stream is bridged to a `broadcast::Sender`, enabling multiple
 /// subscribers (queries) to receive all events. Queries are tracked in a registry
 /// and can be individually cancelled via [`unregister_query`](StreamEngine::unregister_query).
+///
+/// # Examples
+///
+/// ```no_run
+/// use cqels_engine::{ReactiveStreamEngine, StreamEngine, create_stream_pair};
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), cqels_model::CqelsError> {
+/// let engine = ReactiveStreamEngine::new();
+///
+/// let (tx, stream) = create_stream_pair(32);
+/// engine.register_stream("events", stream).await?;
+/// engine.start().await?;
+///
+/// // Multiple subscribers can receive from the same stream
+/// let rx1 = engine.get_stream_receiver("events").await.unwrap();
+/// let rx2 = engine.get_stream_receiver("events").await.unwrap();
+///
+/// engine.stop().await?;
+/// # Ok(())
+/// # }
+/// ```
 type PendingStream = (String, Pin<Box<dyn Stream<Item = StreamElement> + Send>>);
 
 pub struct ReactiveStreamEngine {

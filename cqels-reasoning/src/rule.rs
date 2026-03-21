@@ -80,6 +80,32 @@ impl RuleConsequent {
 }
 
 /// A reasoning rule with a condition and consequent.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::{Rule, TriplePattern, TripleTemplate, PatternTerm};
+/// use cqels_model::{Term, IriTerm};
+///
+/// let rule = Rule::builder()
+///     .id("type-inference")
+///     .name("Type Inference Rule")
+///     .priority(10)
+///     .pattern(TriplePattern::new(
+///         PatternTerm::var("s"),
+///         PatternTerm::constant(Term::Iri(IriTerm::new("http://example.org/type"))),
+///         PatternTerm::var("o"),
+///     ))
+///     .template(TripleTemplate::new(
+///         PatternTerm::var("s"),
+///         PatternTerm::constant(Term::Iri(IriTerm::new("http://example.org/is"))),
+///         PatternTerm::var("o"),
+///     ))
+///     .build();
+///
+/// assert_eq!(rule.id(), "type-inference");
+/// assert_eq!(rule.priority(), 10);
+/// ```
 pub struct Rule {
     id: String,
     name: String,
@@ -224,6 +250,21 @@ fn uuid_like_id() -> String {
 }
 
 /// A collection of rules, sorted by priority (highest first).
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::{Rule, RuleSet};
+///
+/// let r1 = Rule::builder().id("r1").priority(5).build();
+/// let r2 = Rule::builder().id("r2").priority(10).build();
+///
+/// let ruleset = RuleSet::new(vec![r1, r2]);
+/// assert_eq!(ruleset.size(), 2);
+/// // Rules are sorted highest priority first
+/// assert_eq!(ruleset.rules()[0].id(), "r2");
+/// assert_eq!(ruleset.get_by_id("r1").unwrap().priority(), 5);
+/// ```
 pub struct RuleSet {
     rules: Vec<Rule>,
 }

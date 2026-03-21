@@ -28,6 +28,23 @@ use crate::engine::{ReactiveStreamEngine, StreamEngine};
 ///
 /// The `query_id` can be used later with [`CqelsRuntime::unregister_query`] to cancel
 /// the query. The `stream` yields query results as they are produced.
+///
+/// # Examples
+///
+/// ```no_run
+/// use cqels_engine::{CqelsRuntime, QueryRegistration};
+/// use futures::StreamExt;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), cqels_model::CqelsError> {
+/// let runtime = CqelsRuntime::new();
+/// // ... register streams, then:
+/// // let reg = runtime.register_cqelsql_query("SELECT ...").await?;
+/// // let query_id = reg.query_id;     // save for later cancellation
+/// // let mut results = reg.stream;    // consume results
+/// # Ok(())
+/// # }
+/// ```
 pub struct QueryRegistration<T> {
     /// The unique ID assigned to this query.
     pub query_id: String,
@@ -43,6 +60,42 @@ pub struct QueryRegistration<T> {
 /// 2. Register input streams
 /// 3. (Optionally) load static RDF data and/or enable reasoning
 /// 4. Submit query strings or CEP patterns and collect results
+///
+/// # Examples
+///
+/// ```no_run
+/// use cqels_engine::CqelsRuntime;
+/// use cqels_core::stream::{StreamElement, RdfStreamElement};
+/// use cqels_model::{Statement, Term, IriTerm, LiteralTerm};
+/// use futures::StreamExt;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), cqels_model::CqelsError> {
+/// let runtime = CqelsRuntime::new();
+///
+/// // Register an input stream
+/// let elements = vec![StreamElement::Rdf(RdfStreamElement::new(
+///     Statement::new(
+///         Term::Iri(IriTerm::new("http://sensor/1")),
+///         IriTerm::new("http://example.org/temp"),
+///         Term::Literal(LiteralTerm::new("25.5")),
+///     ),
+///     1000,
+/// ))];
+/// let stream = Box::pin(futures::stream::iter(elements));
+/// runtime.register_stream("sensors", stream).await?;
+///
+/// // Submit a CQELS-QL query
+/// let reg = runtime.register_cqelsql_query(
+///     "SELECT ?s ?v FROM STREAM sensors [NOW] WHERE { STREAM sensors { ?s <http://example.org/temp> ?v . } }"
+/// ).await?;
+///
+/// runtime.start().await?;
+/// let results: Vec<_> = reg.stream.take(1).collect().await;
+/// runtime.stop().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct CqelsRuntime {
     engine: ReactiveStreamEngine,
     store: Arc<dyn RdfStore>,

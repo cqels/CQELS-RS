@@ -10,6 +10,30 @@ use crate::CqelsError;
 ///
 /// Maps to the result row concept in SPARQL query evaluation.
 /// Each binding maps a variable name to a `Value`.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::{BindingSet, Value};
+///
+/// let mut bs = BindingSet::new(1000);
+/// bs.insert("name", Value::from("Alice"));
+/// bs.insert("age", Value::from(30i64));
+///
+/// assert_eq!(bs.get("name"), Some(&Value::from("Alice")));
+/// assert!(bs.contains("age"));
+/// assert_eq!(bs.len(), 2);
+/// assert_eq!(bs.timestamp(), 1000);
+///
+/// // Join two compatible binding sets
+/// let mut other = BindingSet::new(2000);
+/// other.insert("name", Value::from("Alice")); // same value — compatible
+/// other.insert("city", Value::from("London"));
+///
+/// let joined = bs.join(&other).unwrap();
+/// assert!(joined.contains("city"));
+/// assert_eq!(joined.timestamp(), 2000); // max of both timestamps
+/// ```
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BindingSet {
     bindings: HashMap<String, Value>,

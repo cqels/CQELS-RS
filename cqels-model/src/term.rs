@@ -7,6 +7,24 @@ use serde::{Deserialize, Serialize};
 ///
 /// Maps to RDF4J's `Value` interface hierarchy. In Rust we use a flat enum
 /// rather than a class hierarchy.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::{Term, IriTerm, LiteralTerm, BlankNodeTerm};
+///
+/// let iri = Term::Iri(IriTerm::new("http://example.org/resource"));
+/// assert!(iri.is_iri());
+///
+/// let literal = Term::Literal(LiteralTerm::new("hello"));
+/// assert!(literal.is_literal());
+///
+/// let blank = Term::BlankNode(BlankNodeTerm::new("b0"));
+/// assert!(blank.is_blank_node());
+///
+/// // Display uses N-Triples notation
+/// assert_eq!(iri.to_string(), "<http://example.org/resource>");
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Term {
@@ -19,6 +37,16 @@ pub enum Term {
 }
 
 /// An IRI term wrapping a string representation.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::IriTerm;
+///
+/// let iri = IriTerm::new("http://example.org/resource");
+/// assert_eq!(iri.as_str(), "http://example.org/resource");
+/// assert_eq!(iri.to_string(), "<http://example.org/resource>");
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IriTerm {
     value: String,
@@ -43,6 +71,16 @@ impl fmt::Display for IriTerm {
 }
 
 /// A blank node term.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::BlankNodeTerm;
+///
+/// let bn = BlankNodeTerm::new("b0");
+/// assert_eq!(bn.id(), "b0");
+/// assert_eq!(bn.to_string(), "_:b0");
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlankNodeTerm {
     id: String,
@@ -65,6 +103,26 @@ impl fmt::Display for BlankNodeTerm {
 }
 
 /// A literal term with an optional language tag or datatype IRI.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::LiteralTerm;
+///
+/// // Plain literal
+/// let plain = LiteralTerm::new("hello");
+/// assert_eq!(plain.value(), "hello");
+///
+/// // Typed literal
+/// let typed = LiteralTerm::new("42")
+///     .with_datatype("http://www.w3.org/2001/XMLSchema#integer");
+/// assert_eq!(typed.datatype(), Some("http://www.w3.org/2001/XMLSchema#integer"));
+///
+/// // Language-tagged literal
+/// let tagged = LiteralTerm::new("bonjour").with_language("fr");
+/// assert_eq!(tagged.language(), Some("fr"));
+/// assert_eq!(tagged.to_string(), "\"bonjour\"@fr");
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LiteralTerm {
     value: String,

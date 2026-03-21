@@ -13,6 +13,27 @@ pub trait Timestamped {
 ///
 /// Maps to Java's `StreamElement` interface. Can contain either an RDF statement
 /// or a generic payload.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::stream::{StreamElement, RdfStreamElement, StreamRecord};
+/// use cqels_model::{Statement, Term, IriTerm, LiteralTerm};
+///
+/// // RDF stream element
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://sensor/1")),
+///     IriTerm::new("http://example.org/temp"),
+///     Term::Literal(LiteralTerm::new("25.5")),
+/// );
+/// let elem = StreamElement::Rdf(RdfStreamElement::new(stmt, 1000));
+/// assert!(elem.is_rdf());
+/// assert_eq!(elem.timestamp(), 1000);
+///
+/// // Generic record element
+/// let rec = StreamElement::Record(StreamRecord::new("payload", 2000));
+/// assert!(!rec.is_rdf());
+/// ```
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum StreamElement {
@@ -71,6 +92,21 @@ impl fmt::Display for StreamElement {
 /// An RDF stream element carrying an RDF statement with a timestamp.
 ///
 /// Maps to Java's `RDFStreamElement` class.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::stream::RdfStreamElement;
+/// use cqels_model::{Statement, Term, IriTerm, LiteralTerm};
+///
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://sensor/1")),
+///     IriTerm::new("http://example.org/value"),
+///     Term::Literal(LiteralTerm::new("42")),
+/// );
+/// let elem = RdfStreamElement::new(stmt, 1000);
+/// assert_eq!(elem.timestamp, 1000);
+/// ```
 #[derive(Clone, Debug)]
 pub struct RdfStreamElement {
     pub statement: Statement,
@@ -166,6 +202,24 @@ impl From<StreamRecord> for StreamElement {
 ///
 /// Maps to Java's `StreamEvent<T>` interface.
 /// Watermarks signal event-time progression and trigger window operations.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::stream::StreamEvent;
+///
+/// let record = StreamEvent::record(42i32, 1000);
+/// assert!(record.is_record());
+/// assert_eq!(record.value(), Some(&42));
+///
+/// let watermark: StreamEvent<i32> = StreamEvent::watermark(5000);
+/// assert!(watermark.is_watermark());
+/// assert_eq!(watermark.value(), None);
+///
+/// // Map transforms the value while preserving the timestamp
+/// let doubled = record.map(|v| v * 2);
+/// assert_eq!(doubled.value(), Some(&84));
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum StreamEvent<T: Clone> {

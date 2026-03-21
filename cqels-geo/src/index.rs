@@ -61,6 +61,24 @@ pub struct IndexedGeometry {
 ///
 /// This type is not `Sync` by default. Wrap in `std::sync::Mutex` or
 /// `parking_lot::Mutex` for concurrent access.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::GeoSpatialIndex;
+/// use cqels_geo::geometry::wkt_literal;
+///
+/// let mut idx = GeoSpatialIndex::new();
+/// idx.put("building_a", &wkt_literal("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"));
+/// idx.put("sensor_1", &wkt_literal("POINT(5 5)"));
+/// assert_eq!(idx.size(), 2);
+///
+/// // Find geometries that intersect with a query region
+/// let query = wkt_literal("POLYGON((3 3, 7 3, 7 7, 3 7, 3 3))");
+/// let matches = idx.query_matches("geof:sfIntersects", &query);
+/// assert!(matches.contains(&"building_a".to_string()));
+/// assert!(matches.contains(&"sensor_1".to_string()));
+/// ```
 pub struct GeoSpatialIndex {
     geometries: HashMap<String, IndexedGeometry>,
     tree: RTree<IndexEntry>,

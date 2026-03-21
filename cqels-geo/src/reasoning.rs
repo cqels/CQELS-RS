@@ -77,6 +77,27 @@ const RULES: &[InferenceRule] = &[
 /// | `sfEquals(x, y)` | `sfEquals(y, x)` |
 /// | `sfIntersects(x, y)` | `sfIntersects(y, x)` |
 /// | `sfDisjoint(x, y)` | `sfDisjoint(y, x)` |
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::{GeoSparqlSimpleReasoner, GeoReasoner};
+/// use cqels_geo::vocabulary;
+/// use cqels_model::{Statement, Term, IriTerm};
+///
+/// let reasoner = GeoSparqlSimpleReasoner;
+/// let facts = vec![Statement::new(
+///     Term::Iri(IriTerm::new("http://example.org/park")),
+///     IriTerm::new(vocabulary::GEO_SF_WITHIN),
+///     Term::Iri(IriTerm::new("http://example.org/city")),
+/// )];
+///
+/// let inferred = reasoner.infer(&facts);
+/// assert_eq!(inferred.len(), 1);
+/// // sfWithin(park, city) => sfContains(city, park)
+/// assert_eq!(inferred[0].predicate.as_str(), vocabulary::GEO_SF_CONTAINS);
+/// assert_eq!(inferred[0].subject, Term::Iri(IriTerm::new("http://example.org/city")));
+/// ```
 pub struct GeoSparqlSimpleReasoner;
 
 impl GeoReasoner for GeoSparqlSimpleReasoner {

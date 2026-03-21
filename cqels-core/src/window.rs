@@ -45,6 +45,18 @@ impl fmt::Display for WindowType {
 /// in its temporal context.
 ///
 /// Maps to Java's `WindowedBatch<T>` in CQELS 2.0.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::window::{WindowedBatch, WindowType};
+///
+/// let batch = WindowedBatch::new(vec![1, 2, 3], 0, 5000, WindowType::TumblingTime);
+/// assert_eq!(batch.size(), 3);
+/// assert!(!batch.is_empty());
+/// assert_eq!(batch.window_start, 0);
+/// assert_eq!(batch.window_end, 5000);
+/// ```
 #[derive(Clone, Debug)]
 pub struct WindowedBatch<T> {
     pub elements: Vec<T>,
@@ -169,6 +181,20 @@ pub trait Window<T: Timestamped + Clone + Send + 'static>: Send + Sync {
 /// `[0, 5000)`, `[5000, 10000)`, `[10000, 15000)`, and so on.
 ///
 /// Maps to Java's `TumblingWindow` in CQELS 2.0.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_core::window::{TumblingWindow, Window, WindowType};
+/// use cqels_core::stream::TimestampedValue;
+///
+/// let window = TumblingWindow::new(Duration::from_secs(5));
+/// assert_eq!(
+///     <TumblingWindow as Window<TimestampedValue<i64>>>::window_type(&window),
+///     WindowType::TumblingTime,
+/// );
+/// ```
 #[derive(Clone, Debug)]
 pub struct TumblingWindow {
     /// The fixed duration of each window.
@@ -221,6 +247,20 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for TumblingWindow {
 /// windows `[0, 5000)`, `[2000, 7000)`, `[4000, 9000)`, etc.
 ///
 /// Maps to Java's `SlidingWindow` in CQELS 2.0.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_core::window::SlidingWindow;
+///
+/// let window = SlidingWindow::new(
+///     Duration::from_secs(10),  // window size
+///     Duration::from_secs(5),   // slide interval
+/// );
+/// assert_eq!(window.size, Duration::from_secs(10));
+/// assert_eq!(window.slide, Duration::from_secs(5));
+/// ```
 #[derive(Clone, Debug)]
 pub struct SlidingWindow {
     /// The total duration each window spans.
@@ -282,6 +322,17 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SlidingWindow {
 /// a user interaction session or a sensor anomaly episode.
 ///
 /// Maps to Java's `SessionWindow` in CQELS 2.0.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_core::window::SessionWindow;
+///
+/// // Close the session after 30 seconds of inactivity
+/// let window = SessionWindow::new(Duration::from_secs(30));
+/// assert_eq!(window.gap, Duration::from_secs(30));
+/// ```
 #[derive(Clone, Debug)]
 pub struct SessionWindow {
     /// Maximum allowed inactivity gap between consecutive events. If the

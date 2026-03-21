@@ -5,6 +5,20 @@ use cqels_model::term::IriTerm;
 use cqels_model::{Statement, Term};
 
 /// A term in a triple pattern — either a variable or a constant.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::PatternTerm;
+/// use cqels_model::{Term, IriTerm};
+///
+/// let var = PatternTerm::var("x");
+/// assert!(var.is_variable());
+/// assert_eq!(var.variable_name(), Some("x"));
+///
+/// let constant = PatternTerm::constant(Term::Iri(IriTerm::new("http://example.org/p")));
+/// assert!(constant.is_constant());
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PatternTerm {
@@ -50,6 +64,28 @@ impl fmt::Display for PatternTerm {
 ///
 /// Each position (subject, predicate, object) can be a variable or a constant.
 /// Variables bind to the actual values in matched statements.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::{TriplePattern, PatternTerm};
+/// use cqels_model::{Statement, Term, IriTerm};
+///
+/// // Match any statement with predicate rdf:type
+/// let pattern = TriplePattern::new(
+///     PatternTerm::var("s"),
+///     PatternTerm::constant(Term::Iri(IriTerm::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"))),
+///     PatternTerm::var("o"),
+/// );
+///
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://example.org/alice")),
+///     IriTerm::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+///     Term::Iri(IriTerm::new("http://example.org/Person")),
+/// );
+/// let bindings = pattern.match_statement(&stmt).unwrap();
+/// assert_eq!(bindings.get("s"), Some(&Term::Iri(IriTerm::new("http://example.org/alice"))));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TriplePattern {
     pub subject: PatternTerm,
@@ -158,6 +194,27 @@ impl fmt::Display for TriplePattern {
 /// A template for producing new RDF statements from variable bindings.
 ///
 /// Used in rule consequents to instantiate inferred triples.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use cqels_reasoning::{TripleTemplate, PatternTerm};
+/// use cqels_model::{Term, IriTerm};
+///
+/// let template = TripleTemplate::new(
+///     PatternTerm::var("s"),
+///     PatternTerm::constant(Term::Iri(IriTerm::new("http://example.org/inferred"))),
+///     PatternTerm::var("o"),
+/// );
+///
+/// let mut bindings = HashMap::new();
+/// bindings.insert("s".to_string(), Term::Iri(IriTerm::new("http://example.org/a")));
+/// bindings.insert("o".to_string(), Term::Iri(IriTerm::new("http://example.org/b")));
+///
+/// let stmt = template.instantiate(&bindings).unwrap();
+/// assert_eq!(stmt.predicate.as_str(), "http://example.org/inferred");
+/// ```
 #[derive(Clone, Debug)]
 pub struct TripleTemplate {
     pub subject: PatternTerm,

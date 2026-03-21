@@ -9,6 +9,29 @@ use crate::CqelsError;
 ///
 /// Maps to RDF4J's `Statement` interface. Contains a subject, predicate, object,
 /// and an optional named graph.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::{Statement, Term, IriTerm, LiteralTerm};
+///
+/// // Create an RDF triple
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://example.org/alice")),
+///     IriTerm::new("http://example.org/name"),
+///     Term::Literal(LiteralTerm::new("Alice")),
+/// );
+/// assert!(!stmt.is_quad());
+///
+/// // Create an RDF quad (triple in a named graph)
+/// let quad = Statement::new_quad(
+///     Term::Iri(IriTerm::new("http://example.org/alice")),
+///     IriTerm::new("http://example.org/name"),
+///     Term::Literal(LiteralTerm::new("Alice")),
+///     IriTerm::new("http://example.org/graph1"),
+/// );
+/// assert!(quad.is_quad());
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Statement {
     pub subject: Term,

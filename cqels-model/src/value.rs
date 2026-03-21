@@ -10,6 +10,32 @@ use crate::term::{IriTerm, LiteralTerm, Term};
 ///
 /// Maps to the various typed representations needed when evaluating
 /// SPARQL/Cypher expressions.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::Value;
+///
+/// // Create values from Rust types
+/// let i = Value::from(42i64);
+/// let f = Value::from(3.14f64);
+/// let s = Value::from("hello");
+/// let b = Value::from(true);
+///
+/// // Extract typed values
+/// assert_eq!(i.as_integer(), Some(42));
+/// assert_eq!(f.as_float(), Some(3.14));
+/// assert_eq!(s.as_string(), Some("hello"));
+/// assert_eq!(b.as_boolean(), Some(true));
+///
+/// // Convert to RDF terms
+/// let term = i.to_term().unwrap();
+/// assert!(term.is_literal());
+///
+/// // Null handling
+/// assert!(Value::Null.is_null());
+/// assert!(Value::Null.to_term().is_none());
+/// ```
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Value {
