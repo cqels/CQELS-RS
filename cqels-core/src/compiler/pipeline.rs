@@ -62,6 +62,31 @@ pub struct PipelineAggregateSpec {
 ///
 /// Variables in the pattern (starting with `?` or `$`) are bound to the
 /// corresponding statement components. Constants must match exactly.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use cqels_core::compiler::pipeline::match_triple_pattern;
+/// use cqels_core::parser::ast::TriplePattern;
+/// use cqels_model::{Statement, Term, Value};
+/// use cqels_model::term::IriTerm;
+///
+/// let pattern = TriplePattern {
+///     subject: "?s".into(),
+///     predicate: "<http://ex.org/type>".into(),
+///     object: "?o".into(),
+/// };
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://ex.org/alice")),
+///     IriTerm::new("http://ex.org/type"),
+///     Term::Iri(IriTerm::new("http://ex.org/Person")),
+/// );
+/// let prefixes = HashMap::new();
+/// let bs = match_triple_pattern(&pattern, &stmt, &prefixes, 1000).unwrap();
+/// assert!(bs.get("s").is_some());
+/// assert!(bs.get("o").is_some());
+/// ```
 pub fn match_triple_pattern(
     pattern: &crate::parser::ast::TriplePattern,
     stmt: &Statement,
@@ -1268,6 +1293,26 @@ pub(crate) fn hash_string(s: &str) -> u64 {
 /// For each pair `(l, r)` where `l ∈ left` and `r ∈ right`, produces
 /// `l.join(r)` if compatible (shared variables have equal values).
 /// Returns all successful joins.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::compiler::pipeline::join_binding_sets;
+/// use cqels_model::{BindingSet, Value};
+///
+/// let mut l = BindingSet::new(0);
+/// l.insert("s", Value::String("alice".into()));
+/// l.insert("type", Value::String("Person".into()));
+///
+/// let mut r = BindingSet::new(0);
+/// r.insert("s", Value::String("alice".into()));
+/// r.insert("age", Value::Integer(30));
+///
+/// let results = join_binding_sets(&[l], &[r]);
+/// assert_eq!(results.len(), 1);
+/// assert!(results[0].get("type").is_some());
+/// assert!(results[0].get("age").is_some());
+/// ```
 pub fn join_binding_sets(left: &[BindingSet], right: &[BindingSet]) -> Vec<BindingSet> {
     let mut results = Vec::new();
     for l in left {

@@ -7,6 +7,25 @@ use cqels_model::BindingSet;
 /// Filter operator that evaluates a predicate on each binding set.
 ///
 /// Maps to Java's `FilterOperator`.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::operator::filter::FilterOperator;
+/// use cqels_model::{BindingSet, Value};
+///
+/// let filter = FilterOperator::new(|bs: &BindingSet| {
+///     bs.get("x").and_then(|v| v.as_integer()).map(|i| i > 10).unwrap_or(false)
+/// });
+///
+/// let mut bs = BindingSet::new(0);
+/// bs.insert("x", Value::Integer(15));
+/// assert!(filter.evaluate(&bs));
+///
+/// let mut bs2 = BindingSet::new(0);
+/// bs2.insert("x", Value::Integer(5));
+/// assert!(!filter.evaluate(&bs2));
+/// ```
 pub struct FilterOperator<F: Fn(&BindingSet) -> bool + Send + Sync> {
     predicate: F,
 }

@@ -41,6 +41,25 @@ pub struct JoinResult<Out> {
 ///
 /// Maps to Java's `WindowedJoinOperator`.
 /// Uses BTreeMap for time-indexed buffering with efficient cleanup.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_core::operator::join::WindowedJoinState;
+///
+/// let mut state = WindowedJoinState::new(Duration::from_secs(10));
+/// let join_fn = |l: &i32, r: &i32| Some(l + r);
+///
+/// // Add a left element at time 1000
+/// let results = state.add_left(10, 1000, &join_fn);
+/// assert!(results.is_empty()); // No right elements yet
+///
+/// // Add a right element within the window
+/// let results = state.add_right(20, 5000, &join_fn);
+/// assert_eq!(results.len(), 1);
+/// assert_eq!(results[0].value, 30);
+/// ```
 pub struct WindowedJoinState<L: Clone, R: Clone> {
     left_buffer: BTreeMap<i64, Vec<L>>,
     right_buffer: BTreeMap<i64, Vec<R>>,

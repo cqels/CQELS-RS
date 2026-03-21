@@ -29,6 +29,21 @@ const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 /// Variable names are collected across all result rows and sorted
 /// alphabetically for deterministic output. Unbound variables (null) are
 /// omitted from each binding object per the W3C spec.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::{BindingSet, Value};
+/// use cqels_model::serialization::to_sparql_json;
+///
+/// let mut bs = BindingSet::new(0);
+/// bs.insert("name", Value::String("Alice".into()));
+/// bs.insert("age", Value::Integer(30));
+///
+/// let json = to_sparql_json(&[bs]);
+/// assert!(json["head"]["vars"].as_array().unwrap().contains(&serde_json::json!("name")));
+/// assert_eq!(json["results"]["bindings"][0]["name"]["value"], "Alice");
+/// ```
 pub fn to_sparql_json(results: &[BindingSet]) -> JsonValue {
     // Collect all variable names (sorted for determinism).
     let vars: BTreeSet<&str> = results.iter().flat_map(|bs| bs.variables()).collect();
@@ -113,6 +128,22 @@ fn term_to_sparql_json(term: &Term) -> Option<JsonValue> {
 ///
 /// Each statement is written as one line: `<s> <p> <o> .\n`.
 /// Quad graph information is ignored (N-Triples is for triples only).
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::{Statement, Term};
+/// use cqels_model::term::{IriTerm, LiteralTerm};
+/// use cqels_model::serialization::to_ntriples;
+///
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://example.org/s")),
+///     IriTerm::new("http://example.org/p"),
+///     Term::Literal(LiteralTerm::new("hello")),
+/// );
+/// let nt = to_ntriples(&[stmt]);
+/// assert_eq!(nt, "<http://example.org/s> <http://example.org/p> \"hello\" .\n");
+/// ```
 pub fn to_ntriples(statements: &[Statement]) -> String {
     let mut out = String::new();
     for stmt in statements {
@@ -184,6 +215,23 @@ fn escape_ntriples(s: &str, out: &mut String) {
 /// For each binding set, the values of `subject_var`, `predicate_var`, and
 /// `object_var` are extracted and converted to RDF terms. Rows where any
 /// of the three variables is missing or cannot be converted are skipped.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_model::{BindingSet, Value, Term};
+/// use cqels_model::term::IriTerm;
+/// use cqels_model::serialization::bindings_to_ntriples;
+///
+/// let mut bs = BindingSet::new(0);
+/// bs.insert("s", Value::Term(Term::Iri(IriTerm::new("http://ex.org/a"))));
+/// bs.insert("p", Value::Term(Term::Iri(IriTerm::new("http://ex.org/p"))));
+/// bs.insert("o", Value::Integer(42));
+///
+/// let nt = bindings_to_ntriples(&[bs], "s", "p", "o");
+/// assert!(nt.contains("<http://ex.org/a>"));
+/// assert!(nt.contains("<http://ex.org/p>"));
+/// ```
 pub fn bindings_to_ntriples(
     results: &[BindingSet],
     subject_var: &str,

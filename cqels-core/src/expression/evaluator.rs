@@ -14,6 +14,30 @@ use super::ast::{AggregateExprFunction, BinaryOp, Expression, UnaryOp};
 use super::functions::{call_builtin, value_to_bool};
 
 /// Evaluates expression trees against variable bindings.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::expression::evaluator::ExpressionEvaluator;
+/// use cqels_core::expression::ast::{Expression, BinaryOp};
+/// use cqels_model::{BindingSet, Value};
+///
+/// let evaluator = ExpressionEvaluator::new();
+///
+/// // Evaluate a variable lookup
+/// let mut bs = BindingSet::new(0);
+/// bs.insert("x", Value::Integer(42));
+/// let expr = Expression::Variable("?x".into());
+/// assert_eq!(evaluator.evaluate(&expr, &bs), Value::Integer(42));
+///
+/// // Evaluate a comparison
+/// let gt_expr = Expression::BinaryOp {
+///     op: BinaryOp::Gt,
+///     left: Box::new(Expression::Variable("?x".into())),
+///     right: Box::new(Expression::Literal(Value::Integer(10))),
+/// };
+/// assert!(evaluator.evaluate_as_bool(&gt_expr, &bs));
+/// ```
 #[derive(Clone)]
 pub struct ExpressionEvaluator {
     prefixes: HashMap<String, String>,

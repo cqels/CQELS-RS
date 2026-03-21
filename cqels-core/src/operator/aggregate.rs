@@ -63,6 +63,18 @@ pub trait RetractableAggregateFunction<T, ACC, R>: AggregateFunction<T, ACC, R> 
 /// Counts the number of elements in a window.
 ///
 /// Accumulator is `i64`; result is `i64`. Supports retraction.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::operator::aggregate::{AggregateFunction, CountAggregate};
+///
+/// let agg = CountAggregate;
+/// let mut acc = AggregateFunction::<&str, i64, i64>::create_accumulator(&agg);
+/// acc = AggregateFunction::<&str, i64, i64>::add(&agg, &"a", acc);
+/// acc = AggregateFunction::<&str, i64, i64>::add(&agg, &"b", acc);
+/// assert_eq!(AggregateFunction::<&str, i64, i64>::get_result(&agg, &acc), 2);
+/// ```
 pub struct CountAggregate;
 
 impl<T> AggregateFunction<T, i64, i64> for CountAggregate {
@@ -88,6 +100,18 @@ impl<T> RetractableAggregateFunction<T, i64, i64> for CountAggregate {
 
 /// Sums numeric values extracted from stream elements via an extractor
 /// function. Supports retraction.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::operator::aggregate::{AggregateFunction, SumAggregate};
+///
+/// let agg = SumAggregate::new(|x: &f64| *x);
+/// let mut acc = agg.create_accumulator();
+/// acc = agg.add(&1.5, acc);
+/// acc = agg.add(&2.5, acc);
+/// assert!((agg.get_result(&acc) - 4.0).abs() < f64::EPSILON);
+/// ```
 pub struct SumAggregate<T, F: Fn(&T) -> f64> {
     extractor: F,
     _phantom: PhantomData<T>,
@@ -142,6 +166,18 @@ pub struct AvgAccumulator {
 /// Computes the arithmetic average of numeric values extracted via an
 /// extractor function. Uses [`AvgAccumulator`] for O(1) incremental
 /// updates and supports retraction.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::operator::aggregate::{AggregateFunction, AvgAggregate};
+///
+/// let agg = AvgAggregate::new(|x: &f64| *x);
+/// let mut acc = agg.create_accumulator();
+/// acc = agg.add(&10.0, acc);
+/// acc = agg.add(&20.0, acc);
+/// assert!((agg.get_result(&acc) - 15.0).abs() < f64::EPSILON);
+/// ```
 pub struct AvgAggregate<T, F: Fn(&T) -> f64> {
     extractor: F,
     _phantom: PhantomData<T>,
@@ -563,5 +599,122 @@ mod tests {
         }
         assert_eq!(window_counts[&0], 3); // elements at 0, 1000, 2000
         assert_eq!(window_counts[&5000], 2); // elements at 5000, 6000
+    }
+
+    #[test]
+    fn test_windowed_aggregate_with_groups() {
+        use crate::stream::TimestampedValue;
+
+        let agg = WindowedAggregateOperator::new(
+            CountAggregate,
+            |elem: &TimestampedValue<&str>| Some(GroupKey::single(elem.value.to_string())),
+            10000,
+        );
+
+        let elements = vec![
+            TimestampedValue::new("sensor_a", 1000),
+            TimestampedValue::new("sensor_b", 2000),
+            TimestampedValue::new("sensor_a", 3000),
+            TimestampedValue::new("sensor_b", 4000),
+            TimestampedValue::new("sensor_a", 5000),
+        ];
+
+        let results = agg.process_batch(&elements);
+        assert_eq!(results.len(), 2); // two groups in one window
+
+        let mut group_counts: HashMap<String, i64> = HashMap::new();
+        for r in &results {
+            if let Some(gk) = &r.group_key {
+                group_counts.insert(gk.values[0].clone(), r.value);
+            }
+        }
+        assert_eq!(group_counts["sensor_a"], 3);
+        assert_eq!(group_counts["sensor_b"], 2);
+    }
+
+    #[test]
+    fn test_windowed_aggregate_sum() {
+        use crate::stream::TimestampedValue;
+
+        let agg = WindowedAggregateOperator::new(
+            SumAggregate::new(|elem: &TimestampedValue<f64>| elem.value),
+            |_: &TimestampedValue<f64>| None,
+            10000,
+        );
+
+        let elements = vec![
+            TimestampedValue::new(10.0, 1000),
+            TimestampedValue::new(20.0, 2000),
+            TimestampedValue::new(30.0, 3000),
+        ];
+
+        let results = agg.process_batch(&elements);
+        assert_eq!(results.len(), 1);
+        assert!((results[0].value - 60.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_windowed_aggregate_empty_batch() {
+        use crate::stream::TimestampedValue;
+
+        let agg =
+            WindowedAggregateOperator::new(CountAggregate, |_: &TimestampedValue<i32>| None, 5000);
+
+        let results = agg.process_batch(&[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_aggregate_result_display() {
+        let result = AggregateResult {
+            window_start: 0,
+            window_end: 5000,
+            group_key: None,
+            value: 42,
+            timestamp: 5000,
+        };
+        let s = result.to_string();
+        assert!(s.contains("42"));
+        assert!(s.contains("0"));
+        assert!(s.contains("5000"));
+    }
+
+    #[test]
+    fn test_aggregate_result_display_with_group() {
+        let result = AggregateResult {
+            window_start: 0,
+            window_end: 5000,
+            group_key: Some(GroupKey::single("city")),
+            value: 10,
+            timestamp: 5000,
+        };
+        let s = result.to_string();
+        assert!(s.contains("city"));
+    }
+
+    #[test]
+    fn test_group_key_multi() {
+        let gk = GroupKey::new(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(gk.values.len(), 3);
+        assert_eq!(gk.to_string(), "(a, b, c)");
+    }
+
+    #[test]
+    fn test_min_max_merge() {
+        let min_agg = MinAggregate::new(|x: &f64| *x);
+        let mut acc1 = min_agg.create_accumulator();
+        acc1 = min_agg.add(&5.0, acc1);
+        let mut acc2 = min_agg.create_accumulator();
+        acc2 = min_agg.add(&3.0, acc2);
+        let merged = min_agg.merge(acc1, acc2);
+        assert!((min_agg.get_result(&merged) - 3.0).abs() < f64::EPSILON);
+
+        let max_agg = MaxAggregate::new(|x: &f64| *x);
+        let mut acc1 = max_agg.create_accumulator();
+        acc1 = max_agg.add(&5.0, acc1);
+        let mut acc2 = max_agg.create_accumulator();
+        acc2 = max_agg.add(&8.0, acc2);
+        let merged = max_agg.merge(acc1, acc2);
+        assert!((max_agg.get_result(&merged) - 8.0).abs() < f64::EPSILON);
     }
 }

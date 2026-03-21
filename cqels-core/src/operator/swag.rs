@@ -36,6 +36,18 @@ pub trait SwagOp<In, Partial: Clone, Out>: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// SWAG count operation — counts elements. Invertible.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::operator::swag::{SwagOp, SwagCountOp};
+///
+/// let op = SwagCountOp::<i32>::new();
+/// assert_eq!(op.identity(), 0);
+/// assert_eq!(op.lift(&42), 1);
+/// assert_eq!(op.combine(&3, &5), 8);
+/// assert!(op.is_invertible());
+/// ```
 pub struct SwagCountOp<T>(PhantomData<T>);
 
 impl<T> SwagCountOp<T> {
@@ -252,6 +264,24 @@ impl<T: Send + Sync, F: Fn(&T) -> f64 + Send + Sync> SwagOp<T, f64, f64> for Swa
 /// The back stack stores individual lifted partials along with cumulative prefix
 /// aggregates. The front stack stores suffix aggregates (from each element to the
 /// top of the stack). This enables correct flip operations for non-invertible monoids.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::operator::swag::{SwagSumOp, TwoStacksLiteWindow};
+///
+/// let op = SwagSumOp::new(|x: &f64| *x);
+/// let mut window = TwoStacksLiteWindow::new(op);
+///
+/// window.push(&1.0);
+/// window.push(&2.0);
+/// window.push(&3.0);
+/// assert_eq!(window.len(), 3);
+/// assert!((window.query() - 6.0).abs() < f64::EPSILON);
+///
+/// window.pop(); // removes 1.0
+/// assert!((window.query() - 5.0).abs() < f64::EPSILON);
+/// ```
 pub struct TwoStacksLiteWindow<In, Partial: Clone, Out, Op: SwagOp<In, Partial, Out>> {
     /// Front stack: suffix aggregates (element i combined with all above it).
     /// Top of vec = oldest element in the window.
@@ -444,5 +474,123 @@ mod tests {
         let window = TwoStacksLiteWindow::new(op);
         assert!(window.is_empty());
         assert!((window.query() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_two_stacks_lite_max_non_invertible() {
+        let op = SwagMaxOp::new(|x: &f64| *x);
+        let mut window = TwoStacksLiteWindow::new(op);
+
+        window.push(&5.0);
+        window.push(&10.0);
+        window.push(&3.0);
+        assert!((window.query() - 10.0).abs() < f64::EPSILON);
+
+        window.pop(); // removes 5.0
+        assert!((window.query() - 10.0).abs() < f64::EPSILON);
+
+        window.pop(); // removes 10.0
+        assert!((window.query() - 3.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_two_stacks_lite_min_non_invertible() {
+        let op = SwagMinOp::new(|x: &f64| *x);
+        let mut window = TwoStacksLiteWindow::new(op);
+
+        window.push(&5.0);
+        window.push(&2.0);
+        window.push(&8.0);
+        assert!((window.query() - 2.0).abs() < f64::EPSILON);
+
+        window.pop(); // removes 5.0
+        assert!((window.query() - 2.0).abs() < f64::EPSILON);
+
+        window.pop(); // removes 2.0
+        assert!((window.query() - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_two_stacks_lite_mean() {
+        let op = SwagMeanOp::new(|x: &f64| *x);
+        let mut window = TwoStacksLiteWindow::new(op);
+
+        window.push(&10.0);
+        window.push(&20.0);
+        window.push(&30.0);
+        assert!((window.query() - 20.0).abs() < f64::EPSILON);
+
+        window.pop();
+        assert!((window.query() - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_two_stacks_lite_push_pop_interleaved() {
+        let op = SwagSumOp::new(|x: &f64| *x);
+        let mut window = TwoStacksLiteWindow::new(op);
+
+        // Push 3, pop 1, push 2, pop 1 — exercises flip logic
+        window.push(&1.0);
+        window.push(&2.0);
+        window.push(&3.0);
+        assert_eq!(window.len(), 3);
+
+        window.pop();
+        window.push(&4.0);
+        assert_eq!(window.len(), 3);
+        assert!((window.query() - 9.0).abs() < f64::EPSILON); // 2+3+4
+
+        window.pop();
+        window.pop();
+        assert_eq!(window.len(), 1);
+        assert!((window.query() - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_swag_count_invert() {
+        let op = SwagCountOp::<i32>::new();
+        let inv = op.invert(&5).unwrap();
+        assert_eq!(inv, -5);
+        assert_eq!(op.name(), "COUNT");
+    }
+
+    #[test]
+    fn test_swag_sum_invert() {
+        let op = SwagSumOp::new(|x: &f64| *x);
+        let inv = op.invert(&3.0).unwrap();
+        assert!((inv - (-3.0)).abs() < f64::EPSILON);
+        assert_eq!(op.name(), "SUM");
+    }
+
+    #[test]
+    fn test_swag_mean_invert() {
+        let op = SwagMeanOp::new(|x: &f64| *x);
+        let partial = MeanPartial {
+            sum: 10.0,
+            count: 3,
+        };
+        let inv = op.invert(&partial).unwrap();
+        assert!((inv.sum - (-10.0)).abs() < f64::EPSILON);
+        assert_eq!(inv.count, -3);
+        assert_eq!(op.name(), "MEAN");
+    }
+
+    #[test]
+    fn test_swag_max_min_not_invertible() {
+        let max_op = SwagMaxOp::new(|x: &f64| *x);
+        assert!(!max_op.is_invertible());
+        assert!(max_op.invert(&5.0).is_none());
+        assert_eq!(max_op.name(), "MAX");
+
+        let min_op = SwagMinOp::new(|x: &f64| *x);
+        assert!(!min_op.is_invertible());
+        assert!(min_op.invert(&5.0).is_none());
+        assert_eq!(min_op.name(), "MIN");
+    }
+
+    #[test]
+    fn test_swag_count_default() {
+        let op = SwagCountOp::<i32>::default();
+        assert_eq!(op.identity(), 0);
     }
 }

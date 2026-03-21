@@ -91,6 +91,24 @@ fn dispatch_sf_equals(args: &[&Value]) -> Option<Value> {
 /// - `uom:radian` -- Euclidean distance converted to radians
 ///
 /// Returns `None` if geometries cannot be parsed or unit is unrecognized.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::geometry::wkt_literal;
+/// use cqels_geo::functions::distance;
+/// use cqels_model::{Value, Term};
+/// use cqels_model::term::IriTerm;
+///
+/// let p1 = wkt_literal("POINT(0 0)");
+/// let p2 = wkt_literal("POINT(3 4)");
+/// let unit = Value::Term(Term::Iri(IriTerm::new(cqels_geo::vocabulary::UOM_DEGREE)));
+///
+/// let result = distance(&p1, &p2, &unit).unwrap();
+/// if let Value::Float(d) = result {
+///     assert!((d - 5.0).abs() < 0.01);
+/// }
+/// ```
 pub fn distance(geom1: &Value, geom2: &Value, unit: &Value) -> Option<Value> {
     let g1 = value_to_geometry(geom1)?;
     let g2 = value_to_geometry(geom2)?;
@@ -114,6 +132,19 @@ pub fn distance(geom1: &Value, geom2: &Value, unit: &Value) -> Option<Value> {
 }
 
 /// Tests whether `geom1` is spatially within `geom2` (SF Within).
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::geometry::wkt_literal;
+/// use cqels_geo::functions::sf_within;
+/// use cqels_model::Value;
+///
+/// let point = wkt_literal("POINT(0.5 0.5)");
+/// let polygon = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+/// assert_eq!(sf_within(&point, &polygon), Some(Value::Boolean(true)));
+/// assert_eq!(sf_within(&polygon, &point), Some(Value::Boolean(false)));
+/// ```
 pub fn sf_within(geom1: &Value, geom2: &Value) -> Option<Value> {
     let g1 = value_to_geometry(geom1)?;
     let g2 = value_to_geometry(geom2)?;
@@ -121,6 +152,18 @@ pub fn sf_within(geom1: &Value, geom2: &Value) -> Option<Value> {
 }
 
 /// Tests whether `geom1` spatially contains `geom2` (SF Contains).
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::geometry::wkt_literal;
+/// use cqels_geo::functions::sf_contains;
+/// use cqels_model::Value;
+///
+/// let polygon = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+/// let point = wkt_literal("POINT(0.5 0.5)");
+/// assert_eq!(sf_contains(&polygon, &point), Some(Value::Boolean(true)));
+/// ```
 pub fn sf_contains(geom1: &Value, geom2: &Value) -> Option<Value> {
     let g1 = value_to_geometry(geom1)?;
     let g2 = value_to_geometry(geom2)?;
@@ -128,6 +171,18 @@ pub fn sf_contains(geom1: &Value, geom2: &Value) -> Option<Value> {
 }
 
 /// Tests whether `geom1` spatially intersects `geom2` (SF Intersects).
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::geometry::wkt_literal;
+/// use cqels_geo::functions::sf_intersects;
+/// use cqels_model::Value;
+///
+/// let point = wkt_literal("POINT(0.5 0.5)");
+/// let polygon = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+/// assert_eq!(sf_intersects(&point, &polygon), Some(Value::Boolean(true)));
+/// ```
 pub fn sf_intersects(geom1: &Value, geom2: &Value) -> Option<Value> {
     let g1 = value_to_geometry(geom1)?;
     let g2 = value_to_geometry(geom2)?;
@@ -135,6 +190,18 @@ pub fn sf_intersects(geom1: &Value, geom2: &Value) -> Option<Value> {
 }
 
 /// Tests whether `geom1` is spatially disjoint from `geom2` (SF Disjoint).
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::geometry::wkt_literal;
+/// use cqels_geo::functions::sf_disjoint;
+/// use cqels_model::Value;
+///
+/// let point = wkt_literal("POINT(5 5)");
+/// let polygon = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+/// assert_eq!(sf_disjoint(&point, &polygon), Some(Value::Boolean(true)));
+/// ```
 pub fn sf_disjoint(geom1: &Value, geom2: &Value) -> Option<Value> {
     let g1 = value_to_geometry(geom1)?;
     let g2 = value_to_geometry(geom2)?;
@@ -144,6 +211,17 @@ pub fn sf_disjoint(geom1: &Value, geom2: &Value) -> Option<Value> {
 /// Tests whether `geom1` is spatially equal to `geom2` (SF Equals).
 ///
 /// Two geometries are considered equal if they contain each other.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::geometry::wkt_literal;
+/// use cqels_geo::functions::sf_equals;
+/// use cqels_model::Value;
+///
+/// let p1 = wkt_literal("POINT(1 2)");
+/// assert_eq!(sf_equals(&p1, &p1), Some(Value::Boolean(true)));
+/// ```
 pub fn sf_equals(geom1: &Value, geom2: &Value) -> Option<Value> {
     let g1 = value_to_geometry(geom1)?;
     let g2 = value_to_geometry(geom2)?;
@@ -157,6 +235,18 @@ pub fn sf_equals(geom1: &Value, geom2: &Value) -> Option<Value> {
 /// GEOF namespace resolved to `geof:` prefix).
 ///
 /// Returns `None` if the function is unknown or evaluation fails.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_geo::geometry::wkt_literal;
+/// use cqels_geo::functions::evaluate_function;
+/// use cqels_model::Value;
+///
+/// let p = wkt_literal("POINT(1 2)");
+/// let result = evaluate_function("geof:sfEquals", &[&p, &p]);
+/// assert_eq!(result, Some(Value::Boolean(true)));
+/// ```
 pub fn evaluate_function(function_name: &str, args: &[&Value]) -> Option<Value> {
     let canonical = vocabulary::canonical_function_name(function_name);
     let f = function_registry().get(&canonical)?;
