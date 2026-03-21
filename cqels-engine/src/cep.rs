@@ -20,6 +20,23 @@ use cqels_core::stream::Timestamped;
 /// - The start and end timestamps of the match span.
 ///
 /// Maps to Java's `PatternMatch` in CQELS 2.0.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_engine::PatternMatch;
+/// use cqels_core::stream::TimestampedValue;
+///
+/// let events = vec![
+///     TimestampedValue::new("A", 100),
+///     TimestampedValue::new("B", 200),
+/// ];
+/// let m = PatternMatch::new(events);
+/// assert_eq!(m.size(), 2);
+/// assert_eq!(m.start_timestamp(), 100);
+/// assert_eq!(m.end_timestamp(), 200);
+/// assert_eq!(m.duration(), 100);
+/// ```
 #[derive(Clone, Debug)]
 pub struct PatternMatch<T: Clone> {
     events: Vec<T>,
@@ -113,6 +130,16 @@ impl<T: Clone + Timestamped> PatternMatch<T> {
 /// The contiguity mode determines whether intervening (non-matching) events
 /// between two pattern states cause the partial match to be discarded,
 /// skipped, or forked.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_engine::Contiguity;
+///
+/// let strict = Contiguity::Strict;
+/// let relaxed = Contiguity::Relaxed;
+/// assert_ne!(strict, relaxed);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Contiguity {
@@ -145,6 +172,20 @@ pub enum Contiguity {
 /// | [`times(n)`](Quantifier::times) | n | n | Exactly `n` |
 /// | [`times_range(min, max)`](Quantifier::times_range) | min | max | Between `min` and `max` |
 /// | [`times_or_more(n)`](Quantifier::times_or_more) | n | MAX | At least `n` |
+///
+/// # Examples
+///
+/// ```
+/// use cqels_engine::Quantifier;
+///
+/// let q = Quantifier::times_range(2, 5);
+/// assert_eq!(q.min_occurrences, 2);
+/// assert_eq!(q.max_occurrences, 5);
+/// assert!(!q.is_single());
+///
+/// let greedy = Quantifier::one_or_more().make_greedy();
+/// assert!(greedy.greedy);
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Quantifier {
     /// Minimum number of times this state must match.
@@ -512,6 +553,31 @@ const DEFAULT_STATE_EXPLOSION_LIMIT: usize = 1000;
 ///   [`with_limit`](NfaPatternProcessor::with_limit)).
 ///
 /// Maps to Java's `NFAPatternProcessor` in CQELS 2.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use cqels_engine::{Pattern, NfaPatternProcessor, TimestampedValue};
+/// use futures::StreamExt;
+///
+/// # async fn example() {
+/// let pattern = Pattern::<TimestampedValue<String>>::begin("start")
+///     .where_cond(|e| e.value == "A")
+///     .followed_by("end")
+///     .where_cond(|e| e.value == "B")
+///     .within(Duration::from_secs(5));
+///
+/// let processor = NfaPatternProcessor::new(pattern);
+/// let events = vec![
+///     TimestampedValue::new("A".to_string(), 100),
+///     TimestampedValue::new("B".to_string(), 200),
+/// ];
+/// let stream = Box::pin(futures::stream::iter(events));
+/// let matches: Vec<_> = processor.process(stream).collect().await;
+/// assert_eq!(matches.len(), 1);
+/// # }
+/// ```
 pub struct NfaPatternProcessor<T: Clone + Send + Sync + Timestamped + 'static> {
     states: Vec<PatternState<T>>,
     time_window: Option<Duration>,
@@ -1398,6 +1464,129 @@ mod tests {
         let stream = Box::pin(futures::stream::iter(events));
         let matches: Vec<_> = processor.process(stream).collect().await;
         assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_pattern_match_with_named() {
+        let events = vec![Event::new("A", 1.0, 100), Event::new("B", 2.0, 200)];
+        let mut named = HashMap::new();
+        named.insert("start".to_string(), events[0].clone());
+        named.insert("end".to_string(), events[1].clone());
+
+        let m = PatternMatch::with_named(events, named);
+        assert_eq!(m.get_event("start").unwrap().name, "A");
+        assert_eq!(m.get_event("end").unwrap().name, "B");
+        assert!(m.get_event("missing").is_none());
+        assert_eq!(m.named_events().len(), 2);
+    }
+
+    #[test]
+    fn test_pattern_match_empty() {
+        let m = PatternMatch::<Event>::new(vec![]);
+        assert_eq!(m.size(), 0);
+        assert!(m.first().is_none());
+        assert!(m.last().is_none());
+        assert_eq!(m.start_timestamp(), 0);
+        assert_eq!(m.end_timestamp(), 0);
+        assert_eq!(m.duration(), 0);
+    }
+
+    #[test]
+    fn test_quantifier_factories() {
+        let q = Quantifier::one();
+        assert_eq!(q.min_occurrences, 1);
+        assert_eq!(q.max_occurrences, 1);
+        assert!(q.is_single());
+        assert!(!q.is_optional());
+
+        let q = Quantifier::zero_or_one();
+        assert_eq!(q.min_occurrences, 0);
+        assert_eq!(q.max_occurrences, 1);
+        assert!(!q.is_single());
+        assert!(q.is_optional());
+
+        let q = Quantifier::one_or_more();
+        assert_eq!(q.min_occurrences, 1);
+        assert_eq!(q.max_occurrences, usize::MAX);
+
+        let q = Quantifier::times(5);
+        assert_eq!(q.min_occurrences, 5);
+        assert_eq!(q.max_occurrences, 5);
+
+        let q = Quantifier::times_range(2, 7);
+        assert_eq!(q.min_occurrences, 2);
+        assert_eq!(q.max_occurrences, 7);
+
+        let q = Quantifier::times_or_more(3);
+        assert_eq!(q.min_occurrences, 3);
+        assert_eq!(q.max_occurrences, usize::MAX);
+    }
+
+    #[test]
+    fn test_quantifier_greedy() {
+        let q = Quantifier::one_or_more().make_greedy();
+        assert!(q.greedy);
+        assert_eq!(q.min_occurrences, 1);
+    }
+
+    #[test]
+    fn test_pattern_builder_accessors() {
+        let pattern = Pattern::<Event>::begin("my_state")
+            .where_cond(|e| e.name == "A")
+            .within(Duration::from_secs(10));
+
+        assert_eq!(pattern.name(), "my_state");
+        assert!(!pattern.is_negated());
+        assert_eq!(pattern.contiguity(), Contiguity::Strict);
+        assert!(pattern.quantifier().is_single());
+        assert_eq!(pattern.time_window(), Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn test_pattern_negated_states() {
+        let pattern = Pattern::<Event>::begin("start")
+            .not_next("neg")
+            .where_cond(|e| e.name == "X");
+
+        assert!(pattern.is_negated());
+        assert_eq!(pattern.name(), "neg");
+        assert_eq!(pattern.contiguity(), Contiguity::Strict);
+    }
+
+    #[test]
+    fn test_pattern_followed_by_any_contiguity() {
+        let pattern = Pattern::<Event>::begin("start").followed_by_any("nd");
+
+        assert_eq!(pattern.contiguity(), Contiguity::NonDeterministic);
+    }
+
+    #[test]
+    fn test_pattern_optional() {
+        let pattern = Pattern::<Event>::begin("start").optional();
+        assert!(pattern.quantifier().is_optional());
+    }
+
+    #[test]
+    fn test_contiguity_equality() {
+        assert_eq!(Contiguity::Strict, Contiguity::Strict);
+        assert_ne!(Contiguity::Strict, Contiguity::Relaxed);
+        assert_ne!(Contiguity::Relaxed, Contiguity::NonDeterministic);
+    }
+
+    #[tokio::test]
+    async fn test_with_limit() {
+        // Use a low state explosion limit
+        let pattern = Pattern::<Event>::begin("start")
+            .where_cond(|e| e.name == "A")
+            .followed_by("end")
+            .where_cond(|e| e.name == "B");
+
+        let processor = NfaPatternProcessor::with_limit(pattern, 5);
+        let events = vec![Event::new("A", 1.0, 100), Event::new("B", 2.0, 200)];
+
+        let stream = Box::pin(futures::stream::iter(events));
+        let matches: Vec<_> = processor.process(stream).collect().await;
+        assert_eq!(matches.len(), 1);
     }
 
     #[tokio::test]

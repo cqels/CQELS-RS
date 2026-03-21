@@ -56,6 +56,29 @@ pub struct AlphaMatch {
 }
 
 /// The alpha network evaluates all alpha nodes against incoming statements.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::{AlphaNetwork, TriplePattern, PatternTerm};
+/// use cqels_model::{Term, IriTerm, Statement};
+///
+/// let pattern = TriplePattern::new(
+///     PatternTerm::var("s"),
+///     PatternTerm::constant(Term::Iri(IriTerm::new("http://ex.org/type"))),
+///     PatternTerm::var("o"),
+/// );
+/// let network = AlphaNetwork::compile(vec![pattern]);
+/// assert_eq!(network.size(), 1);
+///
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://ex.org/alice")),
+///     IriTerm::new("http://ex.org/type"),
+///     Term::Iri(IriTerm::new("http://ex.org/Person")),
+/// );
+/// let matches = network.evaluate(&stmt);
+/// assert_eq!(matches.len(), 1);
+/// ```
 pub struct AlphaNetwork {
     nodes: Vec<AlphaNode>,
 }

@@ -7,6 +7,16 @@ use crate::production::Activation;
 use crate::rule::RuleSet;
 
 /// Strategy for resolving conflicts when multiple rules fire simultaneously.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::ConflictResolution;
+///
+/// let strategy = ConflictResolution::Priority;
+/// assert_eq!(strategy, ConflictResolution::Priority);
+/// assert_ne!(strategy, ConflictResolution::All);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ConflictResolution {

@@ -5,6 +5,24 @@ use crate::conflict::ConflictResolution;
 use crate::rule::RuleSet;
 
 /// Configuration for the reasoning engine.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_reasoning::{ReasoningConfig, RuleSet, ConflictResolution};
+///
+/// let config = ReasoningConfig::builder()
+///     .rule_set(RuleSet::new(vec![]))
+///     .default_window(Duration::from_secs(60))
+///     .conflict_resolution(ConflictResolution::All)
+///     .enable_recursive_inference(true)
+///     .max_recursion_depth(5)
+///     .build();
+///
+/// assert_eq!(config.default_window(), Duration::from_secs(60));
+/// assert!(config.enable_recursive_inference());
+/// ```
 pub struct ReasoningConfig {
     pub(crate) rule_set: RuleSet,
     pub(crate) default_window: Duration,

@@ -587,6 +587,21 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for SlidingCountWindow {
 /// Creates a [`TumblingWindow`] with the given duration.
 ///
 /// Convenience factory matching Java's `Window.tumbling(size)`.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_core::window::{tumbling, Window, WindowType};
+/// use cqels_core::stream::TimestampedValue;
+///
+/// let window = tumbling(Duration::from_secs(5));
+/// assert_eq!(window.size, Duration::from_secs(5));
+/// assert_eq!(
+///     <_ as Window<TimestampedValue<i64>>>::window_type(&window),
+///     WindowType::TumblingTime,
+/// );
+/// ```
 pub fn tumbling(size: Duration) -> TumblingWindow {
     TumblingWindow::new(size)
 }
@@ -594,6 +609,20 @@ pub fn tumbling(size: Duration) -> TumblingWindow {
 /// Creates a [`SlidingWindow`] with the given window size and slide interval.
 ///
 /// Convenience factory matching Java's `Window.sliding(size, slide)`.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_core::window::{sliding, Window, WindowType};
+/// use cqels_core::stream::TimestampedValue;
+///
+/// let window = sliding(Duration::from_secs(10), Duration::from_secs(5));
+/// assert_eq!(
+///     <_ as Window<TimestampedValue<i64>>>::window_type(&window),
+///     WindowType::SlidingTime,
+/// );
+/// ```
 pub fn sliding(size: Duration, slide: Duration) -> SlidingWindow {
     SlidingWindow::new(size, slide)
 }
@@ -601,6 +630,20 @@ pub fn sliding(size: Duration, slide: Duration) -> SlidingWindow {
 /// Creates a [`SessionWindow`] with the given inactivity gap.
 ///
 /// Convenience factory matching Java's `Window.session(gap)`.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_core::window::{session, Window, WindowType};
+/// use cqels_core::stream::TimestampedValue;
+///
+/// let window = session(Duration::from_secs(30));
+/// assert_eq!(
+///     <_ as Window<TimestampedValue<i64>>>::window_type(&window),
+///     WindowType::Session,
+/// );
+/// ```
 pub fn session(gap: Duration) -> SessionWindow {
     SessionWindow::new(gap)
 }
@@ -608,6 +651,19 @@ pub fn session(gap: Duration) -> SessionWindow {
 /// Creates a [`TumblingCountWindow`] that batches the given number of elements.
 ///
 /// Convenience factory matching Java's `Window.tumblingCount(count)`.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::window::{tumbling_count, Window, WindowType};
+/// use cqels_core::stream::TimestampedValue;
+///
+/// let window = tumbling_count(100);
+/// assert_eq!(
+///     <_ as Window<TimestampedValue<i64>>>::window_type(&window),
+///     WindowType::TumblingCount,
+/// );
+/// ```
 pub fn tumbling_count(count: usize) -> TumblingCountWindow {
     TumblingCountWindow::new(count)
 }
@@ -615,6 +671,19 @@ pub fn tumbling_count(count: usize) -> TumblingCountWindow {
 /// Creates a [`SlidingCountWindow`] with the given window size and slide.
 ///
 /// Convenience factory matching Java's `Window.slidingCount(count, slide)`.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_core::window::{sliding_count, Window, WindowType};
+/// use cqels_core::stream::TimestampedValue;
+///
+/// let window = sliding_count(100, 50);
+/// assert_eq!(
+///     <_ as Window<TimestampedValue<i64>>>::window_type(&window),
+///     WindowType::SlidingCount,
+/// );
+/// ```
 pub fn sliding_count(count: usize, slide: usize) -> SlidingCountWindow {
     SlidingCountWindow::new(count, slide)
 }

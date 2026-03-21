@@ -223,6 +223,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_from_network() {
+        let config = make_test_config();
+        let network = ReteNetwork::compile(config);
+        let operator = ReteStreamOperator::from_network(network);
+
+        let input = vec![make_element(
+            "http://ex.org/alice",
+            "http://ex.org/type",
+            "http://ex.org/Person",
+            1000,
+        )];
+        let input_stream = Box::pin(futures::stream::iter(input));
+        let results: Vec<StreamElement> = operator.apply(input_stream).collect().await;
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_non_rdf_passthrough() {
+        let operator = ReteStreamOperator::new(make_test_config());
+
+        // StreamElement::Record passes through unchanged (no RETE inference)
+        let input = vec![StreamElement::Record(
+            cqels_core::stream::StreamRecord::new("test", 5000),
+        )];
+        let input_stream = Box::pin(futures::stream::iter(input));
+        let results: Vec<StreamElement> = operator.apply(input_stream).collect().await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], StreamElement::Record(_)));
+    }
+
+    #[tokio::test]
+    async fn test_empty_stream() {
+        let operator = ReteStreamOperator::new(make_test_config());
+        let input_stream = Box::pin(futures::stream::iter(Vec::<StreamElement>::new()));
+        let results: Vec<StreamElement> = operator.apply(input_stream).collect().await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mixed_rdf_and_non_rdf() {
+        let operator = ReteStreamOperator::new(make_test_config());
+
+        let input = vec![
+            make_element(
+                "http://ex.org/alice",
+                "http://ex.org/type",
+                "http://ex.org/Person",
+                1000,
+            ),
+            StreamElement::Record(cqels_core::stream::StreamRecord::new("marker", 2000)),
+            make_element(
+                "http://ex.org/bob",
+                "http://ex.org/knows",
+                "http://ex.org/alice",
+                3000,
+            ),
+        ];
+        let input_stream = Box::pin(futures::stream::iter(input));
+        let results: Vec<StreamElement> = operator.apply(input_stream).collect().await;
+
+        // alice/type/Person (1 original + 1 inferred) + watermark (1) + bob/knows/alice (1 original, no inference) = 4
+        assert_eq!(results.len(), 4);
+    }
+
+    #[tokio::test]
     async fn test_clear() {
         let operator = ReteStreamOperator::new(make_test_config());
 

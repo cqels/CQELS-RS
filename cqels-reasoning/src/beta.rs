@@ -172,6 +172,27 @@ struct BetaEntry {
 /// For each rule, it maintains a chain of beta nodes that incrementally join
 /// alpha node outputs. Single-pattern rules bypass the beta network entirely.
 /// Uses rule indices (into the parent `RuleSet`) to avoid lifetime issues.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::{BetaNetwork, AlphaNetwork, RuleSet, Rule, TriplePattern, PatternTerm};
+/// use cqels_model::{Term, IriTerm};
+///
+/// let rule = Rule::builder()
+///     .id("r1")
+///     .pattern(TriplePattern::new(
+///         PatternTerm::var("s"),
+///         PatternTerm::constant(Term::Iri(IriTerm::new("http://ex.org/type"))),
+///         PatternTerm::var("o"),
+///     ))
+///     .build();
+/// let rule_set = RuleSet::new(vec![rule]);
+/// let alpha = AlphaNetwork::compile(rule_set.all_patterns());
+/// let beta = BetaNetwork::compile(&rule_set, &alpha);
+/// let debug = format!("{:?}", beta);
+/// assert!(debug.contains("BetaNetwork"));
+/// ```
 pub struct BetaNetwork {
     /// rule_index → ordered list of beta nodes for joining patterns
     rule_chains: Vec<Vec<BetaNode>>,

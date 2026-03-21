@@ -49,6 +49,27 @@ impl FactIndex {
 /// Working memory stores facts with time-based indexing and subject/predicate/object indexes.
 ///
 /// Supports efficient windowed eviction and pattern-based retrieval.
+///
+/// # Examples
+///
+/// ```
+/// use cqels_reasoning::WorkingMemory;
+/// use cqels_model::{Term, IriTerm, Statement};
+///
+/// let mut wm = WorkingMemory::new();
+/// let stmt = Statement::new(
+///     Term::Iri(IriTerm::new("http://ex.org/alice")),
+///     IriTerm::new("http://ex.org/type"),
+///     Term::Iri(IriTerm::new("http://ex.org/Person")),
+/// );
+/// wm.add_fact(stmt.clone(), 1000);
+/// assert_eq!(wm.size(), 1);
+/// assert!(wm.contains(&stmt));
+///
+/// let evicted = wm.evict_before(2000);
+/// assert_eq!(evicted.len(), 1);
+/// assert!(wm.is_empty());
+/// ```
 #[derive(Debug)]
 pub struct WorkingMemory {
     /// timestamp → set of statements
