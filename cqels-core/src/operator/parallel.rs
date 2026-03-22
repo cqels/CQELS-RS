@@ -78,36 +78,43 @@ pub struct ParallelExecutionConfigBuilder {
 }
 
 impl ParallelExecutionConfigBuilder {
+    /// Sets the number of parallel worker threads.
     pub fn parallelism(mut self, parallelism: usize) -> Self {
         self.config.parallelism = parallelism;
         self
     }
 
+    /// Sets the prefetch buffer size per worker (default: 256).
     pub fn prefetch(mut self, prefetch: usize) -> Self {
         self.config.prefetch = prefetch;
         self
     }
 
+    /// Enables or disables automatic parallelization of large streams.
     pub fn auto_parallelize(mut self, auto: bool) -> Self {
         self.config.auto_parallelize = auto;
         self
     }
 
+    /// Sets the minimum stream size before parallelization kicks in.
     pub fn min_stream_size(mut self, min: usize) -> Self {
         self.config.min_stream_size = min;
         self
     }
 
+    /// Selects the aggregation backend (`Legacy` or `Swag`).
     pub fn aggregation_backend(mut self, backend: AggregationBackend) -> Self {
         self.config.aggregation_backend = backend;
         self
     }
 
+    /// Sets SWAG-specific configuration (used when backend is `Swag`).
     pub fn swag_config(mut self, config: SwagConfig) -> Self {
         self.config.swag_config = config;
         self
     }
 
+    /// Builds the final [`ParallelExecutionConfig`].
     pub fn build(self) -> ParallelExecutionConfig {
         self.config
     }

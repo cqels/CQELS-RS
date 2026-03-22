@@ -884,3 +884,187 @@ async fn test_minus_anti_join() {
     assert_eq!(results.len(), 1);
     assert!(results[0].get("other").is_some());
 }
+
+// ─── Additional compiler pipeline integration tests ─────────────────────────
+
+#[tokio::test]
+async fn test_e2e_cqelsql_with_bind() {
+    let query_str = r#"
+        SELECT ?sensor ?temp ?label
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+            BIND(CONCAT("sensor:", STR(?sensor)) AS ?label)
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![stream_elem_literal(
+        "http://example.org/s1",
+        "http://example.org/temp",
+        "42",
+        1000,
+    )];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("sensor"));
+    assert!(results[0].contains("temp"));
+}
+
+#[tokio::test]
+async fn test_e2e_cqelsql_single_pattern_multiple_matches() {
+    // Tests that a single-pattern query correctly matches multiple elements.
+    let query_str = r#"
+        SELECT ?sensor ?temp
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "42",
+            1000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s2",
+            "http://example.org/temp",
+            "35",
+            2000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "43",
+            3000,
+        ),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert_eq!(results.len(), 3, "each element should match the single pattern");
+}
+
+#[tokio::test]
+async fn test_e2e_cypherql_different_relationship_types() {
+    // Tests Cypher compilation with a different relationship type.
+    let query_str = r#"
+        FROM STREAM events [NOW]
+        MATCH (a)-[:FOLLOWS]->(b)
+        RETURN a, b
+    "#;
+
+    let definition = CypherQlParser::parse(query_str).expect("parse failed");
+    let compiled = CypherQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![
+        stream_elem_iri(
+            "http://example.org/alice",
+            "http://example.org/FOLLOWS",
+            "http://example.org/bob",
+            1000,
+        ),
+        stream_elem_iri(
+            "http://example.org/carol",
+            "http://example.org/FOLLOWS",
+            "http://example.org/alice",
+            2000,
+        ),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("events", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert_eq!(results.len(), 2);
+}
+
+#[tokio::test]
+async fn test_e2e_cqelsql_count_aggregation() {
+    let query_str = r#"
+        SELECT (COUNT(?temp) AS ?cnt)
+        FROM STREAM sensors [NOW]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://example.org/temp> ?temp .
+            }
+        }
+        GROUP BY ?sensor
+    "#;
+
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "42",
+            1000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s1",
+            "http://example.org/temp",
+            "43",
+            2000,
+        ),
+        stream_elem_literal(
+            "http://example.org/s2",
+            "http://example.org/temp",
+            "35",
+            3000,
+        ),
+    ];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert!(
+        !results.is_empty(),
+        "COUNT aggregation should produce results"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_cypherql_with_return_alias() {
+    let query_str = r#"
+        FROM STREAM events [NOW]
+        MATCH (a)-[:LIKES]->(b)
+        RETURN a AS source, b AS target
+    "#;
+
+    let definition = CypherQlParser::parse(query_str).expect("parse failed");
+    let compiled = CypherQueryCompiler::compile(query_str, definition).expect("compile failed");
+
+    let elements = vec![stream_elem_iri(
+        "http://example.org/alice",
+        "http://example.org/LIKES",
+        "http://example.org/bob",
+        1000,
+    )];
+
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("events", Box::pin(futures::stream::iter(elements)));
+
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
+    assert!(!results.is_empty());
+}

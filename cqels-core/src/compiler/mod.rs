@@ -15,3 +15,18 @@ pub mod pipeline;
 pub use compiled::{CompiledCqelsQuery, CompiledCypherQuery};
 pub use cqelsql::CqelsQueryCompiler;
 pub use cypherql::CypherQueryCompiler;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_re_exports_accessible() {
+        // Verify that key types are re-exported and usable via the compiler module.
+        // CqelsQueryCompiler and CypherQueryCompiler expose static compile() methods.
+        fn _assert_cqels_compiler(_: &CqelsQueryCompiler) {}
+        fn _assert_cypher_compiler(_: &CypherQueryCompiler) {}
+        fn _assert_compiled_cqels(_: &CompiledCqelsQuery) {}
+        fn _assert_compiled_cypher(_: &CompiledCypherQuery) {}
+    }
+}

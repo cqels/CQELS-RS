@@ -430,4 +430,110 @@ mod tests {
             Some(Value::Boolean(false))
         );
     }
+
+    // ─── Edge-case tests for topological relations ──────────────────────
+
+    #[test]
+    fn test_sf_contains_overlapping_polygons() {
+        let big = wkt_literal("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))");
+        let small = wkt_literal("POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))");
+        // big contains small
+        assert_eq!(sf_contains(&big, &small), Some(Value::Boolean(true)));
+        // small does NOT contain big
+        assert_eq!(sf_contains(&small, &big), Some(Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_sf_within_overlapping_polygons() {
+        let big = wkt_literal("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))");
+        let small = wkt_literal("POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))");
+        // small is within big
+        assert_eq!(sf_within(&small, &big), Some(Value::Boolean(true)));
+        // big is NOT within small
+        assert_eq!(sf_within(&big, &small), Some(Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_sf_intersects_partially_overlapping() {
+        let poly1 = wkt_literal("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))");
+        let poly2 = wkt_literal("POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))");
+        // They overlap in the region (1,1)-(2,2)
+        assert_eq!(sf_intersects(&poly1, &poly2), Some(Value::Boolean(true)));
+        assert_eq!(sf_intersects(&poly2, &poly1), Some(Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_sf_disjoint_non_overlapping_polygons() {
+        let poly1 = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        let poly2 = wkt_literal("POLYGON((5 5, 6 5, 6 6, 5 6, 5 5))");
+        assert_eq!(sf_disjoint(&poly1, &poly2), Some(Value::Boolean(true)));
+        assert_eq!(sf_intersects(&poly1, &poly2), Some(Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_sf_equals_same_polygon_different_start() {
+        // Same polygon, different starting vertex
+        let poly1 = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        let poly2 = wkt_literal("POLYGON((1 0, 1 1, 0 1, 0 0, 1 0))");
+        assert_eq!(sf_equals(&poly1, &poly2), Some(Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_sf_contains_point_on_edge() {
+        let poly = wkt_literal("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))");
+        let edge_pt = wkt_literal("POINT(1 0)"); // on bottom edge
+                                                 // geo crate: Contains for points on boundary depends on implementation
+                                                 // The result should be deterministic either way
+        let result = sf_contains(&poly, &edge_pt);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_sf_within_point_outside() {
+        let poly = wkt_literal("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+        let outside = wkt_literal("POINT(2 2)");
+        assert_eq!(sf_within(&outside, &poly), Some(Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_distance_same_point() {
+        let p = wkt_literal("POINT(5 5)");
+        let result = distance(&p, &p, &uom_degree()).unwrap();
+        if let Value::Float(d) = result {
+            assert!(d.abs() < 1e-10, "distance to self should be 0, got {d}");
+        } else {
+            panic!("expected Float");
+        }
+    }
+
+    #[test]
+    fn test_distance_in_radians() {
+        let p1 = wkt_literal("POINT(0 0)");
+        let p2 = wkt_literal("POINT(1 0)");
+        let unit = Value::Term(Term::Iri(IriTerm::new(vocabulary::UOM_RADIAN)));
+        let result = distance(&p1, &p2, &unit).unwrap();
+        if let Value::Float(d) = result {
+            // 1 degree ≈ 0.01745 radians
+            assert!(d > 0.01 && d < 0.02, "expected ~0.0175 radians, got {d}");
+        } else {
+            panic!("expected Float");
+        }
+    }
+
+    #[test]
+    fn test_invalid_geometry_returns_none() {
+        let invalid = Value::String("NOT_A_GEOMETRY".to_string());
+        let valid = wkt_literal("POINT(0 0)");
+        assert_eq!(sf_within(&invalid, &valid), None);
+        assert_eq!(sf_contains(&valid, &invalid), None);
+        assert_eq!(sf_intersects(&invalid, &invalid), None);
+    }
+
+    #[test]
+    fn test_evaluate_function_insufficient_args() {
+        let p = wkt_literal("POINT(1 2)");
+        // sf functions need 2 args, distance needs 3
+        assert_eq!(evaluate_function("geof:sfEquals", &[&p]), None);
+        assert_eq!(evaluate_function("geof:distance", &[&p, &p]), None);
+    }
 }
