@@ -960,7 +960,11 @@ async fn test_e2e_cqelsql_single_pattern_multiple_matches() {
     inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
 
     let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
-    assert_eq!(results.len(), 3, "each element should match the single pattern");
+    assert_eq!(
+        results.len(),
+        3,
+        "each element should match the single pattern"
+    );
 }
 
 #[tokio::test]
