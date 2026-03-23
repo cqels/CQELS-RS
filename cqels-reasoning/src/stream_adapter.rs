@@ -25,13 +25,16 @@ use crate::network::{InferredRdfStreamElement, ReteNetwork};
 /// element and any inferred elements.
 pub struct ReteStreamOperator {
     network: Arc<Mutex<ReteNetwork>>,
+    profile: Option<crate::profile::ReasoningProfile>,
 }
 
 impl ReteStreamOperator {
     /// Creates a new stream operator from a reasoning configuration.
     pub fn new(config: ReasoningConfig) -> Self {
+        let profile = config.profile();
         Self {
             network: Arc::new(Mutex::new(ReteNetwork::compile(config))),
+            profile,
         }
     }
 
@@ -39,7 +42,13 @@ impl ReteStreamOperator {
     pub fn from_network(network: ReteNetwork) -> Self {
         Self {
             network: Arc::new(Mutex::new(network)),
+            profile: None,
         }
+    }
+
+    /// Returns the reasoning profile, if one was set at construction.
+    pub fn profile(&self) -> Option<crate::profile::ReasoningProfile> {
+        self.profile
     }
 
     /// Transforms an input stream by applying RETE reasoning.

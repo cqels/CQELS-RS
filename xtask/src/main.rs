@@ -15,6 +15,9 @@ enum ImpactArea {
     Engine,
     Reasoning,
     Geo,
+    Asp,
+    Shacl,
+    StorageSpi,
     Docs,
     Benchmarks,
     Workflow,
@@ -407,6 +410,12 @@ fn classify_impacts(paths: &[String]) -> BTreeSet<ImpactArea> {
             ImpactArea::Reasoning
         } else if path.starts_with("cqels-geo/") {
             ImpactArea::Geo
+        } else if path.starts_with("cqels-asp/") {
+            ImpactArea::Asp
+        } else if path.starts_with("cqels-shacl/") {
+            ImpactArea::Shacl
+        } else if path.starts_with("cqels-storage-spi/") {
+            ImpactArea::StorageSpi
         } else if path.starts_with("cqels-benchmarks/") {
             ImpactArea::Benchmarks
         } else if path.starts_with(".github/") {
@@ -526,6 +535,30 @@ fn commands_for_areas(areas: &BTreeSet<ImpactArea>) -> Vec<TaskCommand> {
                     "cqels-benchmarks",
                     "--test",
                     "geo_regressions",
+                ]));
+            }
+            ImpactArea::Asp => {
+                commands.insert(TaskCommand::cargo_test(&[
+                    "-p",
+                    "cqels-asp",
+                    "--lib",
+                    "--tests",
+                ]));
+            }
+            ImpactArea::Shacl => {
+                commands.insert(TaskCommand::cargo_test(&[
+                    "-p",
+                    "cqels-shacl",
+                    "--lib",
+                    "--tests",
+                ]));
+            }
+            ImpactArea::StorageSpi => {
+                commands.insert(TaskCommand::cargo_test(&[
+                    "-p",
+                    "cqels-storage-spi",
+                    "--lib",
+                    "--tests",
                 ]));
             }
             ImpactArea::Benchmarks => {

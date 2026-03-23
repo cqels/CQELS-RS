@@ -276,4 +276,42 @@ mod tests {
         let result = ds.push_triple("http://s", "http://p", "http://o").await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_push_raw_stream_element() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm};
+        use cqels_model::{Statement, Term};
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let ds = DataStream::new("raw".to_string(), tx);
+
+        let stmt = Statement::new(
+            Term::Iri(IriTerm::new("http://s")),
+            IriTerm::new("http://p"),
+            Term::Literal(LiteralTerm::new("val")),
+        );
+        let elem = StreamElement::Rdf(RdfStreamElement::new(stmt, 42));
+        ds.push(elem).await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.timestamp(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_complete_closes_channel() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let ds = DataStream::new("test".to_string(), tx);
+
+        // Push one element, then complete
+        ds.push_triple("http://s", "http://p", "http://o")
+            .await
+            .unwrap();
+        ds.complete();
+
+        // Should still get the buffered element
+        assert!(rx.recv().await.is_some());
+        // Then None after channel closes
+        assert!(rx.recv().await.is_none());
+    }
 }

@@ -58,4 +58,8 @@ pub use cqels_core::stream::{
 pub use data_stream::DataStream;
 pub use engine::{create_stream_pair, receiver_to_stream, ReactiveStreamEngine, StreamEngine};
 pub use facade::{CqelsEngine, CqelsEngineBuilder};
+pub use persistence::{
+    CheckpointPolicy, EnginePersistenceConfig, PersistenceCoordinator, RecoveryPolicy,
+    RecoverySnapshot,
+};
 pub use runtime::{CqelsRuntime, QueryRegistration};

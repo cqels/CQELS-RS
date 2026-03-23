@@ -14,6 +14,7 @@ use cqels_reasoning::ReasoningConfig;
 use crate::data_stream::DataStream;
 use crate::engine::{create_stream_pair, StreamEngine};
 use crate::listener::QueryResultListener;
+use crate::persistence::{EnginePersistenceConfig, PersistenceCoordinator};
 use crate::runtime::CqelsRuntime;
 
 /// A simplified engine facade wrapping [`CqelsRuntime`] with push-based
@@ -44,6 +45,7 @@ pub struct CqelsEngine {
     id: String,
     runtime: CqelsRuntime,
     stream_senders: HashMap<String, DataStream>,
+    persistence: Option<PersistenceCoordinator>,
 }
 
 impl CqelsEngine {
@@ -148,9 +150,19 @@ impl CqelsEngine {
         self.runtime.engine().is_running()
     }
 
+    /// Returns the active reasoning profile, if reasoning is enabled.
+    pub fn reasoning_profile(&self) -> Option<cqels_reasoning::ReasoningProfile> {
+        self.runtime.reasoning_profile()
+    }
+
     /// Returns a reference to the underlying runtime.
     pub fn runtime(&self) -> &CqelsRuntime {
         &self.runtime
+    }
+
+    /// Returns a reference to the persistence coordinator, if configured.
+    pub fn persistence(&self) -> Option<&PersistenceCoordinator> {
+        self.persistence.as_ref()
     }
 }
 
@@ -159,6 +171,7 @@ pub struct CqelsEngineBuilder {
     id: Option<String>,
     broadcast_capacity: usize,
     reasoning_config: Option<ReasoningConfig>,
+    persistence_config: Option<EnginePersistenceConfig>,
 }
 
 impl Default for CqelsEngineBuilder {
@@ -167,6 +180,7 @@ impl Default for CqelsEngineBuilder {
             id: None,
             broadcast_capacity: 4096,
             reasoning_config: None,
+            persistence_config: None,
         }
     }
 }
@@ -190,6 +204,12 @@ impl CqelsEngineBuilder {
         self
     }
 
+    /// Sets the persistence configuration.
+    pub fn persistence_config(mut self, config: EnginePersistenceConfig) -> Self {
+        self.persistence_config = Some(config);
+        self
+    }
+
     /// Builds the engine.
     pub fn build(self) -> Result<CqelsEngine, CqelsError> {
         let store = cqels_core::store::create_rdf_store()?;
@@ -207,6 +227,7 @@ impl CqelsEngineBuilder {
             id,
             runtime,
             stream_senders: HashMap::new(),
+            persistence: None,
         })
     }
 }
@@ -288,5 +309,28 @@ mod tests {
             .build()
             .unwrap();
         assert!(engine.runtime().has_reasoning());
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_profile_introspection() {
+        use cqels_reasoning::ReasoningProfile;
+
+        // Without reasoning — no profile
+        let engine = CqelsEngine::builder().build().unwrap();
+        assert!(engine.reasoning_profile().is_none());
+
+        // With RDFS profile
+        let config = ReasoningProfile::Rdfs.create_config();
+        let engine = CqelsEngine::builder()
+            .reasoning_config(config)
+            .build()
+            .unwrap();
+        assert_eq!(engine.reasoning_profile(), Some(ReasoningProfile::Rdfs));
+    }
+
+    #[tokio::test]
+    async fn test_persistence_accessor_none_by_default() {
+        let engine = CqelsEngine::builder().build().unwrap();
+        assert!(engine.persistence().is_none());
     }
 }

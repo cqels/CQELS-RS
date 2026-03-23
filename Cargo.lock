@@ -357,6 +357,7 @@ dependencies = [
  "cqels-asp",
  "cqels-core",
  "cqels-model",
+ "futures",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

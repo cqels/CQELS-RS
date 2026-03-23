@@ -100,6 +100,7 @@ pub struct CqelsRuntime {
     engine: ReactiveStreamEngine,
     store: Arc<dyn RdfStore>,
     reasoning_operator: Option<cqels_reasoning::ReteStreamOperator>,
+    persistence: Option<crate::persistence::PersistenceCoordinator>,
 }
 
 impl Default for CqelsRuntime {
@@ -127,6 +128,7 @@ impl CqelsRuntime {
             engine: ReactiveStreamEngine::new(),
             store,
             reasoning_operator: None,
+            persistence: None,
         })
     }
 
@@ -146,6 +148,7 @@ impl CqelsRuntime {
             engine: ReactiveStreamEngine::with_capacity(broadcast_capacity),
             store,
             reasoning_operator: None,
+            persistence: None,
         }
     }
 
@@ -171,6 +174,17 @@ impl CqelsRuntime {
     /// Returns whether reasoning is currently enabled.
     pub fn has_reasoning(&self) -> bool {
         self.reasoning_operator.is_some()
+    }
+
+    /// Returns the active reasoning profile, if reasoning is enabled and a
+    /// profile was configured.
+    pub fn reasoning_profile(&self) -> Option<cqels_reasoning::ReasoningProfile> {
+        self.reasoning_operator.as_ref().and_then(|op| op.profile())
+    }
+
+    /// Returns a reference to the persistence coordinator, if configured.
+    pub fn persistence(&self) -> Option<&crate::persistence::PersistenceCoordinator> {
+        self.persistence.as_ref()
     }
 
     /// Registers a named input stream.
@@ -421,6 +435,24 @@ mod tests {
         let config = ReasoningConfig::default_config(RuleSet::new(vec![]));
         runtime.enable_reasoning(config);
         assert!(runtime.has_reasoning());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_reasoning_profile() {
+        use cqels_reasoning::ReasoningProfile;
+
+        let mut runtime = CqelsRuntime::new();
+        assert!(runtime.reasoning_profile().is_none());
+
+        let config = ReasoningProfile::Rdfs.create_config();
+        runtime.enable_reasoning(config);
+        assert_eq!(runtime.reasoning_profile(), Some(ReasoningProfile::Rdfs));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_persistence_none_by_default() {
+        let runtime = CqelsRuntime::new();
+        assert!(runtime.persistence().is_none());
     }
 
     #[tokio::test]
