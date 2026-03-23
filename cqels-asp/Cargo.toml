@@ -1,6 +1,6 @@
 [package]
-name = "cqels-engine"
-description = "Stream processing engine runtime with CEP support for CQELS"
+name = "cqels-asp"
+description = "Answer Set Programming solver integration for CQELS"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,17 +11,13 @@ keywords.workspace = true
 [dependencies]
 cqels-model.workspace = true
 cqels-core.workspace = true
-cqels-reasoning.workspace = true
-cqels-storage-spi.workspace = true
-oxigraph.workspace = true
 tokio.workspace = true
-tokio-stream.workspace = true
-futures.workspace = true
 async-trait.workspace = true
-dashmap.workspace = true
-tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }

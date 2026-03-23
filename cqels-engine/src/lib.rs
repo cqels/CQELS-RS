@@ -43,12 +43,19 @@
 //! ```
 
 pub mod cep;
+pub mod data_stream;
+pub mod element_factory;
 pub mod engine;
+pub mod facade;
+pub mod listener;
+pub mod persistence;
 pub mod runtime;
 
 pub use cep::{Contiguity, NfaPatternProcessor, Pattern, PatternMatch, Quantifier};
 pub use cqels_core::stream::{
     RdfStreamElement, StreamElement, StreamEvent, StreamRecord, Timestamped, TimestampedValue,
 };
+pub use data_stream::DataStream;
 pub use engine::{create_stream_pair, receiver_to_stream, ReactiveStreamEngine, StreamEngine};
+pub use facade::{CqelsEngine, CqelsEngineBuilder};
 pub use runtime::{CqelsRuntime, QueryRegistration};

@@ -26,3 +26,11 @@ tokio-stream.workspace = true
 [[bench]]
 name = "stream_throughput"
 harness = false
+
+[[bench]]
+name = "reasoning_profiles"
+harness = false
+
+[[bench]]
+name = "engine_facade"
+harness = false

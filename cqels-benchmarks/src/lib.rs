@@ -4,6 +4,11 @@
 //! elements for benchmarking and testing the CQELS query engine. The
 //! generators cover several common streaming scenarios:
 //!
+//! - **Reasoning profile scenarios** ([`profiles`]) -- Pre-built ontology
+//!   scenarios for RDFS, OWL-Lite, and OWL 2 RL profile benchmarks.
+//! - **Extended generators** ([`generators`]) -- Profile-aware stream data
+//!   generators for subclass instances, property chains, transitive links, etc.
+//!
 //! - **Sensor telemetry** ([`generate_sensor_readings`]) -- Temperature,
 //!   humidity, and pressure readings from simulated IoT sensors.
 //! - **Generic RDF batches** ([`generate_rdf_stream_batch`]) -- Simple
@@ -28,6 +33,9 @@
 //! let readings = generate_sensor_readings(500);
 //! assert_eq!(readings.len(), 500);
 //! ```
+
+pub mod generators;
+pub mod profiles;
 
 use std::time::Duration;
 

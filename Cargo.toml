@@ -5,6 +5,9 @@ members = [
     "cqels-engine",
     "cqels-reasoning",
     "cqels-geo",
+    "cqels-storage-spi",
+    "cqels-asp",
+    "cqels-shacl",
     "cqels-benchmarks",
     "xtask",
 ]
@@ -74,3 +77,6 @@ cqels-core = { path = "cqels-core" }
 cqels-engine = { path = "cqels-engine" }
 cqels-reasoning = { path = "cqels-reasoning" }
 cqels-geo = { path = "cqels-geo" }
+cqels-storage-spi = { path = "cqels-storage-spi" }
+cqels-asp = { path = "cqels-asp" }
+cqels-shacl = { path = "cqels-shacl" }

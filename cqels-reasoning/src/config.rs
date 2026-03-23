@@ -8,6 +8,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::conflict::ConflictResolution;
+use crate::profile::ReasoningProfile;
 use crate::rule::RuleSet;
 
 /// Configuration for the reasoning engine.
@@ -37,6 +38,7 @@ pub struct ReasoningConfig {
     pub(crate) conflict_resolution: ConflictResolution,
     pub(crate) emit_input_triples: bool,
     pub(crate) track_provenance: bool,
+    pub(crate) profile: Option<ReasoningProfile>,
 }
 
 impl ReasoningConfig {
@@ -72,6 +74,11 @@ impl ReasoningConfig {
         self.track_provenance
     }
 
+    /// Returns the reasoning profile, if one was set.
+    pub fn profile(&self) -> Option<ReasoningProfile> {
+        self.profile
+    }
+
     pub fn default_config(rule_set: RuleSet) -> Self {
         Self::builder().rule_set(rule_set).build()
     }
@@ -91,6 +98,7 @@ impl fmt::Debug for ReasoningConfig {
             .field("conflict", &self.conflict_resolution)
             .field("emit_input", &self.emit_input_triples)
             .field("provenance", &self.track_provenance)
+            .field("profile", &self.profile)
             .finish()
     }
 }
@@ -104,6 +112,7 @@ pub struct ReasoningConfigBuilder {
     conflict_resolution: ConflictResolution,
     emit_input_triples: bool,
     track_provenance: bool,
+    profile: Option<ReasoningProfile>,
 }
 
 impl Default for ReasoningConfigBuilder {
@@ -116,6 +125,7 @@ impl Default for ReasoningConfigBuilder {
             conflict_resolution: ConflictResolution::Priority,
             emit_input_triples: true,
             track_provenance: false,
+            profile: None,
         }
     }
 }
@@ -168,13 +178,31 @@ impl ReasoningConfigBuilder {
         self
     }
 
+    /// Sets the reasoning profile.
+    ///
+    /// When a profile is set and no explicit `rule_set` has been provided,
+    /// [`try_build`](Self::try_build) will auto-populate the rule set from
+    /// the profile's rules.
+    pub fn profile(mut self, profile: ReasoningProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
     /// Builds the `ReasoningConfig`, returning an error if required fields are missing.
     pub fn try_build(self) -> Result<ReasoningConfig, cqels_model::CqelsError> {
-        let rule_set = self
-            .rule_set
-            .ok_or_else(|| cqels_model::CqelsError::Evaluation {
-                message: "rule_set is required".to_string(),
-            })?;
+        // Auto-populate rule_set from profile if not explicitly set
+        let rule_set = match self.rule_set {
+            Some(rs) => rs,
+            None => match self.profile {
+                Some(profile) => profile.rule_set(),
+                None => {
+                    return Err(cqels_model::CqelsError::Evaluation {
+                        message: "rule_set is required (set it directly or via a profile)"
+                            .to_string(),
+                    });
+                }
+            },
+        };
         Ok(ReasoningConfig {
             rule_set,
             default_window: self.default_window,
@@ -183,6 +211,7 @@ impl ReasoningConfigBuilder {
             conflict_resolution: self.conflict_resolution,
             emit_input_triples: self.emit_input_triples,
             track_provenance: self.track_provenance,
+            profile: self.profile,
         })
     }
 

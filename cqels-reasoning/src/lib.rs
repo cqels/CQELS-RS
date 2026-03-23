@@ -50,22 +50,28 @@
 
 mod alpha;
 mod beta;
+pub mod capability;
 mod config;
 mod conflict;
 mod memory;
 mod network;
 mod pattern;
 mod production;
+pub mod profile;
 mod rule;
 pub mod stream_adapter;
+pub mod validation;
 
 pub use alpha::{AlphaMatch, AlphaNetwork, AlphaNode};
 pub use beta::{BetaNetwork, BetaNode};
+pub use capability::{capabilities_for, supports, ReasoningCapability};
 pub use config::ReasoningConfig;
 pub use conflict::{ConflictResolution, ConflictResolver};
 pub use memory::{FactIndex, WorkingMemory};
 pub use network::{InferredRdfStreamElement, ReteNetwork};
 pub use pattern::{PatternTerm, TriplePattern, TripleTemplate};
 pub use production::Activation;
+pub use profile::ReasoningProfile;
 pub use rule::{Rule, RuleCondition, RuleConsequent, RuleSet};
 pub use stream_adapter::ReteStreamOperator;
+pub use validation::{validate_schema, ValidationIssue, ValidationSeverity};

@@ -235,6 +235,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cqels-asp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cqels-core",
+ "cqels-model",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cqels-benchmarks"
 version = "0.1.0"
 dependencies = [
@@ -286,6 +301,7 @@ dependencies = [
  "cqels-core",
  "cqels-model",
  "cqels-reasoning",
+ "cqels-storage-spi",
  "dashmap",
  "futures",
  "oxigraph",
@@ -331,6 +347,30 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "cqels-shacl"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cqels-asp",
+ "cqels-core",
+ "cqels-model",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cqels-storage-spi"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cqels-model",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
