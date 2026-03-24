@@ -43,6 +43,7 @@
 //! ```
 
 pub mod cep;
+pub mod checkpoint_manager;
 pub mod data_stream;
 pub mod element_factory;
 pub mod engine;
@@ -52,6 +53,7 @@ pub mod persistence;
 pub mod runtime;
 
 pub use cep::{Contiguity, NfaPatternProcessor, Pattern, PatternMatch, Quantifier};
+pub use checkpoint_manager::CheckpointManager;
 pub use cqels_core::stream::{
     RdfStreamElement, StreamElement, StreamEvent, StreamRecord, Timestamped, TimestampedValue,
 };

@@ -20,6 +20,7 @@ use cqels_core::query::ContinuousQuery;
 use cqels_core::store::RdfStore;
 use cqels_core::stream::{StreamElement, Timestamped};
 use cqels_model::{BindingSet, CqelsError, Statement};
+use cqels_storage_spi::deserialize_stream_element;
 
 use crate::cep::{NfaPatternProcessor, Pattern, PatternMatch};
 use crate::engine::{ReactiveStreamEngine, StreamEngine};
@@ -185,6 +186,37 @@ impl CqelsRuntime {
     /// Returns a reference to the persistence coordinator, if configured.
     pub fn persistence(&self) -> Option<&crate::persistence::PersistenceCoordinator> {
         self.persistence.as_ref()
+    }
+
+    /// Recovers state from persistence, if configured.
+    ///
+    /// Deserializes journaled events and returns them for replay.
+    pub async fn recover(&self) -> Result<Vec<StreamElement>, CqelsError> {
+        let coord = match &self.persistence {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let snapshot = coord.recover().await.map_err(|e| CqelsError::Evaluation {
+            message: format!("persistence recovery failed: {e}"),
+        })?;
+        let mut elements = Vec::new();
+        for envelope in &snapshot.events {
+            match deserialize_stream_element(&envelope.payload) {
+                Ok(elem) => elements.push(elem),
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping undeserializable event at offset {}: {e}",
+                        envelope.offset
+                    );
+                }
+            }
+        }
+        tracing::info!(
+            events_recovered = elements.len(),
+            checkpoint = snapshot.checkpoint.is_some(),
+            "persistence recovery complete"
+        );
+        Ok(elements)
     }
 
     /// Registers a named input stream.

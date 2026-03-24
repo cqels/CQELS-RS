@@ -716,6 +716,104 @@ fn match_chain_recursive(
 
     let rel = &relationships[rel_idx];
 
+    // Variable-length path handling
+    if let Some(ref path_length) = rel.path_length {
+        use crate::operator::join::{GraphPatternJoinState, VariableLengthPathOperator};
+
+        let min = path_length.min_length.unwrap_or(1) as usize;
+        let max = path_length.max_length.unwrap_or(10) as usize;
+
+        let mut graph = GraphPatternJoinState::new();
+        for stmt in stmts {
+            graph.add_statement(stmt, timestamp);
+        }
+
+        let mut op = VariableLengthPathOperator::new(min, max);
+        if !rel.types.is_empty() {
+            // Find the full predicate matching the type suffix (same logic as single-hop).
+            // GraphPatternJoinState stores predicate via to_string() (e.g., "<http://...>"),
+            // so we must resolve the same form.
+            let type_name = &rel.types[0];
+            if let Some(full_pred) = stmts.iter().find_map(|s| {
+                let p = s.predicate.as_str();
+                if p.ends_with(type_name.as_str()) || p == type_name.as_str() {
+                    Some(s.predicate.to_string())
+                } else {
+                    None
+                }
+            }) {
+                op = op.with_relationship_type(full_pred);
+            } else {
+                // No matching predicate found — no results possible
+                return;
+            }
+        }
+
+        // Determine start nodes
+        let start_var = rel
+            .start_node
+            .as_ref()
+            .or_else(|| nodes.get(rel_idx).and_then(|n| n.variable.as_ref()));
+        let end_var = rel
+            .end_node
+            .as_ref()
+            .or_else(|| nodes.get(rel_idx + 1).and_then(|n| n.variable.as_ref()));
+
+        let start_nodes: Vec<String> = if let Some(sv) = start_var {
+            if let Some(existing) = current_bs.get(sv) {
+                vec![existing.to_string()]
+            } else {
+                graph.all_subjects()
+            }
+        } else {
+            graph.all_subjects()
+        };
+
+        for start in &start_nodes {
+            let paths = op.find_paths(start, &graph);
+            for path in paths {
+                if path.len() < 2 {
+                    continue;
+                }
+                let mut bs = current_bs.clone();
+                let path_start = &path[0];
+                let path_end = &path[path.len() - 1];
+
+                if let Some(sv) = start_var {
+                    if let Some(existing) = bs.get(sv) {
+                        if existing.to_string() != *path_start {
+                            continue;
+                        }
+                    } else {
+                        bs.insert(sv.as_str(), Value::String(path_start.clone()));
+                    }
+                }
+                if let Some(ev) = end_var {
+                    if let Some(existing) = bs.get(ev) {
+                        if existing.to_string() != *path_end {
+                            continue;
+                        }
+                    } else {
+                        bs.insert(ev.as_str(), Value::String(path_end.clone()));
+                    }
+                }
+
+                // Recurse to next relationship in chain
+                match_chain_recursive(
+                    relationships,
+                    rel_idx + 1,
+                    &bs,
+                    stmts,
+                    node_map,
+                    nodes,
+                    timestamp,
+                    results,
+                );
+            }
+        }
+        return;
+    }
+
     for stmt in stmts {
         // Check relationship type filter
         if !rel.types.is_empty() {
@@ -2056,5 +2154,154 @@ mod tests {
 
         // Empty list is trivially compatible
         assert!(is_swag_compatible(&[]));
+    }
+
+    // ── Variable-length path tests ──────────────────────────────────────
+
+    #[test]
+    fn test_variable_length_path_multi_hop() {
+        // (a)-[*1..3]->(b) over A->B->C chain
+        let pattern = CypherPattern {
+            nodes: vec![
+                NodePattern {
+                    variable: Some("a".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+                NodePattern {
+                    variable: Some("b".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+            ],
+            relationships: vec![crate::parser::ast::RelationshipPattern {
+                variable: None,
+                types: vec![],
+                direction: RelDirection::Outgoing,
+                properties: HashMap::new(),
+                start_node: Some("a".into()),
+                end_node: Some("b".into()),
+                path_length: Some(crate::parser::ast::PathLength {
+                    min_length: Some(1),
+                    max_length: Some(3),
+                }),
+            }],
+        };
+
+        let stmts = vec![
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/A")),
+                IriTerm::new("http://ex.org/KNOWS"),
+                Term::Iri(IriTerm::new("http://ex.org/B")),
+            ),
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/B")),
+                IriTerm::new("http://ex.org/KNOWS"),
+                Term::Iri(IriTerm::new("http://ex.org/C")),
+            ),
+        ];
+
+        let results = match_cypher_pattern(&pattern, &stmts, 1000);
+        // Should find: A->B (1 hop), A->C (2 hops), B->C (1 hop)
+        assert!(
+            results.len() >= 3,
+            "expected >= 3 results, got {}",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn test_variable_length_path_with_type_filter() {
+        // (a)-[:KNOWS *1..2]->(b) — only KNOWS edges
+        let pattern = CypherPattern {
+            nodes: vec![
+                NodePattern {
+                    variable: Some("a".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+                NodePattern {
+                    variable: Some("b".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+            ],
+            relationships: vec![crate::parser::ast::RelationshipPattern {
+                variable: None,
+                types: vec!["KNOWS".into()],
+                direction: RelDirection::Outgoing,
+                properties: HashMap::new(),
+                start_node: Some("a".into()),
+                end_node: Some("b".into()),
+                path_length: Some(crate::parser::ast::PathLength {
+                    min_length: Some(1),
+                    max_length: Some(2),
+                }),
+            }],
+        };
+
+        let stmts = vec![
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/A")),
+                IriTerm::new("http://ex.org/KNOWS"),
+                Term::Iri(IriTerm::new("http://ex.org/B")),
+            ),
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/B")),
+                IriTerm::new("http://ex.org/LIKES"),
+                Term::Iri(IriTerm::new("http://ex.org/C")),
+            ),
+        ];
+
+        let results = match_cypher_pattern(&pattern, &stmts, 1000);
+        // Only A->B via KNOWS (LIKES is filtered out)
+        assert!(!results.is_empty());
+        for r in &results {
+            // End node should never be C since LIKES edge is filtered
+            if let Some(end) = r.get("b") {
+                assert_ne!(
+                    end.to_string(),
+                    "http://ex.org/C",
+                    "should not traverse LIKES edges"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_single_hop_pattern_still_works() {
+        // Regression: single-hop without path_length must still work
+        let pattern = CypherPattern {
+            nodes: vec![
+                NodePattern {
+                    variable: Some("a".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+                NodePattern {
+                    variable: Some("b".into()),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                },
+            ],
+            relationships: vec![crate::parser::ast::RelationshipPattern {
+                variable: None,
+                types: vec!["KNOWS".into()],
+                direction: RelDirection::Outgoing,
+                properties: HashMap::new(),
+                start_node: Some("a".into()),
+                end_node: Some("b".into()),
+                path_length: None,
+            }],
+        };
+
+        let stmts = vec![Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/Alice")),
+            IriTerm::new("http://ex.org/KNOWS"),
+            Term::Iri(IriTerm::new("http://ex.org/Bob")),
+        )];
+
+        let results = match_cypher_pattern(&pattern, &stmts, 1000);
+        assert_eq!(results.len(), 1);
     }
 }

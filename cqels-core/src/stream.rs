@@ -2,6 +2,7 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqels_model::Statement;
+use serde::{Deserialize, Serialize};
 
 /// Trait for anything that has a timestamp.
 pub trait Timestamped {
@@ -34,7 +35,7 @@ pub trait Timestamped {
 /// let rec = StreamElement::Record(StreamRecord::new("payload", 2000));
 /// assert!(!rec.is_rdf());
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum StreamElement {
     /// An RDF stream element carrying an RDF statement.
@@ -107,7 +108,7 @@ impl fmt::Display for StreamElement {
 /// let elem = RdfStreamElement::new(stmt, 1000);
 /// assert_eq!(elem.timestamp, 1000);
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RdfStreamElement {
     pub statement: Statement,
     pub timestamp: i64,
@@ -160,7 +161,7 @@ impl From<RdfStreamElement> for StreamElement {
 /// A generic stream record carrying a typed value with a timestamp.
 ///
 /// Maps to Java's `StreamRecord<T>`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamRecord {
     pub value: String,
     pub timestamp: i64,

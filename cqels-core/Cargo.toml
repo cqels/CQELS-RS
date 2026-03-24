@@ -10,6 +10,7 @@ keywords.workspace = true
 
 [dependencies]
 cqels-model.workspace = true
+cqels-geo.workspace = true
 oxigraph.workspace = true
 oxrdf.workspace = true
 tokio.workspace = true

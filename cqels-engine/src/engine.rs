@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use cqels_core::query::{ContinuousQuery, QueryInputs};
 use cqels_core::stream::StreamElement;
 use cqels_model::{BindingSet, CqelsError};
+use cqels_storage_spi::{serialize_stream_element, StreamEnvelope};
 
 /// Core stream engine trait.
 ///
@@ -184,6 +185,8 @@ pub struct ReactiveStreamEngine {
     /// Uses `std::sync::Mutex` (not tokio) so that `CleanupStream::Drop`
     /// can synchronously remove entries without requiring an async runtime.
     queries: Arc<StdMutex<HashMap<String, QueryState>>>,
+    /// Optional persistence coordinator for journaling stream events.
+    persistence: Option<Arc<crate::persistence::PersistenceCoordinator>>,
 }
 
 impl Default for ReactiveStreamEngine {
@@ -200,6 +203,7 @@ impl ReactiveStreamEngine {
             running: AtomicBool::new(false),
             broadcast_capacity: 4096,
             queries: Arc::new(StdMutex::new(HashMap::new())),
+            persistence: None,
         }
     }
 
@@ -208,6 +212,14 @@ impl ReactiveStreamEngine {
             broadcast_capacity,
             ..Self::new()
         }
+    }
+
+    /// Sets the persistence coordinator for journaling stream events.
+    pub fn set_persistence(
+        &mut self,
+        coordinator: Arc<crate::persistence::PersistenceCoordinator>,
+    ) {
+        self.persistence = Some(coordinator);
     }
 
     /// Gets a broadcast receiver for a named stream.
@@ -321,8 +333,19 @@ impl ReactiveStreamEngine {
             if let Some(state) = streams.get_mut(&name) {
                 let tx = state.sender.clone();
                 let stream_name = name.clone();
+                let persistence = self.persistence.clone();
                 let handle = tokio::spawn(async move {
                     while let Some(element) = input_stream.next().await {
+                        // Journal before broadcast (non-blocking on failure)
+                        if let Some(ref coord) = persistence {
+                            let envelope = to_envelope(&element, &stream_name);
+                            if let Err(e) = coord.append_event(envelope).await {
+                                tracing::warn!(
+                                    stream = %stream_name,
+                                    "persistence append failed: {e}"
+                                );
+                            }
+                        }
                         if tx.send(element).is_err() {
                             tracing::warn!(
                                 stream = %stream_name,
@@ -492,6 +515,12 @@ pub fn create_stream_pair(
     let (tx, rx) = mpsc::channel(buffer);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     (tx, Box::pin(stream))
+}
+
+/// Converts a stream element into a persistence envelope.
+fn to_envelope(element: &StreamElement, stream_name: &str) -> StreamEnvelope {
+    let payload = serialize_stream_element(element).unwrap_or_default();
+    StreamEnvelope::new(0, stream_name, element.timestamp(), "rdf", payload)
 }
 
 #[cfg(test)]

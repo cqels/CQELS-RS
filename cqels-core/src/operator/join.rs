@@ -338,6 +338,11 @@ impl GraphPatternJoinState {
             .unwrap_or_default()
     }
 
+    /// Returns all subject keys in the graph.
+    pub fn all_subjects(&self) -> Vec<String> {
+        self.subject_index.keys().cloned().collect()
+    }
+
     /// Evicts edges older than the given timestamp.
     ///
     /// Uses incremental index removal instead of rebuilding from scratch,

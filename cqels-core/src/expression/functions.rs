@@ -12,72 +12,72 @@ use cqels_model::{Term, Value};
 ///
 /// Returns `Value::Null` for unknown functions or when null propagation applies.
 pub fn call_builtin(name: &str, args: &[Value]) -> Value {
-    match name.to_lowercase().as_str() {
+    let result = match name.to_lowercase().as_str() {
         // ── Numeric ──────────────────────────────────────────────────────
-        "abs" => numeric_unary(args, f64::abs),
-        "ceil" => numeric_unary(args, f64::ceil),
-        "floor" => numeric_unary(args, f64::floor),
-        "round" => numeric_unary(args, f64::round),
-        "rand" => Value::Float(pseudo_random()),
-        "power" | "pow" => {
+        "abs" => Some(numeric_unary(args, f64::abs)),
+        "ceil" => Some(numeric_unary(args, f64::ceil)),
+        "floor" => Some(numeric_unary(args, f64::floor)),
+        "round" => Some(numeric_unary(args, f64::round)),
+        "rand" => Some(Value::Float(pseudo_random())),
+        "power" | "pow" => Some(
             match (
                 args.first().and_then(|v| v.as_numeric()),
                 args.get(1).and_then(|v| v.as_numeric()),
             ) {
                 (Some(base), Some(exp)) => Value::Float(base.powf(exp)),
                 _ => Value::Null,
-            }
-        }
+            },
+        ),
 
         // ── String ───────────────────────────────────────────────────────
-        "concat" => fn_concat(args),
-        "strlen" => fn_strlen(args),
-        "substr" | "substring" => fn_substr(args),
-        "ucase" => fn_ucase(args),
-        "lcase" => fn_lcase(args),
-        "contains" => fn_contains(args),
-        "strstarts" => fn_strstarts(args),
-        "strends" => fn_strends(args),
-        "str" => fn_str(args),
-        "replace" => fn_replace(args),
-        "encode_for_uri" | "encode" => fn_encode_for_uri(args),
+        "concat" => Some(fn_concat(args)),
+        "strlen" => Some(fn_strlen(args)),
+        "substr" | "substring" => Some(fn_substr(args)),
+        "ucase" => Some(fn_ucase(args)),
+        "lcase" => Some(fn_lcase(args)),
+        "contains" => Some(fn_contains(args)),
+        "strstarts" => Some(fn_strstarts(args)),
+        "strends" => Some(fn_strends(args)),
+        "str" => Some(fn_str(args)),
+        "replace" => Some(fn_replace(args)),
+        "encode_for_uri" | "encode" => Some(fn_encode_for_uri(args)),
 
         // ── DateTime ─────────────────────────────────────────────────────
-        "year" => fn_year(args),
-        "month" => fn_month(args),
-        "day" => fn_day(args),
-        "hours" => fn_hours(args),
-        "minutes" => fn_minutes(args),
-        "seconds" => fn_seconds(args),
-        "now" => fn_now(),
+        "year" => Some(fn_year(args)),
+        "month" => Some(fn_month(args)),
+        "day" => Some(fn_day(args)),
+        "hours" => Some(fn_hours(args)),
+        "minutes" => Some(fn_minutes(args)),
+        "seconds" => Some(fn_seconds(args)),
+        "now" => Some(fn_now()),
 
         // ── Type testing ─────────────────────────────────────────────────
-        "isiri" | "isuri" => fn_isiri(args),
-        "isblank" => fn_isblank(args),
-        "isliteral" => fn_isliteral(args),
-        "isnumeric" => fn_isnumeric(args),
-        "bound" => fn_bound(args),
-        "datatype" => fn_datatype(args),
-        "lang" => fn_lang(args),
+        "isiri" | "isuri" => Some(fn_isiri(args)),
+        "isblank" => Some(fn_isblank(args)),
+        "isliteral" => Some(fn_isliteral(args)),
+        "isnumeric" => Some(fn_isnumeric(args)),
+        "bound" => Some(fn_bound(args)),
+        "datatype" => Some(fn_datatype(args)),
+        "lang" => Some(fn_lang(args)),
 
         // ── Constructors ─────────────────────────────────────────────────
-        "iri" | "uri" => fn_iri(args),
-        "bnode" => fn_bnode(args),
-        "uuid" => fn_uuid(),
-        "struuid" => fn_struuid(),
+        "iri" | "uri" => Some(fn_iri(args)),
+        "bnode" => Some(fn_bnode(args)),
+        "uuid" => Some(fn_uuid()),
+        "struuid" => Some(fn_struuid()),
 
         // ── Casting ──────────────────────────────────────────────────────
-        "integer" | "xsd:integer" => fn_to_integer(args),
-        "float" | "double" | "xsd:double" | "xsd:float" => fn_to_float(args),
-        "boolean" | "xsd:boolean" => fn_to_boolean(args),
-        "string" | "xsd:string" => fn_str(args),
+        "integer" | "xsd:integer" => Some(fn_to_integer(args)),
+        "float" | "double" | "xsd:double" | "xsd:float" => Some(fn_to_float(args)),
+        "boolean" | "xsd:boolean" => Some(fn_to_boolean(args)),
+        "string" | "xsd:string" => Some(fn_str(args)),
 
         // ── Hash ─────────────────────────────────────────────────────────
-        "md5" => fn_hash::<md5::Md5>(args),
-        "sha1" => fn_hash::<sha1::Sha1>(args),
-        "sha256" => fn_hash::<sha2::Sha256>(args),
-        "sha384" => fn_hash::<sha2::Sha384>(args),
-        "sha512" => fn_hash::<sha2::Sha512>(args),
+        "md5" => Some(fn_hash::<md5::Md5>(args)),
+        "sha1" => Some(fn_hash::<sha1::Sha1>(args)),
+        "sha256" => Some(fn_hash::<sha2::Sha256>(args)),
+        "sha384" => Some(fn_hash::<sha2::Sha384>(args)),
+        "sha512" => Some(fn_hash::<sha2::Sha512>(args)),
 
         // ── Coalesce ─────────────────────────────────────────────────────
         "coalesce" => {
@@ -86,7 +86,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Value {
                     return arg.clone();
                 }
             }
-            Value::Null
+            Some(Value::Null)
         }
 
         // ── IF (also handled at expression level) ────────────────────────
@@ -94,17 +94,25 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Value {
             if args.len() >= 3 {
                 let cond = value_to_bool(&args[0]);
                 if cond {
-                    args[1].clone()
+                    Some(args[1].clone())
                 } else {
-                    args[2].clone()
+                    Some(args[2].clone())
                 }
             } else {
-                Value::Null
+                Some(Value::Null)
             }
         }
 
-        _ => Value::Null,
+        _ => None,
+    };
+
+    if let Some(v) = result {
+        return v;
     }
+
+    // GeoSPARQL fallback (case-preserving name for canonical lookup)
+    let refs: Vec<&Value> = args.iter().collect();
+    cqels_geo::functions::evaluate_function(name, &refs).unwrap_or(Value::Null)
 }
 
 // ── Helper: apply a unary numeric function ──────────────────────────────────
@@ -974,5 +982,50 @@ mod tests {
             call_builtin("boolean", &[Value::Float(0.0)]),
             Value::Boolean(false)
         );
+    }
+
+    // ── GeoSPARQL integration tests ─────────────────────────────────────
+
+    fn wkt_value(wkt: &str) -> Value {
+        cqels_geo::geometry::wkt_literal(wkt)
+    }
+
+    #[test]
+    fn test_geosparql_distance() {
+        let p1 = wkt_value("POINT(0 0)");
+        let p2 = wkt_value("POINT(3 4)");
+        let unit = Value::Term(Term::Iri(IriTerm::new(cqels_geo::vocabulary::UOM_DEGREE)));
+        let result = call_builtin("geof:distance", &[p1, p2, unit]);
+        if let Value::Float(d) = result {
+            assert!((d - 5.0).abs() < 0.01, "expected ~5.0, got {d}");
+        } else {
+            panic!("expected Float, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn test_geosparql_sf_within() {
+        let point = wkt_value("POINT(1 1)");
+        let polygon = wkt_value("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))");
+        let result = call_builtin("geof:sfWithin", &[point, polygon]);
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_unknown_geo_function_returns_null() {
+        let p = wkt_value("POINT(0 0)");
+        let result = call_builtin("geof:nonExistent", &[p.clone(), p]);
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_geosparql_full_iri() {
+        let point = wkt_value("POINT(1 1)");
+        let polygon = wkt_value("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))");
+        let result = call_builtin(
+            "<http://www.opengis.net/def/function/geosparql/sfWithin>",
+            &[point, polygon],
+        );
+        assert_eq!(result, Value::Boolean(true));
     }
 }

@@ -32,6 +32,7 @@ pub mod envelope;
 pub mod error;
 pub mod file_backend;
 pub mod provider;
+pub mod rdf_codec;
 
 pub use backend::{CheckpointStore, EventJournal, PersistentBackend};
 pub use checkpoint::{CheckpointManifest, CheckpointSnapshot};
@@ -41,3 +42,4 @@ pub use envelope::StreamEnvelope;
 pub use error::StorageError;
 pub use file_backend::{FileBackedPersistentBackend, FileBackedStorageProvider};
 pub use provider::StorageBackendProvider;
+pub use rdf_codec::{deserialize_stream_element, serialize_stream_element, RdfCodec};
