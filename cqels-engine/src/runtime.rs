@@ -158,6 +158,11 @@ impl CqelsRuntime {
         &self.engine
     }
 
+    /// Returns a mutable reference to the underlying engine.
+    pub fn engine_mut(&mut self) -> &mut ReactiveStreamEngine {
+        &mut self.engine
+    }
+
     /// Returns a reference to the RDF store.
     pub fn store(&self) -> &Arc<dyn RdfStore> {
         &self.store
@@ -186,6 +191,14 @@ impl CqelsRuntime {
     /// Returns a reference to the persistence coordinator, if configured.
     pub fn persistence(&self) -> Option<&crate::persistence::PersistenceCoordinator> {
         self.persistence.as_ref()
+    }
+
+    /// Sets the persistence coordinator (used by the facade builder).
+    pub fn set_persistence_coordinator(
+        &mut self,
+        coordinator: crate::persistence::PersistenceCoordinator,
+    ) {
+        self.persistence = Some(coordinator);
     }
 
     /// Recovers state from persistence, if configured.
@@ -252,7 +265,26 @@ impl CqelsRuntime {
     }
 
     /// Starts the engine, activating all registered streams.
+    ///
+    /// If persistence is configured, auto-recovers journaled events before
+    /// starting. Recovered events are logged but not yet replayed into streams
+    /// (replay requires stream name mapping from envelopes).
     pub async fn start(&self) -> Result<(), CqelsError> {
+        if self.persistence.is_some() {
+            match self.recover().await {
+                Ok(elements) => {
+                    if !elements.is_empty() {
+                        tracing::info!(
+                            recovered_events = elements.len(),
+                            "auto-recovery: events recovered (replay not yet implemented)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("auto-recovery failed: {e}");
+                }
+            }
+        }
         self.engine.start().await
     }
 
@@ -319,6 +351,40 @@ impl CqelsRuntime {
         let stream = self
             .engine
             .register_binding_query(Box::new(compiled))
+            .await?;
+        Ok(QueryRegistration { query_id, stream })
+    }
+
+    /// Parses, compiles, and registers a CONSTRUCT query.
+    ///
+    /// Returns a [`QueryRegistration`] containing the assigned query ID
+    /// and a stream of [`Statement`] results.
+    pub async fn register_construct_query(
+        &self,
+        query_string: &str,
+    ) -> Result<QueryRegistration<Statement>, CqelsError> {
+        tracing::info!("registering CONSTRUCT query");
+        let definition =
+            CqelsQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
+                message: format!("Parse error: {e}"),
+            })?;
+
+        let compiled = CqelsQueryCompiler::compile_construct(
+            query_string,
+            definition,
+            Some(self.store.clone()),
+        )
+        .map_err(|e| CqelsError::Evaluation {
+            message: format!("Compile error: {e}"),
+        })?;
+
+        let query_id = compiled.query_id().to_string();
+        tracing::info!(query_id = %query_id, "CONSTRUCT query compiled");
+        let inputs = self.engine.build_query_inputs().await;
+        let raw_stream = compiled.execute(inputs);
+        let stream = self
+            .engine
+            .wrap_with_cancellation(query_id.clone(), raw_stream)
             .await?;
         Ok(QueryRegistration { query_id, stream })
     }

@@ -7,7 +7,7 @@ COMMENT    = _{ ("--" ~ (!"\n" ~ ANY)*) | ("#" ~ (!"\n" ~ ANY)*) }
 
 // ─── Top-level rules ─────────────────────────────────────────────────────────
 
-query = { SOI ~ prefix_decl* ~ (register_query | select_query) ~ EOI }
+query = { SOI ~ prefix_decl* ~ (register_query | construct_query | select_query) ~ EOI }
 
 standalone_expression = { SOI ~ expression ~ EOI }
 
@@ -16,13 +16,28 @@ prefix_decl = { ^"prefix" ~ pname_ns ~ iri_ref }
 register_query = { ^"register" ~ ^"query" ~ identifier ~ ^"as" ~ select_query }
 
 select_query = {
-    ^"select" ~ select_list
+    stream_semantics_kw?
+    ~ ^"select" ~ select_list
     ~ from_clauses
     ~ ^"where" ~ where_clause
     ~ group_by_clause?
     ~ order_by_clause?
     ~ limit_clause?
 }
+
+construct_query = {
+    ^"construct" ~ construct_template
+    ~ from_clauses
+    ~ ^"where" ~ where_clause
+}
+
+construct_template = { "{" ~ triple_pattern+ ~ "}" }
+
+stream_semantics_kw = { istream_kw | dstream_kw | rstream_kw }
+
+istream_kw = { ^"istream" }
+dstream_kw = { ^"dstream" }
+rstream_kw = { ^"rstream" }
 
 // ─── SELECT list ─────────────────────────────────────────────────────────────
 

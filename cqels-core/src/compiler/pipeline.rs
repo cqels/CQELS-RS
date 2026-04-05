@@ -1254,15 +1254,39 @@ fn compute_aggregate(
 
 /// Applies ORDER BY and LIMIT to a collected batch of binding sets.
 ///
-/// Sorts the batch by ORDER BY expressions (supporting multiple keys with
-/// ascending/descending direction), then truncates to LIMIT if specified.
-/// This requires the full batch to be materialized in memory.
+/// When the query has a single ORDER BY key and a LIMIT, uses `TopKOperator`
+/// for O(N log K) performance instead of a full O(N log N) sort. For multi-key
+/// ORDER BY or no LIMIT, falls back to standard sort + truncate.
 pub fn apply_order_and_limit(
     mut elements: Vec<BindingSet>,
     order_by: &[(Expression, SortDirection)],
     evaluator: &ExpressionEvaluator,
     limit: Option<u64>,
 ) -> Vec<BindingSet> {
+    // TopK optimization: single ORDER BY key + LIMIT
+    if let (1, Some(limit_val)) = (order_by.len(), limit) {
+        let k = limit_val as usize;
+        let (ref expr, direction) = order_by[0];
+        let evaluator_ref = evaluator;
+        let topk_direction = match direction {
+            SortDirection::Ascending => crate::operator::ranking::SortDirection::Ascending,
+            SortDirection::Descending => crate::operator::ranking::SortDirection::Descending,
+        };
+
+        let mut topk = crate::operator::ranking::TopKOperator::new(
+            k,
+            |bs: &BindingSet| evaluator_ref.evaluate(expr, bs).as_numeric().unwrap_or(0.0),
+            topk_direction,
+        );
+
+        for bs in elements {
+            topk.add(bs);
+        }
+
+        return topk.get_top_k().into_iter().cloned().collect();
+    }
+
+    // Full sort for multi-key ORDER BY or no LIMIT
     if !order_by.is_empty() {
         elements.sort_by(|a, b| {
             for (expr, direction) in order_by {
@@ -1322,6 +1346,81 @@ pub fn apply_projection(
     }))
 }
 
+/// Applies RSP-QL stream semantics to a binding set stream.
+///
+/// - **IStream** (default): pass through all bindings as-is.
+/// - **DStream**: track the previous batch and emit bindings that were removed.
+/// - **RStream**: accumulate all bindings and emit the full set on each update.
+pub fn apply_stream_semantics(
+    stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
+    semantics: crate::parser::ast::StreamSemantics,
+) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
+    use crate::parser::ast::StreamSemantics;
+    match semantics {
+        StreamSemantics::IStream => stream,
+        StreamSemantics::DStream => {
+            // Track previous batch keys and emit bindings present in previous but not current.
+            let state = std::sync::Arc::new(std::sync::Mutex::new(
+                Vec::<String>::new(), // previous batch keys
+            ));
+            let prev_bindings =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::<BindingSet>::new()));
+
+            Box::pin(stream.flat_map(move |bs| {
+                let key = deterministic_binding_key(&bs);
+                let mut prev_keys = state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut prev_bs = prev_bindings.lock().unwrap_or_else(|e| e.into_inner());
+
+                // Check if this binding was in the previous set
+                let was_present = prev_keys.contains(&key);
+
+                // Update state: remove from previous if still present, add new
+                if was_present {
+                    if let Some(pos) = prev_keys.iter().position(|k| k == &key) {
+                        prev_keys.remove(pos);
+                        prev_bs.remove(pos);
+                    }
+                }
+
+                // Emit expired bindings (those still in prev_keys after processing)
+                // We do this on each new binding arrival as a proxy
+                let expired: Vec<BindingSet> = if !was_present {
+                    // New binding arrived - emit any remaining old bindings as expired
+                    let result = prev_bs.drain(..).collect();
+                    prev_keys.clear();
+                    result
+                } else {
+                    vec![]
+                };
+
+                // Store current binding for next comparison
+                prev_keys.push(key);
+                prev_bs.push(bs);
+
+                futures::stream::iter(expired)
+            }))
+        }
+        StreamSemantics::RStream => {
+            // Accumulate all bindings, emit full set on each new arrival.
+            let accumulated = std::sync::Arc::new(std::sync::Mutex::new(Vec::<BindingSet>::new()));
+
+            Box::pin(stream.flat_map(move |bs| {
+                let mut acc = accumulated.lock().unwrap_or_else(|e| e.into_inner());
+                // Add new binding if not already present
+                let key = deterministic_binding_key(&bs);
+                let already = acc
+                    .iter()
+                    .any(|existing| deterministic_binding_key(existing) == key);
+                if !already {
+                    acc.push(bs);
+                }
+                let snapshot: Vec<BindingSet> = acc.clone();
+                futures::stream::iter(snapshot)
+            }))
+        }
+    }
+}
+
 /// Applies DISTINCT to a stream of binding sets.
 ///
 /// Deduplicates bindings using a deterministic string key derived from
@@ -1362,6 +1461,78 @@ fn deterministic_binding_key(bs: &BindingSet) -> String {
         key.push_str(v);
     }
     key
+}
+
+/// Substitutes variables in a CONSTRUCT template using bindings to produce statements.
+///
+/// For each template triple, substitutes `?var` references from the binding set.
+/// Triples where any variable is unbound are skipped.
+pub fn apply_construct_template(
+    bindings: &BindingSet,
+    template: &[crate::parser::ast::TriplePattern],
+    prefixes: &HashMap<String, String>,
+) -> Vec<Statement> {
+    let mut results = Vec::new();
+
+    for tp in template {
+        let subject_str = resolve_construct_term(&tp.subject, bindings, prefixes);
+        let predicate_str = resolve_construct_term(&tp.predicate, bindings, prefixes);
+        let object_str = resolve_construct_term(&tp.object, bindings, prefixes);
+
+        // Skip triples where any variable is unbound
+        let (Some(s), Some(p), Some(o)) = (subject_str, predicate_str, object_str) else {
+            continue;
+        };
+
+        let subject = if s.starts_with("http://") || s.starts_with("https://") {
+            Term::Iri(IriTerm::new(&s))
+        } else {
+            Term::Literal(cqels_model::term::LiteralTerm::new(&s))
+        };
+
+        let predicate = IriTerm::new(p.trim_start_matches('<').trim_end_matches('>'));
+
+        let object = if o.starts_with("http://") || o.starts_with("https://") {
+            Term::Iri(IriTerm::new(&o))
+        } else {
+            Term::Literal(cqels_model::term::LiteralTerm::new(&o))
+        };
+
+        results.push(Statement::new(subject, predicate, object));
+    }
+
+    results
+}
+
+/// Resolves a construct term: if it's a variable, look up in bindings; otherwise resolve as IRI/literal.
+fn resolve_construct_term(
+    term: &str,
+    bindings: &BindingSet,
+    prefixes: &HashMap<String, String>,
+) -> Option<String> {
+    if crate::parser::ast::TriplePattern::is_variable(term) {
+        let var_name = term
+            .strip_prefix('?')
+            .or_else(|| term.strip_prefix('$'))
+            .unwrap_or(term);
+        bindings.get(var_name).map(|v| v.to_string())
+    } else if term.starts_with('<') && term.ends_with('>') {
+        Some(
+            term.trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string(),
+        )
+    } else if let Some(colon_pos) = term.find(':') {
+        let prefix = &term[..colon_pos];
+        let local = &term[colon_pos + 1..];
+        if let Some(base) = prefixes.get(prefix) {
+            Some(format!("{base}{local}"))
+        } else {
+            Some(term.to_string())
+        }
+    } else {
+        Some(term.to_string())
+    }
 }
 
 /// Converts parser AggregateFunction to expression AggregateExprFunction.

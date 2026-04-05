@@ -208,6 +208,19 @@ impl fmt::Display for AggregateFunction {
 
 // ─── CqelsQL AST ────────────────────────────────────────────────────────────
 
+/// RSP-QL stream semantics: controls which bindings are emitted after window evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum StreamSemantics {
+    /// Emit only newly added bindings (default, current behavior).
+    #[default]
+    IStream,
+    /// Emit only removed/expired bindings.
+    DStream,
+    /// Emit all current bindings on every window update.
+    RStream,
+}
+
 /// Query type for CqelsQL queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -363,6 +376,10 @@ pub struct CqelsQueryDefinition {
     pub order_by_conditions: Vec<OrderCondition>,
     pub limit: Option<u64>,
     pub operator_hints: OperatorHints,
+    /// RSP-QL stream semantics (ISTREAM/DSTREAM/RSTREAM). Defaults to ISTREAM.
+    pub stream_semantics: StreamSemantics,
+    /// Template for CONSTRUCT queries.
+    pub construct_template: Vec<TriplePattern>,
 }
 
 impl CqelsQueryDefinition {
@@ -405,6 +422,8 @@ pub struct CqelsQueryDefinitionBuilder {
     order_by_conditions: Vec<OrderCondition>,
     limit: Option<u64>,
     operator_hints: OperatorHints,
+    stream_semantics: StreamSemantics,
+    construct_template: Vec<TriplePattern>,
 }
 
 impl CqelsQueryDefinitionBuilder {
@@ -483,6 +502,16 @@ impl CqelsQueryDefinitionBuilder {
         self
     }
 
+    pub fn stream_semantics(mut self, semantics: StreamSemantics) -> Self {
+        self.stream_semantics = semantics;
+        self
+    }
+
+    pub fn add_construct_template(mut self, pattern: TriplePattern) -> Self {
+        self.construct_template.push(pattern);
+        self
+    }
+
     pub fn build(self) -> CqelsQueryDefinition {
         CqelsQueryDefinition {
             name: self.name,
@@ -500,6 +529,8 @@ impl CqelsQueryDefinitionBuilder {
             order_by_conditions: self.order_by_conditions,
             limit: self.limit,
             operator_hints: self.operator_hints,
+            stream_semantics: self.stream_semantics,
+            construct_template: self.construct_template,
         }
     }
 }

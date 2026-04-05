@@ -376,6 +376,10 @@ impl ContinuousQuery for CompiledCqelsQuery {
                 binding_stream
             };
 
+        // Phase 1c: Apply RSP-QL stream semantics
+        let binding_stream =
+            super::pipeline::apply_stream_semantics(binding_stream, definition.stream_semantics);
+
         // Phase 2: Apply FILTER expressions
         let filtered = if filter_expressions.is_empty() {
             binding_stream
@@ -478,6 +482,47 @@ impl ContinuousQuery for CompiledCqelsQuery {
                 projected
             }
         }
+    }
+}
+
+/// A compiled CONSTRUCT query that produces `Statement`s from bindings.
+///
+/// Wraps the standard binding pipeline but maps each `BindingSet` through
+/// the construct template to produce `Statement`s.
+pub struct CompiledConstructQuery {
+    /// The inner select-style query that produces bindings.
+    pub(crate) inner: CompiledCqelsQuery,
+    /// The construct template triple patterns.
+    pub(crate) template: Vec<crate::parser::ast::TriplePattern>,
+    /// Prefix mappings for resolving template terms.
+    pub(crate) prefixes: std::collections::HashMap<String, String>,
+}
+
+#[async_trait]
+impl ContinuousQuery for CompiledConstructQuery {
+    type Result = Statement;
+
+    fn query_id(&self) -> &str {
+        self.inner.query_id()
+    }
+
+    fn query_string(&self) -> &str {
+        self.inner.query_string()
+    }
+
+    fn query_type(&self) -> QueryType {
+        QueryType::Sparql
+    }
+
+    fn execute(&self, inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = Statement> + Send>> {
+        let binding_stream = self.inner.execute(inputs);
+        let template = self.template.clone();
+        let prefixes = self.prefixes.clone();
+
+        Box::pin(binding_stream.flat_map(move |bs| {
+            let stmts = super::pipeline::apply_construct_template(&bs, &template, &prefixes);
+            futures::stream::iter(stmts)
+        }))
     }
 }
 
@@ -852,6 +897,8 @@ mod tests {
             order_by_conditions: vec![],
             limit: None,
             operator_hints: OperatorHints::default(),
+            stream_semantics: StreamSemantics::default(),
+            construct_template: vec![],
         };
 
         let query = CompiledCqelsQuery {

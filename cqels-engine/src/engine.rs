@@ -187,6 +187,8 @@ pub struct ReactiveStreamEngine {
     queries: Arc<StdMutex<HashMap<String, QueryState>>>,
     /// Optional persistence coordinator for journaling stream events.
     persistence: Option<Arc<crate::persistence::PersistenceCoordinator>>,
+    /// Optional checkpoint manager for automatic checkpointing after journaled events.
+    checkpoint_manager: Option<Arc<crate::checkpoint_manager::CheckpointManager>>,
 }
 
 impl Default for ReactiveStreamEngine {
@@ -204,6 +206,7 @@ impl ReactiveStreamEngine {
             broadcast_capacity: 4096,
             queries: Arc::new(StdMutex::new(HashMap::new())),
             persistence: None,
+            checkpoint_manager: None,
         }
     }
 
@@ -222,6 +225,14 @@ impl ReactiveStreamEngine {
         self.persistence = Some(coordinator);
     }
 
+    /// Sets the checkpoint manager for automatic checkpointing after journaled events.
+    pub fn set_checkpoint_manager(
+        &mut self,
+        manager: Arc<crate::checkpoint_manager::CheckpointManager>,
+    ) {
+        self.checkpoint_manager = Some(manager);
+    }
+
     /// Gets a broadcast receiver for a named stream.
     pub async fn get_stream_receiver(
         &self,
@@ -232,7 +243,7 @@ impl ReactiveStreamEngine {
     }
 
     /// Builds QueryInputs from all currently registered streams.
-    async fn build_query_inputs(&self) -> QueryInputs {
+    pub async fn build_query_inputs(&self) -> QueryInputs {
         let mut inputs = QueryInputs::new();
         let streams = self.streams.lock().await;
 
@@ -264,7 +275,7 @@ impl ReactiveStreamEngine {
     }
 
     /// Wraps a query output stream with cancellation and registers it.
-    async fn wrap_with_cancellation<T: Send + 'static>(
+    pub async fn wrap_with_cancellation<T: Send + 'static>(
         &self,
         query_id: String,
         raw_stream: Pin<Box<dyn Stream<Item = T> + Send>>,
@@ -334,16 +345,24 @@ impl ReactiveStreamEngine {
                 let tx = state.sender.clone();
                 let stream_name = name.clone();
                 let persistence = self.persistence.clone();
+                let checkpoint_mgr = self.checkpoint_manager.clone();
                 let handle = tokio::spawn(async move {
                     while let Some(element) = input_stream.next().await {
                         // Journal before broadcast (non-blocking on failure)
                         if let Some(ref coord) = persistence {
                             let envelope = to_envelope(&element, &stream_name);
-                            if let Err(e) = coord.append_event(envelope).await {
-                                tracing::warn!(
-                                    stream = %stream_name,
-                                    "persistence append failed: {e}"
-                                );
+                            match coord.append_event(envelope).await {
+                                Ok(offset) => {
+                                    if let Some(ref mgr) = checkpoint_mgr {
+                                        mgr.on_event(offset).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        stream = %stream_name,
+                                        "persistence append failed: {e}"
+                                    );
+                                }
                             }
                         }
                         if tx.send(element).is_err() {

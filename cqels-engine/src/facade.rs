@@ -11,6 +11,7 @@ use futures::StreamExt;
 use cqels_model::{BindingSet, CqelsError};
 use cqels_reasoning::ReasoningConfig;
 
+use crate::checkpoint_manager::CheckpointManager;
 use crate::data_stream::DataStream;
 use crate::engine::{create_stream_pair, StreamEngine};
 use crate::listener::QueryResultListener;
@@ -186,6 +187,17 @@ impl Default for CqelsEngineBuilder {
 }
 
 impl CqelsEngineBuilder {
+    fn default_storage_providers(
+    ) -> HashMap<String, Box<dyn cqels_storage_spi::StorageBackendProvider>> {
+        let mut providers: HashMap<String, Box<dyn cqels_storage_spi::StorageBackendProvider>> =
+            HashMap::new();
+        providers.insert(
+            "file".to_string(),
+            Box::new(cqels_storage_spi::FileBackedStorageProvider),
+        );
+        providers
+    }
+
     /// Sets the engine identifier.
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
@@ -223,11 +235,53 @@ impl CqelsEngineBuilder {
             .id
             .unwrap_or_else(|| format!("cqels-engine-{}", uuid_counter()));
 
+        // Wire persistence if configured and enabled
+        let persistence = if let Some(ref config) = self.persistence_config {
+            if config.enabled {
+                let providers = Self::default_storage_providers();
+
+                match PersistenceCoordinator::new(&providers, config) {
+                    Ok(engine_coord) => {
+                        let engine_coord = std::sync::Arc::new(engine_coord);
+                        runtime.engine_mut().set_persistence(engine_coord.clone());
+
+                        let checkpoint_mgr = std::sync::Arc::new(CheckpointManager::new(
+                            engine_coord,
+                            config.checkpoint_policy.clone(),
+                        ));
+                        runtime.engine_mut().set_checkpoint_manager(checkpoint_mgr);
+
+                        // Create a separate coordinator for runtime recovery and facade accessor
+                        match PersistenceCoordinator::new(&providers, config) {
+                            Ok(runtime_coord) => {
+                                runtime.set_persistence_coordinator(runtime_coord);
+                                PersistenceCoordinator::new(&providers, config).ok()
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "failed to create runtime persistence coordinator: {e}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to create persistence coordinator: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(CqelsEngine {
             id,
             runtime,
             stream_senders: HashMap::new(),
-            persistence: None,
+            persistence,
         })
     }
 }

@@ -12,7 +12,7 @@ pub mod cqelsql;
 pub mod cypherql;
 pub mod pipeline;
 
-pub use compiled::{CompiledCqelsQuery, CompiledCypherQuery};
+pub use compiled::{CompiledConstructQuery, CompiledCqelsQuery, CompiledCypherQuery};
 pub use cqelsql::CqelsQueryCompiler;
 pub use cypherql::CypherQueryCompiler;
 

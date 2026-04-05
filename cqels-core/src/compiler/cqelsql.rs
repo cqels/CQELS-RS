@@ -16,7 +16,7 @@ use crate::parser::ast::{CqelsPatternGroup, CqelsQueryDefinition, SelectElement}
 use crate::parser::ParseResult;
 use crate::store::RdfStore;
 
-use super::compiled::CompiledCqelsQuery;
+use super::compiled::{CompiledConstructQuery, CompiledCqelsQuery};
 use super::pipeline::{convert_aggregate_function, hash_string, PipelineAggregateSpec};
 
 /// Compiler for CqelsQL (SPARQL-style) queries.
@@ -32,6 +32,22 @@ impl CqelsQueryCompiler {
         definition: CqelsQueryDefinition,
     ) -> ParseResult<CompiledCqelsQuery> {
         Self::compile_with_store(query_string, definition, None)
+    }
+
+    /// Compiles a CONSTRUCT query definition into an executable query producing Statements.
+    pub fn compile_construct(
+        query_string: &str,
+        definition: CqelsQueryDefinition,
+        rdf_store: Option<std::sync::Arc<dyn RdfStore>>,
+    ) -> ParseResult<CompiledConstructQuery> {
+        let template = definition.construct_template.clone();
+        let prefixes = definition.prefixes.clone();
+        let inner = Self::compile_with_store(query_string, definition, rdf_store)?;
+        Ok(CompiledConstructQuery {
+            inner,
+            template,
+            prefixes,
+        })
     }
 
     /// Compiles a CqelsQL query definition with an optional RDF store for
@@ -187,6 +203,8 @@ mod tests {
             order_by_conditions: vec![],
             limit: None,
             operator_hints: OperatorHints::default(),
+            stream_semantics: StreamSemantics::default(),
+            construct_template: vec![],
         }
     }
 

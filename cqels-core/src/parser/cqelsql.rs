@@ -40,6 +40,9 @@ impl CqelsQlParser {
                         Rule::select_query => {
                             builder = parse_select_query(inner, builder)?;
                         }
+                        Rule::construct_query => {
+                            builder = parse_construct_query(inner, builder)?;
+                        }
                         Rule::EOI => {}
                         _ => {}
                     }
@@ -96,6 +99,9 @@ fn parse_select_query(
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::stream_semantics_kw => {
+                builder = parse_stream_semantics(inner, builder)?;
+            }
             Rule::select_list => {
                 builder = parse_select_list(inner, builder)?;
             }
@@ -118,6 +124,51 @@ fn parse_select_query(
         }
     }
 
+    Ok(builder)
+}
+
+fn parse_construct_query(
+    pair: pest::iterators::Pair<Rule>,
+    mut builder: CqelsQueryDefinitionBuilder,
+) -> ParseResult<CqelsQueryDefinitionBuilder> {
+    builder = builder.query_type(CqelsQueryType::Construct);
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::construct_template => {
+                for tp in inner.into_inner() {
+                    if tp.as_rule() == Rule::triple_pattern {
+                        for pattern in parse_triple_patterns(tp)? {
+                            builder = builder.add_construct_template(pattern);
+                        }
+                    }
+                }
+            }
+            Rule::from_clauses => {
+                builder = parse_from_clauses(inner, builder)?;
+            }
+            Rule::where_clause => {
+                builder = parse_where_clause(inner, builder)?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(builder)
+}
+
+fn parse_stream_semantics(
+    pair: pest::iterators::Pair<Rule>,
+    builder: CqelsQueryDefinitionBuilder,
+) -> ParseResult<CqelsQueryDefinitionBuilder> {
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::istream_kw => return Ok(builder.stream_semantics(StreamSemantics::IStream)),
+            Rule::dstream_kw => return Ok(builder.stream_semantics(StreamSemantics::DStream)),
+            Rule::rstream_kw => return Ok(builder.stream_semantics(StreamSemantics::RStream)),
+            _ => {}
+        }
+    }
     Ok(builder)
 }
 
