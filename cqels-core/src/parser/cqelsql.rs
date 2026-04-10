@@ -43,6 +43,12 @@ impl CqelsQlParser {
                         Rule::construct_query => {
                             builder = parse_construct_query(inner, builder)?;
                         }
+                        Rule::ask_query => {
+                            builder = parse_ask_query(inner, builder)?;
+                        }
+                        Rule::describe_query => {
+                            builder = parse_describe_query(inner, builder)?;
+                        }
                         Rule::EOI => {}
                         _ => {}
                     }
@@ -141,6 +147,63 @@ fn parse_construct_query(
                         for pattern in parse_triple_patterns(tp)? {
                             builder = builder.add_construct_template(pattern);
                         }
+                    }
+                }
+            }
+            Rule::from_clauses => {
+                builder = parse_from_clauses(inner, builder)?;
+            }
+            Rule::where_clause => {
+                builder = parse_where_clause(inner, builder)?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(builder)
+}
+
+fn parse_ask_query(
+    pair: pest::iterators::Pair<Rule>,
+    mut builder: CqelsQueryDefinitionBuilder,
+) -> ParseResult<CqelsQueryDefinitionBuilder> {
+    builder = builder.query_type(CqelsQueryType::Ask);
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::from_clauses => {
+                builder = parse_from_clauses(inner, builder)?;
+            }
+            Rule::where_clause => {
+                builder = parse_where_clause(inner, builder)?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(builder)
+}
+
+fn parse_describe_query(
+    pair: pest::iterators::Pair<Rule>,
+    mut builder: CqelsQueryDefinitionBuilder,
+) -> ParseResult<CqelsQueryDefinitionBuilder> {
+    builder = builder.query_type(CqelsQueryType::Describe);
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::describe_target => {
+                for target in inner.into_inner() {
+                    match target.as_rule() {
+                        Rule::variable => {
+                            builder = builder.add_select_element(SelectElement::Variable(
+                                target.as_str().to_string(),
+                            ));
+                        }
+                        Rule::star => {
+                            // Star means describe all variables — leave select_elements empty
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -986,6 +1049,63 @@ mod tests {
             }
             _ => panic!("expected default pattern group"),
         }
+    }
+
+    #[test]
+    fn test_parse_ask_query() {
+        let query = r#"
+            ASK FROM STREAM s [NOW]
+            WHERE { ?x <http://example.org/p> ?y . }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert_eq!(result.query_type, CqelsQueryType::Ask);
+        assert!(result.select_elements.is_empty());
+        assert_eq!(result.streams.len(), 1);
+        assert_eq!(result.streams[0].name, "s");
+        assert_eq!(result.pattern_groups.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_ask_missing_where() {
+        let result = CqelsQlParser::parse("ASK FROM STREAM s [NOW]");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_describe_with_variable() {
+        let query = r#"
+            DESCRIBE ?x FROM STREAM s [NOW]
+            WHERE { ?x <http://example.org/p> ?y . }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert_eq!(result.query_type, CqelsQueryType::Describe);
+        assert_eq!(result.select_elements.len(), 1);
+        match &result.select_elements[0] {
+            SelectElement::Variable(v) => assert_eq!(v, "?x"),
+            _ => panic!("expected variable"),
+        }
+    }
+
+    #[test]
+    fn test_parse_describe_star() {
+        let query = r#"
+            DESCRIBE * FROM STREAM s [NOW]
+            WHERE { ?x <http://example.org/p> ?y . }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert_eq!(result.query_type, CqelsQueryType::Describe);
+        assert!(result.select_elements.is_empty());
+    }
+
+    #[test]
+    fn test_parse_describe_multiple_variables() {
+        let query = r#"
+            DESCRIBE ?x ?y FROM STREAM s [NOW]
+            WHERE { ?x <http://example.org/p> ?y . }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert_eq!(result.query_type, CqelsQueryType::Describe);
+        assert_eq!(result.select_elements.len(), 2);
     }
 
     // ─── NEW TESTS ──────────────────────────────────────────────────────────

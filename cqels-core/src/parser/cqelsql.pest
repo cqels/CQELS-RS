@@ -7,7 +7,13 @@ COMMENT    = _{ ("--" ~ (!"\n" ~ ANY)*) | ("#" ~ (!"\n" ~ ANY)*) }
 
 // ─── Top-level rules ─────────────────────────────────────────────────────────
 
-query = { SOI ~ prefix_decl* ~ (register_query | construct_query | select_query) ~ EOI }
+query = { SOI ~ prefix_decl* ~ (register_query | ask_query | describe_query | construct_query | select_query) ~ EOI }
+
+ask_query = { ^"ask" ~ from_clauses ~ ^"where" ~ where_clause }
+
+describe_query = { ^"describe" ~ describe_target ~ from_clauses ~ ^"where" ~ where_clause }
+
+describe_target = { star | variable+ }
 
 standalone_expression = { SOI ~ expression ~ EOI }
 

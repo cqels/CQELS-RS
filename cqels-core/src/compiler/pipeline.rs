@@ -1535,6 +1535,16 @@ fn resolve_construct_term(
     }
 }
 
+/// Converts a [`Value`] to a [`Term`], choosing IRI or Literal based on format.
+pub(crate) fn value_to_term(val: &Value) -> Term {
+    let s = val.to_string();
+    if s.starts_with("http://") || s.starts_with("https://") {
+        Term::Iri(IriTerm::new(&s))
+    } else {
+        Term::Literal(cqels_model::term::LiteralTerm::new(&s))
+    }
+}
+
 /// Converts parser AggregateFunction to expression AggregateExprFunction.
 pub(crate) fn convert_aggregate_function(f: AggregateFunction) -> AggregateExprFunction {
     match f {

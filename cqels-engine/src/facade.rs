@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use futures::StreamExt;
 
-use cqels_model::{BindingSet, CqelsError};
+use cqels_model::{BindingSet, CqelsError, Statement};
 use cqels_reasoning::ReasoningConfig;
 
 use crate::checkpoint_manager::CheckpointManager;
@@ -134,6 +134,105 @@ impl CqelsEngine {
         });
 
         Ok(query_id)
+    }
+
+    /// Registers a CONSTRUCT query and delivers results to a listener.
+    ///
+    /// Returns the assigned query ID.
+    pub async fn register_construct_query<L>(
+        &self,
+        query: &str,
+        listener: L,
+    ) -> Result<String, CqelsError>
+    where
+        L: QueryResultListener<Statement> + 'static,
+    {
+        let reg = self.runtime.register_construct_query(query).await?;
+        let query_id = reg.query_id.clone();
+
+        tokio::spawn(async move {
+            let mut stream = reg.stream;
+            while let Some(result) = stream.next().await {
+                listener.on_result(result);
+            }
+            listener.on_complete();
+        });
+
+        Ok(query_id)
+    }
+
+    /// Registers an ASK query and delivers results to a listener.
+    ///
+    /// Returns the assigned query ID.
+    pub async fn register_ask_query<L>(
+        &self,
+        query: &str,
+        listener: L,
+    ) -> Result<String, CqelsError>
+    where
+        L: QueryResultListener<bool> + 'static,
+    {
+        let reg = self.runtime.register_ask_query(query).await?;
+        let query_id = reg.query_id.clone();
+
+        tokio::spawn(async move {
+            let mut stream = reg.stream;
+            while let Some(result) = stream.next().await {
+                listener.on_result(result);
+            }
+            listener.on_complete();
+        });
+
+        Ok(query_id)
+    }
+
+    /// Registers a DESCRIBE query and delivers results to a listener.
+    ///
+    /// Returns the assigned query ID.
+    pub async fn register_describe_query<L>(
+        &self,
+        query: &str,
+        listener: L,
+    ) -> Result<String, CqelsError>
+    where
+        L: QueryResultListener<Statement> + 'static,
+    {
+        let reg = self.runtime.register_describe_query(query).await?;
+        let query_id = reg.query_id.clone();
+
+        tokio::spawn(async move {
+            let mut stream = reg.stream;
+            while let Some(result) = stream.next().await {
+                listener.on_result(result);
+            }
+            listener.on_complete();
+        });
+
+        Ok(query_id)
+    }
+
+    /// Cancels and removes a previously registered query by its ID.
+    pub async fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
+        self.runtime.unregister_query(query_id).await
+    }
+
+    /// Returns the IDs of all currently registered queries.
+    pub async fn registered_query_ids(&self) -> Vec<String> {
+        self.runtime.registered_query_ids().await
+    }
+
+    /// Loads RDF statements into the default graph of the store.
+    pub fn load_statements(&self, statements: &[Statement]) -> Result<(), CqelsError> {
+        self.runtime.load_statements(statements)
+    }
+
+    /// Loads RDF statements into a named graph.
+    pub fn load_named_graph(
+        &self,
+        graph_uri: &str,
+        statements: &[Statement],
+    ) -> Result<(), CqelsError> {
+        self.runtime.load_named_graph(graph_uri, statements)
     }
 
     /// Starts the engine, activating all registered streams.

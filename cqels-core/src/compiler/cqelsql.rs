@@ -16,7 +16,9 @@ use crate::parser::ast::{CqelsPatternGroup, CqelsQueryDefinition, SelectElement}
 use crate::parser::ParseResult;
 use crate::store::RdfStore;
 
-use super::compiled::{CompiledConstructQuery, CompiledCqelsQuery};
+use super::compiled::{
+    CompiledAskQuery, CompiledConstructQuery, CompiledCqelsQuery, CompiledDescribeQuery,
+};
 use super::pipeline::{convert_aggregate_function, hash_string, PipelineAggregateSpec};
 
 /// Compiler for CqelsQL (SPARQL-style) queries.
@@ -46,6 +48,41 @@ impl CqelsQueryCompiler {
         Ok(CompiledConstructQuery {
             inner,
             template,
+            prefixes,
+        })
+    }
+
+    /// Compiles an ASK query definition into an executable query producing booleans.
+    pub fn compile_ask(
+        query_string: &str,
+        definition: CqelsQueryDefinition,
+        rdf_store: Option<std::sync::Arc<dyn RdfStore>>,
+    ) -> ParseResult<CompiledAskQuery> {
+        let inner = Self::compile_with_store(query_string, definition, rdf_store)?;
+        Ok(CompiledAskQuery { inner })
+    }
+
+    /// Compiles a DESCRIBE query definition into an executable query producing Statements.
+    pub fn compile_describe(
+        query_string: &str,
+        definition: CqelsQueryDefinition,
+        rdf_store: Option<std::sync::Arc<dyn RdfStore>>,
+    ) -> ParseResult<CompiledDescribeQuery> {
+        let describe_vars: Vec<String> = definition
+            .select_elements
+            .iter()
+            .map(|elem| match elem {
+                SelectElement::Variable(v) => v.clone(),
+                SelectElement::Expression { alias, .. } => alias.clone(),
+            })
+            .collect();
+        let prefixes = definition.prefixes.clone();
+        let store_clone = rdf_store.clone();
+        let inner = Self::compile_with_store(query_string, definition, rdf_store)?;
+        Ok(CompiledDescribeQuery {
+            inner,
+            describe_vars,
+            rdf_store: store_clone,
             prefixes,
         })
     }
@@ -166,6 +203,7 @@ impl CqelsQueryCompiler {
 mod tests {
     use super::*;
     use crate::parser::ast::*;
+    use crate::query::ContinuousQuery;
     use std::collections::HashMap;
 
     fn make_basic_definition() -> CqelsQueryDefinition {
@@ -276,6 +314,29 @@ mod tests {
 
         let result = CqelsQueryCompiler::compile("...", def);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compile_ask_query() {
+        let mut def = make_basic_definition();
+        def.query_type = CqelsQueryType::Ask;
+        def.select_elements.clear();
+
+        let result = CqelsQueryCompiler::compile_ask("ASK ...", def, None);
+        assert!(result.is_ok());
+        let compiled = result.unwrap();
+        assert!(!compiled.query_id().is_empty());
+    }
+
+    #[test]
+    fn test_compile_describe_query() {
+        let mut def = make_basic_definition();
+        def.query_type = CqelsQueryType::Describe;
+
+        let result = CqelsQueryCompiler::compile_describe("DESCRIBE ...", def, None);
+        assert!(result.is_ok());
+        let compiled = result.unwrap();
+        assert!(!compiled.query_id().is_empty());
     }
 
     #[test]

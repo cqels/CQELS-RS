@@ -332,6 +332,27 @@ impl ReactiveStreamEngine {
         queries.keys().cloned().collect()
     }
 
+    /// Injects an event directly into a registered stream's broadcast channel.
+    ///
+    /// Used for replaying recovered events during startup. Returns an error
+    /// if the stream is not registered.
+    pub async fn inject_event(
+        &self,
+        stream_name: &str,
+        element: StreamElement,
+    ) -> Result<(), CqelsError> {
+        let streams = self.streams.lock().await;
+        match streams.get(stream_name) {
+            Some(state) => {
+                let _ = state.sender.send(element);
+                Ok(())
+            }
+            None => Err(CqelsError::Stream {
+                message: format!("stream '{}' not registered", stream_name),
+            }),
+        }
+    }
+
     async fn activate_pending(&self) {
         use futures::StreamExt;
 
@@ -1051,6 +1072,41 @@ mod tests {
         );
 
         engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_inject_event_registered_stream() {
+        let engine = ReactiveStreamEngine::new();
+        let (_tx, stream) = create_stream_pair(32);
+        engine.register_stream("test", stream).await.unwrap();
+        engine.start().await.unwrap();
+
+        let rx = engine.get_stream_receiver("test").await.unwrap();
+        let mut recv_stream = receiver_to_stream(rx);
+
+        let elem = make_rdf_element("http://s", "http://p", "injected", 42);
+        engine.inject_event("test", elem).await.unwrap();
+
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(500), recv_stream.next()).await;
+        assert!(received.is_ok());
+        assert!(received.unwrap().is_some());
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_inject_event_unknown_stream() {
+        let engine = ReactiveStreamEngine::new();
+        let elem = make_rdf_element("http://s", "http://p", "v", 1);
+        let result = engine.inject_event("nonexistent", elem).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CqelsError::Stream { message } => {
+                assert!(message.contains("not registered"));
+            }
+            other => panic!("expected Stream error, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -203,8 +203,9 @@ impl CqelsRuntime {
 
     /// Recovers state from persistence, if configured.
     ///
-    /// Deserializes journaled events and returns them for replay.
-    pub async fn recover(&self) -> Result<Vec<StreamElement>, CqelsError> {
+    /// Deserializes journaled events and returns them paired with their
+    /// stream names for replay.
+    pub async fn recover(&self) -> Result<Vec<(String, StreamElement)>, CqelsError> {
         let coord = match &self.persistence {
             Some(c) => c,
             None => return Ok(Vec::new()),
@@ -215,7 +216,9 @@ impl CqelsRuntime {
         let mut elements = Vec::new();
         for envelope in &snapshot.events {
             match deserialize_stream_element(&envelope.payload) {
-                Ok(elem) => elements.push(elem),
+                Ok(elem) => {
+                    elements.push((envelope.stream_name.clone(), elem));
+                }
                 Err(e) => {
                     tracing::warn!(
                         "skipping undeserializable event at offset {}: {e}",
@@ -230,6 +233,23 @@ impl CqelsRuntime {
             "persistence recovery complete"
         );
         Ok(elements)
+    }
+
+    /// Replays recovered events by injecting them into their respective streams.
+    async fn replay_events(&self, events: Vec<(String, StreamElement)>) {
+        let mut replayed = 0u64;
+        let mut skipped = 0u64;
+        for (stream_name, element) in events {
+            match self.engine.inject_event(&stream_name, element).await {
+                Ok(()) => replayed += 1,
+                Err(_) => skipped += 1,
+            }
+        }
+        tracing::info!(
+            replayed = replayed,
+            skipped = skipped,
+            "event replay complete"
+        );
     }
 
     /// Registers a named input stream.
@@ -266,18 +286,17 @@ impl CqelsRuntime {
 
     /// Starts the engine, activating all registered streams.
     ///
-    /// If persistence is configured, auto-recovers journaled events before
-    /// starting. Recovered events are logged but not yet replayed into streams
-    /// (replay requires stream name mapping from envelopes).
+    /// If persistence is configured, auto-recovers and replays journaled
+    /// events into their respective streams.
     pub async fn start(&self) -> Result<(), CqelsError> {
+        // Start the engine first so streams are active for replay
+        self.engine.start().await?;
+
         if self.persistence.is_some() {
             match self.recover().await {
-                Ok(elements) => {
-                    if !elements.is_empty() {
-                        tracing::info!(
-                            recovered_events = elements.len(),
-                            "auto-recovery: events recovered (replay not yet implemented)"
-                        );
+                Ok(events) => {
+                    if !events.is_empty() {
+                        self.replay_events(events).await;
                     }
                 }
                 Err(e) => {
@@ -285,7 +304,8 @@ impl CqelsRuntime {
                 }
             }
         }
-        self.engine.start().await
+
+        Ok(())
     }
 
     /// Stops the engine, cancelling all registered queries and streams.
@@ -380,6 +400,71 @@ impl CqelsRuntime {
 
         let query_id = compiled.query_id().to_string();
         tracing::info!(query_id = %query_id, "CONSTRUCT query compiled");
+        let inputs = self.engine.build_query_inputs().await;
+        let raw_stream = compiled.execute(inputs);
+        let stream = self
+            .engine
+            .wrap_with_cancellation(query_id.clone(), raw_stream)
+            .await?;
+        Ok(QueryRegistration { query_id, stream })
+    }
+
+    /// Parses, compiles, and registers an ASK query.
+    ///
+    /// Returns a [`QueryRegistration`] containing the assigned query ID
+    /// and a stream of `bool` results (`true` for each matching binding).
+    pub async fn register_ask_query(
+        &self,
+        query_string: &str,
+    ) -> Result<QueryRegistration<bool>, CqelsError> {
+        tracing::info!("registering ASK query");
+        let definition =
+            CqelsQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
+                message: format!("Parse error: {e}"),
+            })?;
+
+        let compiled =
+            CqelsQueryCompiler::compile_ask(query_string, definition, Some(self.store.clone()))
+                .map_err(|e| CqelsError::Evaluation {
+                    message: format!("Compile error: {e}"),
+                })?;
+
+        let query_id = compiled.query_id().to_string();
+        tracing::info!(query_id = %query_id, "ASK query compiled");
+        let inputs = self.engine.build_query_inputs().await;
+        let raw_stream = compiled.execute(inputs);
+        let stream = self
+            .engine
+            .wrap_with_cancellation(query_id.clone(), raw_stream)
+            .await?;
+        Ok(QueryRegistration { query_id, stream })
+    }
+
+    /// Parses, compiles, and registers a DESCRIBE query.
+    ///
+    /// Returns a [`QueryRegistration`] containing the assigned query ID
+    /// and a stream of [`Statement`] results describing the matched resources.
+    pub async fn register_describe_query(
+        &self,
+        query_string: &str,
+    ) -> Result<QueryRegistration<Statement>, CqelsError> {
+        tracing::info!("registering DESCRIBE query");
+        let definition =
+            CqelsQlParser::parse(query_string).map_err(|e| CqelsError::Evaluation {
+                message: format!("Parse error: {e}"),
+            })?;
+
+        let compiled = CqelsQueryCompiler::compile_describe(
+            query_string,
+            definition,
+            Some(self.store.clone()),
+        )
+        .map_err(|e| CqelsError::Evaluation {
+            message: format!("Compile error: {e}"),
+        })?;
+
+        let query_id = compiled.query_id().to_string();
+        tracing::info!(query_id = %query_id, "DESCRIBE query compiled");
         let inputs = self.engine.build_query_inputs().await;
         let raw_stream = compiled.execute(inputs);
         let stream = self

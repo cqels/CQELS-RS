@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{FutureExt, Stream, StreamExt};
 
-use cqels_model::{BindingSet, Statement};
+use cqels_model::{BindingSet, Statement, Term};
 
 use crate::expression::ast::Expression;
 use crate::expression::evaluator::ExpressionEvaluator;
@@ -482,6 +482,151 @@ impl ContinuousQuery for CompiledCqelsQuery {
                 projected
             }
         }
+    }
+}
+
+/// A compiled ASK query that produces `bool` — `true` for each matching binding.
+///
+/// Wraps the standard binding pipeline and maps each `BindingSet` to `true`.
+pub struct CompiledAskQuery {
+    /// The inner select-style query that produces bindings.
+    pub(crate) inner: CompiledCqelsQuery,
+}
+
+#[async_trait]
+impl ContinuousQuery for CompiledAskQuery {
+    type Result = bool;
+
+    fn query_id(&self) -> &str {
+        self.inner.query_id()
+    }
+
+    fn query_string(&self) -> &str {
+        self.inner.query_string()
+    }
+
+    fn query_type(&self) -> QueryType {
+        QueryType::Sparql
+    }
+
+    fn execute(&self, inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = bool> + Send>> {
+        let binding_stream = self.inner.execute(inputs);
+        Box::pin(binding_stream.map(|_| true))
+    }
+}
+
+/// A compiled DESCRIBE query that produces `Statement`s about each bound resource.
+///
+/// For each binding, looks up the RDF store for triples where the described
+/// resource appears as subject or object.
+pub struct CompiledDescribeQuery {
+    /// The inner select-style query that produces bindings.
+    pub(crate) inner: CompiledCqelsQuery,
+    /// Variables to describe (empty means describe all bound variables).
+    pub(crate) describe_vars: Vec<String>,
+    /// RDF store for resource lookups.
+    pub(crate) rdf_store: Option<Arc<dyn crate::store::RdfStore>>,
+    /// Prefix mappings.
+    pub(crate) prefixes: std::collections::HashMap<String, String>,
+}
+
+#[async_trait]
+impl ContinuousQuery for CompiledDescribeQuery {
+    type Result = Statement;
+
+    fn query_id(&self) -> &str {
+        self.inner.query_id()
+    }
+
+    fn query_string(&self) -> &str {
+        self.inner.query_string()
+    }
+
+    fn query_type(&self) -> QueryType {
+        QueryType::Sparql
+    }
+
+    fn execute(&self, inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = Statement> + Send>> {
+        let binding_stream = self.inner.execute(inputs);
+        let describe_vars = self.describe_vars.clone();
+        let rdf_store = self.rdf_store.clone();
+        let prefixes = self.prefixes.clone();
+
+        Box::pin(binding_stream.flat_map(move |bs| {
+            let mut stmts = Vec::new();
+
+            // Determine which variables to describe
+            let vars_to_describe: Vec<String> = if describe_vars.is_empty() {
+                // DESCRIBE * — describe all bound variables
+                bs.variables().map(|v| v.to_string()).collect()
+            } else {
+                describe_vars
+                    .iter()
+                    .map(|v| {
+                        v.strip_prefix('?')
+                            .or_else(|| v.strip_prefix('$'))
+                            .unwrap_or(v)
+                            .to_string()
+                    })
+                    .collect()
+            };
+
+            if let Some(ref store) = rdf_store {
+                for var in &vars_to_describe {
+                    if let Some(value) = bs.get(var) {
+                        let resource_uri = value.to_string();
+                        // Query for triples where resource is subject
+                        let as_subject = crate::parser::ast::TriplePattern {
+                            subject: format!("<{resource_uri}>"),
+                            predicate: "?_p".to_string(),
+                            object: "?_o".to_string(),
+                        };
+                        let results = store.query_pattern(&as_subject, &prefixes);
+                        for result_bs in &results {
+                            if let (Some(p_val), Some(o_val)) =
+                                (result_bs.get("_p"), result_bs.get("_o"))
+                            {
+                                let subject =
+                                    Term::Iri(cqels_model::term::IriTerm::new(&resource_uri));
+                                let predicate = cqels_model::term::IriTerm::new(
+                                    p_val
+                                        .to_string()
+                                        .trim_start_matches('<')
+                                        .trim_end_matches('>'),
+                                );
+                                let object = super::pipeline::value_to_term(o_val);
+                                stmts.push(Statement::new(subject, predicate, object));
+                            }
+                        }
+                        // Query for triples where resource is object
+                        let as_object = crate::parser::ast::TriplePattern {
+                            subject: "?_s".to_string(),
+                            predicate: "?_p".to_string(),
+                            object: format!("<{resource_uri}>"),
+                        };
+                        let results = store.query_pattern(&as_object, &prefixes);
+                        for result_bs in &results {
+                            if let (Some(s_val), Some(p_val)) =
+                                (result_bs.get("_s"), result_bs.get("_p"))
+                            {
+                                let subject = super::pipeline::value_to_term(s_val);
+                                let predicate = cqels_model::term::IriTerm::new(
+                                    p_val
+                                        .to_string()
+                                        .trim_start_matches('<')
+                                        .trim_end_matches('>'),
+                                );
+                                let object =
+                                    Term::Iri(cqels_model::term::IriTerm::new(&resource_uri));
+                                stmts.push(Statement::new(subject, predicate, object));
+                            }
+                        }
+                    }
+                }
+            }
+
+            futures::stream::iter(stmts)
+        }))
     }
 }
 

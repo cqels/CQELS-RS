@@ -12,7 +12,10 @@ pub mod cqelsql;
 pub mod cypherql;
 pub mod pipeline;
 
-pub use compiled::{CompiledConstructQuery, CompiledCqelsQuery, CompiledCypherQuery};
+pub use compiled::{
+    CompiledAskQuery, CompiledConstructQuery, CompiledCqelsQuery, CompiledCypherQuery,
+    CompiledDescribeQuery,
+};
 pub use cqelsql::CqelsQueryCompiler;
 pub use cypherql::CypherQueryCompiler;
 
@@ -28,5 +31,8 @@ mod tests {
         fn _assert_cypher_compiler(_: &CypherQueryCompiler) {}
         fn _assert_compiled_cqels(_: &CompiledCqelsQuery) {}
         fn _assert_compiled_cypher(_: &CompiledCypherQuery) {}
+        fn _assert_compiled_ask(_: &CompiledAskQuery) {}
+        fn _assert_compiled_describe(_: &CompiledDescribeQuery) {}
+        fn _assert_compiled_construct(_: &CompiledConstructQuery) {}
     }
 }
