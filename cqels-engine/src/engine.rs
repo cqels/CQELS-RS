@@ -344,7 +344,12 @@ impl ReactiveStreamEngine {
         let streams = self.streams.lock().await;
         match streams.get(stream_name) {
             Some(state) => {
-                let _ = state.sender.send(element);
+                if state.sender.send(element).is_err() {
+                    tracing::debug!(
+                        stream = %stream_name,
+                        "inject_event: no active receivers"
+                    );
+                }
                 Ok(())
             }
             None => Err(CqelsError::Stream {

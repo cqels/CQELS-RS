@@ -552,29 +552,37 @@ impl ContinuousQuery for CompiledDescribeQuery {
         let rdf_store = self.rdf_store.clone();
         let prefixes = self.prefixes.clone();
 
+        // Pre-strip variable prefixes once (not per-binding)
+        let stripped_vars: Vec<String> = describe_vars
+            .iter()
+            .map(|v| {
+                v.strip_prefix('?')
+                    .or_else(|| v.strip_prefix('$'))
+                    .unwrap_or(v)
+                    .to_string()
+            })
+            .collect();
+
         Box::pin(binding_stream.flat_map(move |bs| {
             let mut stmts = Vec::new();
 
             // Determine which variables to describe
-            let vars_to_describe: Vec<String> = if describe_vars.is_empty() {
+            let vars_to_describe: Vec<String> = if stripped_vars.is_empty() {
                 // DESCRIBE * — describe all bound variables
                 bs.variables().map(|v| v.to_string()).collect()
             } else {
-                describe_vars
-                    .iter()
-                    .map(|v| {
-                        v.strip_prefix('?')
-                            .or_else(|| v.strip_prefix('$'))
-                            .unwrap_or(v)
-                            .to_string()
-                    })
-                    .collect()
+                stripped_vars.clone()
             };
 
             if let Some(ref store) = rdf_store {
                 for var in &vars_to_describe {
                     if let Some(value) = bs.get(var) {
-                        let resource_uri = value.to_string();
+                        // Extract raw URI string using as_string() to avoid
+                        // Display formatting artifacts (angle brackets, quotes).
+                        let resource_uri = match value.as_string() {
+                            Some(s) => s.to_string(),
+                            None => continue,
+                        };
                         // Query for triples where resource is subject
                         let as_subject = crate::parser::ast::TriplePattern {
                             subject: format!("<{resource_uri}>"),
@@ -589,10 +597,7 @@ impl ContinuousQuery for CompiledDescribeQuery {
                                 let subject =
                                     Term::Iri(cqels_model::term::IriTerm::new(&resource_uri));
                                 let predicate = cqels_model::term::IriTerm::new(
-                                    p_val
-                                        .to_string()
-                                        .trim_start_matches('<')
-                                        .trim_end_matches('>'),
+                                    p_val.as_string().unwrap_or(""),
                                 );
                                 let object = super::pipeline::value_to_term(o_val);
                                 stmts.push(Statement::new(subject, predicate, object));
@@ -611,10 +616,7 @@ impl ContinuousQuery for CompiledDescribeQuery {
                             {
                                 let subject = super::pipeline::value_to_term(s_val);
                                 let predicate = cqels_model::term::IriTerm::new(
-                                    p_val
-                                        .to_string()
-                                        .trim_start_matches('<')
-                                        .trim_end_matches('>'),
+                                    p_val.as_string().unwrap_or(""),
                                 );
                                 let object =
                                     Term::Iri(cqels_model::term::IriTerm::new(&resource_uri));

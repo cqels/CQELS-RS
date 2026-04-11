@@ -1535,14 +1535,13 @@ fn resolve_construct_term(
     }
 }
 
-/// Converts a [`Value`] to a [`Term`], choosing IRI or Literal based on format.
+/// Converts a [`Value`] to a [`Term`], preserving type information.
+///
+/// Delegates to [`Value::to_term()`] for correct handling of IRIs, typed
+/// literals, and booleans. Returns an empty-string literal for `Value::Null`.
 pub(crate) fn value_to_term(val: &Value) -> Term {
-    let s = val.to_string();
-    if s.starts_with("http://") || s.starts_with("https://") {
-        Term::Iri(IriTerm::new(&s))
-    } else {
-        Term::Literal(cqels_model::term::LiteralTerm::new(&s))
-    }
+    val.to_term()
+        .unwrap_or_else(|| Term::Literal(cqels_model::term::LiteralTerm::new("")))
 }
 
 /// Converts parser AggregateFunction to expression AggregateExprFunction.

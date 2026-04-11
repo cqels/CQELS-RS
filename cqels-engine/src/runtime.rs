@@ -242,7 +242,13 @@ impl CqelsRuntime {
         for (stream_name, element) in events {
             match self.engine.inject_event(&stream_name, element).await {
                 Ok(()) => replayed += 1,
-                Err(_) => skipped += 1,
+                Err(e) => {
+                    tracing::debug!(
+                        stream = %stream_name,
+                        "replay skipped: {e}"
+                    );
+                    skipped += 1;
+                }
             }
         }
         tracing::info!(

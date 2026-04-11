@@ -148,6 +148,67 @@ async fn test_construct_query_via_facade() {
 }
 
 #[tokio::test]
+async fn test_describe_query_via_facade() {
+    use cqels_model::term::{IriTerm, LiteralTerm};
+    use cqels_model::Term;
+
+    let mut engine = CqelsEngine::builder().id("describe-e2e").build().unwrap();
+
+    // Load static data that DESCRIBE will look up
+    let stmts = vec![
+        Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/alice")),
+            IriTerm::new("http://ex.org/name"),
+            Term::Literal(LiteralTerm::new("Alice")),
+        ),
+        Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/alice")),
+            IriTerm::new("http://ex.org/age"),
+            Term::Literal(LiteralTerm::new("30")),
+        ),
+    ];
+    engine.load_statements(&stmts).unwrap();
+
+    let stream = engine.create_stream("people").await.unwrap();
+
+    let (listener, results) = StatementCollector::new();
+    let query = r#"
+        DESCRIBE ?x FROM STREAM people [NOW]
+        WHERE { ?x <http://ex.org/knows> ?y . }
+    "#;
+    let _query_id = engine
+        .register_describe_query(query, listener)
+        .await
+        .unwrap();
+
+    engine.start().await.unwrap();
+
+    // Push a stream event that matches the WHERE pattern
+    stream
+        .push_triple(
+            "http://ex.org/alice",
+            "http://ex.org/knows",
+            "http://ex.org/bob",
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    {
+        let collected = results.lock().unwrap();
+        // DESCRIBE should produce statements about alice from the store
+        // (at least the two we loaded: name and age)
+        assert!(
+            !collected.is_empty(),
+            "DESCRIBE should produce statements about the described resource"
+        );
+    }
+
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_query_lifecycle_register_unregister() {
     let mut engine = CqelsEngine::builder().id("lifecycle-e2e").build().unwrap();
 
