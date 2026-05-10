@@ -44,7 +44,7 @@ Per the project's behavioral guidelines:
 - [x] Add `SEQ(...)` built-in recognized inside `FILTER` (grammar + AST).
 - [x] Compile `FILTER(SEQ(...))` AST nodes to existing `cqels-engine` NFA pipeline.
 - **Verify:** 7 parser parity tests + 9 `CepPatternCompiler` tests covering ordering, quantifiers, negation, alias, and window propagation; end-to-end tests run the compiled `Pattern` through `NfaPatternProcessor` over a stream of `RdfStreamElement`s.
-- **Not yet ported (follow-up):** Java's per-event FILTER predicates (single-event `where_cond`) and cross-event `where_context` guards. These require wiring an expression evaluator (which exists in `cqels-core::expression`) into the compiler.
+- [x] **Single-event + cross-event FILTER predicates** wired into the compiler via `cqels-core::expression::ExpressionEvaluator`. `classify_filters` walks WHERE-level `Filter` groups, parses each expression, classifies by the set of event variables it references, and attaches single-event filters as `where_cond` on that event's stage or cross-event filters as `where_context` on the latest referenced stage. `bind_event_variables` constructs a `BindingSet` from the matched stream element using the event's triple patterns. 4 new e2e tests (single-event keep/drop + cross-event keep/drop) and 1 unit test for variable collection.
 
 ## Phase 2 — Windowing maturity
 
