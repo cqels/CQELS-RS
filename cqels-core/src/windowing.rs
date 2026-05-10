@@ -29,9 +29,13 @@ use std::time::Duration;
 
 use crate::stream::TimestampedValue;
 
+pub mod delta;
 pub mod processor;
+pub mod timeout;
 
+pub use delta::{DeltaEvictor, DeltaFunction, DeltaTrigger};
 pub use processor::{TriggerableWindowProcessor, WindowEmission};
+pub use timeout::ProcessingTimeoutTrigger;
 
 // ─── Window bounds ──────────────────────────────────────────────────────────
 
