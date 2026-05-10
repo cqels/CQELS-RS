@@ -324,6 +324,79 @@ pub enum CqelsPatternGroup {
     },
     /// MINUS — anti-join: filter out results where patterns match.
     Minus { patterns: Vec<TriplePattern> },
+    /// CEP sequence constraint from `FILTER(SEQ(?e1; ?e2; ...))`.
+    Seq(SeqConstraint),
+}
+
+/// CEP sequence constraint from `FILTER(SEQ(?e1; ?e2; ...))`.
+///
+/// Enforces temporal ordering on event variables matched in the graph pattern.
+/// Maps to Java's `CqelsQueryDefinition.SeqConstraint`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeqConstraint {
+    /// Ordered list of event variable arguments.
+    pub args: Vec<SeqArg>,
+}
+
+impl SeqConstraint {
+    /// Returns the non-negated event variable names in sequence order.
+    pub fn event_variables(&self) -> Vec<String> {
+        self.args
+            .iter()
+            .filter(|a| !a.negated)
+            .map(|a| a.variable.clone())
+            .collect()
+    }
+}
+
+/// Sentinel meaning "unbounded" maximum in a `SeqArg` quantifier (`+`, `*`).
+pub const SEQ_UNBOUNDED: u32 = u32::MAX;
+
+/// A single event argument inside a `SEQ()` constraint.
+///
+/// Mirrors Java's `CqelsQueryDefinition.SeqArg`: variable name, optional
+/// negation, occurrence range, and optional alias.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeqArg {
+    /// Variable name without the leading `?`.
+    pub variable: String,
+    /// `true` when prefixed with `NOT` — event must NOT appear in this slot.
+    pub negated: bool,
+    /// Minimum occurrences (default 1).
+    pub min_occurrences: u32,
+    /// Maximum occurrences; `SEQ_UNBOUNDED` for `+`/`*`.
+    pub max_occurrences: u32,
+    /// Optional state alias from `AS <name>`.
+    pub alias: Option<String>,
+}
+
+impl SeqArg {
+    /// Single-occurrence positional argument (`?e`).
+    pub fn single(variable: impl Into<String>) -> Self {
+        Self {
+            variable: variable.into(),
+            negated: false,
+            min_occurrences: 1,
+            max_occurrences: 1,
+            alias: None,
+        }
+    }
+
+    pub fn is_single(&self) -> bool {
+        self.min_occurrences == 1 && self.max_occurrences == 1
+    }
+
+    pub fn is_optional(&self) -> bool {
+        self.min_occurrences == 0 && self.max_occurrences == 1
+    }
+
+    pub fn is_one_or_more(&self) -> bool {
+        self.min_occurrences == 1 && self.max_occurrences == SEQ_UNBOUNDED
+    }
+
+    pub fn is_zero_or_more(&self) -> bool {
+        self.min_occurrences == 0 && self.max_occurrences == SEQ_UNBOUNDED
+    }
 }
 
 /// Operator execution hints for CqelsQL.
@@ -380,6 +453,8 @@ pub struct CqelsQueryDefinition {
     pub stream_semantics: StreamSemantics,
     /// Template for CONSTRUCT queries.
     pub construct_template: Vec<TriplePattern>,
+    /// CEP sequence constraint from `FILTER(SEQ(...))`, if any.
+    pub seq_constraint: Option<SeqConstraint>,
 }
 
 impl CqelsQueryDefinition {
@@ -424,6 +499,7 @@ pub struct CqelsQueryDefinitionBuilder {
     operator_hints: OperatorHints,
     stream_semantics: StreamSemantics,
     construct_template: Vec<TriplePattern>,
+    seq_constraint: Option<SeqConstraint>,
 }
 
 impl CqelsQueryDefinitionBuilder {
@@ -527,6 +603,12 @@ impl CqelsQueryDefinitionBuilder {
         self
     }
 
+    /// Sets the CEP sequence constraint built from `FILTER(SEQ(...))`.
+    pub fn seq_constraint(mut self, constraint: SeqConstraint) -> Self {
+        self.seq_constraint = Some(constraint);
+        self
+    }
+
     pub fn build(self) -> CqelsQueryDefinition {
         CqelsQueryDefinition {
             name: self.name,
@@ -546,6 +628,7 @@ impl CqelsQueryDefinitionBuilder {
             operator_hints: self.operator_hints,
             stream_semantics: self.stream_semantics,
             construct_template: self.construct_template,
+            seq_constraint: self.seq_constraint,
         }
     }
 }

@@ -481,6 +481,12 @@ impl<T: Clone + Send + Sync + 'static> Pattern<T> {
         &self.quantifier
     }
 
+    /// Returns the previous (upstream) state in the pattern chain, or
+    /// `None` if this is the initial `begin` state.
+    pub fn previous(&self) -> Option<&Pattern<T>> {
+        self.previous.as_deref()
+    }
+
     pub fn time_window(&self) -> Option<Duration> {
         self.time_window
     }

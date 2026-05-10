@@ -1046,6 +1046,7 @@ mod tests {
             operator_hints: OperatorHints::default(),
             stream_semantics: StreamSemantics::default(),
             construct_template: vec![],
+            seq_constraint: None,
         };
 
         let query = CompiledCqelsQuery {

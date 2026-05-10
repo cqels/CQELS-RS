@@ -133,7 +133,20 @@ pattern_group = {
     | triple_pattern
 }
 
-filter_constraint = { ^"filter" ~ "(" ~ expression ~ ")" }
+filter_constraint = { ^"filter" ~ "(" ~ (seq_call | expression) ~ ")" }
+
+// ─── CEP sequence constraint: FILTER(SEQ(?e1; ?e2; ...)) ────────────────────
+// Mirrors Java's seqExpression grammar (PR #36). At least two args; uses ';'
+// as the CEL-style sequence separator. NOT prefix negates an event slot.
+seq_call = { ^"seq" ~ "(" ~ seq_arg ~ (";" ~ seq_arg)+ ~ ")" }
+seq_arg = { seq_not_kw? ~ variable ~ seq_quantifier? ~ (^"as" ~ identifier)? }
+seq_not_kw = @{ ^"not" ~ &(WHITESPACE | "?" | "$") }
+seq_quantifier = {
+    "+"
+    | "*"
+    | "?"
+    | ("{" ~ integer ~ ("," ~ integer)? ~ "}")
+}
 
 bind_pattern = { ^"bind" ~ "(" ~ expression ~ ^"as" ~ variable ~ ")" }
 

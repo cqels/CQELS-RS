@@ -41,9 +41,10 @@ Per the project's behavioral guidelines:
 
 ### 1.3 Declarative CEP via FILTER(SEQ()) (Java PR #36)
 
-- [ ] Add `SEQ(...)` built-in recognized inside `FILTER`.
-- [ ] Compile `FILTER(SEQ(...))` AST nodes to existing `cqels-engine` NFA pipeline.
-- **Verify:** port Java's `DeclarativeCepTest`; identical event matches.
+- [x] Add `SEQ(...)` built-in recognized inside `FILTER` (grammar + AST).
+- [x] Compile `FILTER(SEQ(...))` AST nodes to existing `cqels-engine` NFA pipeline.
+- **Verify:** 7 parser parity tests + 9 `CepPatternCompiler` tests covering ordering, quantifiers, negation, alias, and window propagation; end-to-end tests run the compiled `Pattern` through `NfaPatternProcessor` over a stream of `RdfStreamElement`s.
+- **Not yet ported (follow-up):** Java's per-event FILTER predicates (single-event `where_cond`) and cross-event `where_context` guards. These require wiring an expression evaluator (which exists in `cqels-core::expression`) into the compiler.
 
 ## Phase 2 — Windowing maturity
 
@@ -79,3 +80,4 @@ Decision deferred until Phase 1 completes — benchmarks and user demand will dr
 
 - **1.1 MinusOperator** — `cqels-core/src/operator/minus.rs`, 14 parity tests; SPARQL 1.1 §8.3 compatibility, disjoint-domain anti-join semantics. Skipped Java's `Builder` and `Duration` timeout (not needed in Rust idiom).
 - **1.2a Implicit stream binding** — `apply_implicit_stream_binding` in `cqels-core/src/parser/cqelsql.rs`. Bare triple patterns auto-bind to the single FROM STREAM when no explicit STREAM block / multiple streams / static or named graphs are present. 6 parser parity tests; updated existing `test_parse_rdf_type_shorthand`. Also exposed `streams()` / `static_graphs()` / `named_graphs()` accessors on the builder.
+- **1.3 Declarative CEP via FILTER(SEQ())** — `SeqConstraint`/`SeqArg` AST in `cqels-core::parser::ast`, pest grammar rules (`seq_call`, `seq_arg`, `seq_quantifier`, `seq_not_kw`), parser logic in `parse_seq_call`/`parse_seq_arg`, and `CepPatternCompiler` in `cqels-engine::cep_compiler` that maps SEQ to `Pattern<RdfStreamElement>`. 7 parser tests + 9 compiler tests including 2 end-to-end through `NfaPatternProcessor`. Added `Pattern::previous()` accessor for chain introspection. Not yet ported: single-event/cross-event FILTER predicate evaluation (needs expression evaluator wiring).

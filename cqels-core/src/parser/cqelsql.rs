@@ -539,7 +539,20 @@ fn parse_where_clause(
 
     apply_implicit_stream_binding(&mut groups, &builder);
 
+    // Hoist any FILTER(SEQ(...)) pattern group to the top-level
+    // `seq_constraint` field on the query definition (Java parity:
+    // SeqConstraint lives on QueryDefinition, not inside a pattern group).
+    let mut hoisted_groups = Vec::with_capacity(groups.len());
     for group in groups {
+        match group {
+            CqelsPatternGroup::Seq(seq) => {
+                builder = builder.seq_constraint(seq);
+            }
+            other => hoisted_groups.push(other),
+        }
+    }
+
+    for group in hoisted_groups {
         builder = builder.add_pattern_group(group);
     }
     Ok(builder)
@@ -632,12 +645,15 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPa
                 });
             }
             Rule::filter_constraint => {
-                let expr = inner
-                    .into_inner()
-                    .next()
-                    .map(|p| p.as_str().to_string())
-                    .unwrap_or_default();
-                return Ok(CqelsPatternGroup::Filter { expression: expr });
+                let inner_pair = inner.into_inner().next().ok_or_else(|| {
+                    ParseError::Syntax("filter constraint missing content".into())
+                })?;
+                return match inner_pair.as_rule() {
+                    Rule::seq_call => Ok(CqelsPatternGroup::Seq(parse_seq_call(inner_pair)?)),
+                    _ => Ok(CqelsPatternGroup::Filter {
+                        expression: inner_pair.as_str().to_string(),
+                    }),
+                };
             }
             Rule::bind_pattern => {
                 let mut it = inner.into_inner();
@@ -751,6 +767,86 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPa
         }
     }
     Err(ParseError::Syntax("invalid pattern group".into()))
+}
+
+fn parse_seq_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<SeqConstraint> {
+    let mut args = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::seq_arg {
+            args.push(parse_seq_arg(inner)?);
+        }
+    }
+    if args.len() < 2 {
+        return Err(ParseError::Syntax(
+            "SEQ requires at least 2 event arguments".into(),
+        ));
+    }
+    Ok(SeqConstraint { args })
+}
+
+fn parse_seq_arg(pair: pest::iterators::Pair<Rule>) -> ParseResult<SeqArg> {
+    let mut negated = false;
+    let mut variable: Option<String> = None;
+    let mut min_occurrences: u32 = 1;
+    let mut max_occurrences: u32 = 1;
+    let mut alias: Option<String> = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::seq_not_kw => negated = true,
+            Rule::variable => {
+                let raw = inner.as_str();
+                variable = Some(raw.trim_start_matches(['?', '$']).to_string());
+            }
+            Rule::seq_quantifier => {
+                let inner_ints: Vec<u32> = inner
+                    .clone()
+                    .into_inner()
+                    .filter(|p| p.as_rule() == Rule::integer)
+                    .filter_map(|p| p.as_str().parse().ok())
+                    .collect();
+                if inner_ints.is_empty() {
+                    match inner.as_str().trim() {
+                        "+" => {
+                            min_occurrences = 1;
+                            max_occurrences = SEQ_UNBOUNDED;
+                        }
+                        "*" => {
+                            min_occurrences = 0;
+                            max_occurrences = SEQ_UNBOUNDED;
+                        }
+                        "?" => {
+                            min_occurrences = 0;
+                            max_occurrences = 1;
+                        }
+                        other => {
+                            return Err(ParseError::Syntax(format!(
+                                "unrecognized SEQ quantifier `{other}`"
+                            )));
+                        }
+                    }
+                } else if inner_ints.len() == 1 {
+                    min_occurrences = inner_ints[0];
+                    max_occurrences = inner_ints[0];
+                } else {
+                    min_occurrences = inner_ints[0];
+                    max_occurrences = inner_ints[1];
+                }
+            }
+            Rule::identifier => alias = Some(inner.as_str().to_string()),
+            _ => {}
+        }
+    }
+
+    let variable = variable.ok_or_else(|| ParseError::Syntax("SEQ arg missing variable".into()))?;
+
+    Ok(SeqArg {
+        variable,
+        negated,
+        min_occurrences,
+        max_occurrences,
+        alias,
+    })
 }
 
 fn parse_triple_patterns(pair: pest::iterators::Pair<Rule>) -> ParseResult<Vec<TriplePattern>> {
@@ -1204,6 +1300,151 @@ mod tests {
             CqelsPatternGroup::Default { .. } => {}
             other => panic!("expected Default group when static graph declared, got {other:?}"),
         }
+    }
+
+    // ─── Declarative CEP — FILTER(SEQ(...)) (Java PR #36) ────────────────────
+
+    #[test]
+    fn seq_simple_two_event_sequence() {
+        let query = r#"
+            SELECT ?e1 ?e2
+            FROM STREAM events [RANGE 10s]
+            WHERE {
+                ?e1 a <http://ex.org/Alert> .
+                ?e2 a <http://ex.org/Alert> .
+                FILTER(SEQ(?e1; ?e2))
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        let seq = result.seq_constraint.as_ref().expect("expected SEQ");
+        assert_eq!(seq.args.len(), 2);
+        assert_eq!(seq.args[0].variable, "e1");
+        assert_eq!(seq.args[1].variable, "e2");
+        assert!(seq.args.iter().all(|a| a.is_single()));
+        // SEQ pattern group should be hoisted out — no Filter group should remain.
+        assert!(!result.pattern_groups.iter().any(|g| matches!(
+            g,
+            CqelsPatternGroup::Filter { .. } | CqelsPatternGroup::Seq(_)
+        )));
+    }
+
+    #[test]
+    fn seq_with_negation_and_quantifiers() {
+        let query = r#"
+            SELECT ?a ?b ?c
+            FROM STREAM events [RANGE 5s]
+            WHERE {
+                ?a a <http://ex.org/A> .
+                ?b a <http://ex.org/B> .
+                ?c a <http://ex.org/C> .
+                FILTER(SEQ(?a; NOT ?b; ?c+))
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        let seq = result.seq_constraint.unwrap();
+        assert_eq!(seq.args.len(), 3);
+        assert!(!seq.args[0].negated);
+        assert!(seq.args[1].negated);
+        assert!(seq.args[2].is_one_or_more());
+        assert_eq!(seq.event_variables(), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn seq_with_explicit_quantifier_ranges() {
+        let query = r#"
+            SELECT ?a ?b
+            FROM STREAM events [RANGE 5s]
+            WHERE {
+                ?a a <http://ex.org/A> .
+                ?b a <http://ex.org/B> .
+                FILTER(SEQ(?a{3}; ?b{2,5}))
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        let seq = result.seq_constraint.unwrap();
+        assert_eq!(seq.args[0].min_occurrences, 3);
+        assert_eq!(seq.args[0].max_occurrences, 3);
+        assert_eq!(seq.args[1].min_occurrences, 2);
+        assert_eq!(seq.args[1].max_occurrences, 5);
+    }
+
+    #[test]
+    fn seq_with_zero_or_more_and_optional() {
+        let query = r#"
+            SELECT ?a ?b ?c
+            FROM STREAM events [RANGE 5s]
+            WHERE {
+                ?a a <http://ex.org/A> .
+                ?b a <http://ex.org/B> .
+                ?c a <http://ex.org/C> .
+                FILTER(SEQ(?a; ?b*; ?c?))
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        let seq = result.seq_constraint.unwrap();
+        assert!(seq.args[0].is_single());
+        assert!(seq.args[1].is_zero_or_more());
+        assert!(seq.args[2].is_optional());
+    }
+
+    #[test]
+    fn seq_with_alias_via_as() {
+        let query = r#"
+            SELECT ?e1 ?e2
+            FROM STREAM events [RANGE 5s]
+            WHERE {
+                ?e1 a <http://ex.org/Alert> .
+                ?e2 a <http://ex.org/Alert> .
+                FILTER(SEQ(?e1 AS first; ?e2 AS second))
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        let seq = result.seq_constraint.unwrap();
+        assert_eq!(seq.args[0].alias.as_deref(), Some("first"));
+        assert_eq!(seq.args[1].alias.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn seq_lowercase_keyword_accepted() {
+        // SEQ keyword is case-insensitive (Java grammar: SEQ : 'SEQ' | 'seq').
+        let query = r#"
+            SELECT ?a ?b
+            FROM STREAM events [RANGE 5s]
+            WHERE {
+                ?a a <http://ex.org/A> .
+                ?b a <http://ex.org/B> .
+                FILTER(seq(?a; ?b))
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert!(result.seq_constraint.is_some());
+    }
+
+    #[test]
+    fn seq_single_arg_falls_through_to_regular_filter() {
+        // SEQ requires at least 2 args (Java semantics). With a single arg,
+        // the `seq_call` grammar rule (which requires `;`) doesn't match, so
+        // the filter falls through to the regular `expression` alternative —
+        // `seq(?a)` then parses as a generic function-call expression.
+        // No SeqConstraint is built; downstream consumers see no SEQ.
+        let query = r#"
+            SELECT ?a
+            FROM STREAM events [RANGE 5s]
+            WHERE {
+                ?a a <http://ex.org/A> .
+                FILTER(SEQ(?a))
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert!(
+            result.seq_constraint.is_none(),
+            "single-arg SEQ must NOT produce a SeqConstraint"
+        );
+        let saw_filter = result
+            .pattern_groups
+            .iter()
+            .any(|g| matches!(g, CqelsPatternGroup::Filter { .. }));
+        assert!(saw_filter, "single-arg SEQ should remain as a filter");
     }
 
     #[test]
