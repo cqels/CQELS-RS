@@ -1,11 +1,14 @@
 //! Join operators for combining two streams within time windows.
 //!
 //! Provides [`WindowedJoinState`] for symmetric time-window joins,
+//! [`WindowedSelfJoinState`] for indexed self-joins over a single stream
+//! (Java PR #25 — replaces O(N·M) cross-product with hash-keyed lookup),
 //! [`IntervalJoinState`] for asymmetric interval joins,
 //! [`GraphPatternJoinState`] for incremental RDF graph pattern matching,
 //! and [`VariableLengthPathOperator`] for bounded BFS traversal.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::Hash;
 use std::time::Duration;
 
 use cqels_model::Statement;
@@ -151,6 +154,142 @@ impl<L: Clone, R: Clone> WindowedJoinState<L, R> {
         let cutoff = watermark - self.window_size_ms;
         self.left_buffer = self.left_buffer.split_off(&cutoff);
         self.right_buffer = self.right_buffer.split_off(&cutoff);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windowed Self-Join (Indexed Hash)
+// ---------------------------------------------------------------------------
+
+/// Indexed self-join over a single stream within a time window.
+///
+/// Mirrors Java PR #25's `WindowedSelfJoinOperator` optimization: when the
+/// query has two stream patterns over the same stream sharing a join key,
+/// the nested-loop cross-product is replaced by an O(N+M) hash-indexed
+/// lookup. Each element is inserted with a caller-supplied join key; on
+/// insert, the operator emits pairs of (existing, new) elements sharing
+/// the same key and whose timestamps lie within the window.
+///
+/// The operator does NOT emit the trivial self-pair `(e, e)`.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cqels_core::operator::join::WindowedSelfJoinState;
+///
+/// let mut state = WindowedSelfJoinState::new(Duration::from_secs(10));
+/// // Pair drivers with later drivers reporting the same vehicle id.
+/// let pairs = state.add(("alice", "v1"), 1_000, |(_, vid)| *vid);
+/// assert!(pairs.is_empty());
+/// let pairs = state.add(("bob", "v1"), 5_000, |(_, vid)| *vid);
+/// assert_eq!(pairs.len(), 1);
+/// assert_eq!(pairs[0].first.0, "alice");
+/// assert_eq!(pairs[0].second.0, "bob");
+/// ```
+#[derive(Debug)]
+pub struct WindowedSelfJoinState<T: Clone, K: Clone + Eq + Hash> {
+    /// Time-ordered buffer of all events for window eviction.
+    buffer: BTreeMap<i64, Vec<(T, K)>>,
+    /// Hash index keyed by join key, value is a time-ordered list of
+    /// `(timestamp, element)` for matches within the window.
+    index: HashMap<K, BTreeMap<i64, Vec<T>>>,
+    window_size_ms: i64,
+    current_watermark: i64,
+}
+
+/// An emitted pair from a [`WindowedSelfJoinState`]: an earlier element
+/// joined with a newer one sharing the same key, both within the window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelfJoinPair<T> {
+    pub first: T,
+    pub second: T,
+    pub timestamp: i64,
+}
+
+impl<T: Clone, K: Clone + Eq + Hash> WindowedSelfJoinState<T, K> {
+    pub fn new(window_size: Duration) -> Self {
+        Self {
+            buffer: BTreeMap::new(),
+            index: HashMap::new(),
+            window_size_ms: window_size.as_millis() as i64,
+            current_watermark: i64::MIN,
+        }
+    }
+
+    /// Inserts an element and emits self-join pairs with prior elements
+    /// sharing the same key (extracted via `key_fn`) within the window.
+    ///
+    /// The current element is the *second* member of each emitted pair;
+    /// earlier matches are the *first*.
+    pub fn add<F: Fn(&T) -> K>(
+        &mut self,
+        element: T,
+        timestamp: i64,
+        key_fn: F,
+    ) -> Vec<SelfJoinPair<T>> {
+        let key = key_fn(&element);
+        let lower_bound = timestamp - self.window_size_ms;
+
+        let mut results = Vec::new();
+        if let Some(bucket) = self.index.get(&key) {
+            for (_ts, earlier_elements) in bucket.range(lower_bound..=timestamp) {
+                for earlier in earlier_elements {
+                    results.push(SelfJoinPair {
+                        first: earlier.clone(),
+                        second: element.clone(),
+                        timestamp,
+                    });
+                }
+            }
+        }
+
+        self.buffer
+            .entry(timestamp)
+            .or_default()
+            .push((element.clone(), key.clone()));
+        self.index
+            .entry(key)
+            .or_default()
+            .entry(timestamp)
+            .or_default()
+            .push(element);
+
+        results
+    }
+
+    /// Advances the watermark, evicting expired elements from both buffer
+    /// and per-key index.
+    pub fn advance_watermark(&mut self, watermark: i64) {
+        self.current_watermark = watermark;
+        let cutoff = watermark - self.window_size_ms;
+
+        let expired = self
+            .buffer
+            .range(..cutoff)
+            .map(|(ts, _)| *ts)
+            .collect::<Vec<_>>();
+        for ts in &expired {
+            if let Some(removed) = self.buffer.remove(ts) {
+                for (_elem, key) in removed {
+                    if let Some(bucket) = self.index.get_mut(&key) {
+                        bucket.remove(ts);
+                        if bucket.is_empty() {
+                            self.index.remove(&key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Number of elements currently buffered.
+    pub fn len(&self) -> usize {
+        self.buffer.values().map(|v| v.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
     }
 }
 
@@ -796,5 +935,110 @@ mod tests {
         assert_eq!(jr.timestamp, 1000);
         let cloned = jr.clone();
         assert_eq!(cloned.value, jr.value);
+    }
+
+    // ─── Windowed self-join (Java PR #25) ────────────────────────────────────
+
+    #[test]
+    fn self_join_emits_pair_for_matching_key_within_window() {
+        let mut state: WindowedSelfJoinState<(&str, &str), &str> =
+            WindowedSelfJoinState::new(Duration::from_secs(10));
+        let p1 = state.add(("alice", "v1"), 1_000, |(_, vid)| *vid);
+        assert!(p1.is_empty());
+        let p2 = state.add(("bob", "v1"), 5_000, |(_, vid)| *vid);
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0].first.0, "alice");
+        assert_eq!(p2[0].second.0, "bob");
+        assert_eq!(p2[0].timestamp, 5_000);
+    }
+
+    #[test]
+    fn self_join_does_not_emit_for_different_key() {
+        let mut state: WindowedSelfJoinState<(&str, &str), &str> =
+            WindowedSelfJoinState::new(Duration::from_secs(10));
+        state.add(("alice", "v1"), 1_000, |(_, vid)| *vid);
+        let p2 = state.add(("bob", "v2"), 2_000, |(_, vid)| *vid);
+        assert!(p2.is_empty(), "different vehicle ids should not join");
+    }
+
+    #[test]
+    fn self_join_does_not_emit_when_window_expired() {
+        let mut state: WindowedSelfJoinState<(&str, &str), &str> =
+            WindowedSelfJoinState::new(Duration::from_secs(1));
+        state.add(("alice", "v1"), 1_000, |(_, vid)| *vid);
+        // 3 seconds later — outside the 1-second window.
+        let p2 = state.add(("bob", "v1"), 4_000, |(_, vid)| *vid);
+        assert!(p2.is_empty(), "elements outside window should not match");
+    }
+
+    #[test]
+    fn self_join_emits_all_prior_matches_within_window() {
+        let mut state: WindowedSelfJoinState<(i32, &str), &str> =
+            WindowedSelfJoinState::new(Duration::from_secs(10));
+        state.add((1, "x"), 1_000, |(_, k)| *k);
+        state.add((2, "x"), 3_000, |(_, k)| *k);
+        let pairs = state.add((3, "x"), 5_000, |(_, k)| *k);
+        // Should emit (1,3) and (2,3).
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].first.0, 1);
+        assert_eq!(pairs[0].second.0, 3);
+        assert_eq!(pairs[1].first.0, 2);
+        assert_eq!(pairs[1].second.0, 3);
+    }
+
+    #[test]
+    fn self_join_advance_watermark_evicts_expired_entries() {
+        let mut state: WindowedSelfJoinState<(&str, &str), &str> =
+            WindowedSelfJoinState::new(Duration::from_secs(2));
+        state.add(("a", "k"), 1_000, |(_, k)| *k);
+        state.add(("b", "k"), 1_500, |(_, k)| *k);
+        assert_eq!(state.len(), 2);
+        // Watermark at 5s, cutoff = 5_000 - 2_000 = 3_000 → both elements expire.
+        state.advance_watermark(5_000);
+        assert!(state.is_empty(), "expected all expired elements evicted");
+        // After eviction, a new element with the same key must NOT match.
+        let pairs = state.add(("c", "k"), 5_500, |(_, k)| *k);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn self_join_against_nested_loop_baseline_equivalent() {
+        // The indexed self-join must produce the same set of pairs (by key)
+        // as a brute-force nested loop over a single buffer.
+        let events: Vec<(&str, i32, i64)> = vec![
+            ("a", 1, 100),
+            ("b", 2, 200),
+            ("c", 1, 300),
+            ("d", 3, 400),
+            ("e", 1, 500),
+            ("f", 2, 600),
+        ];
+        let window_ms: i64 = 1_000;
+
+        // Indexed version.
+        let mut state: WindowedSelfJoinState<(&str, i32, i64), i32> =
+            WindowedSelfJoinState::new(Duration::from_millis(window_ms as u64));
+        let mut indexed_pairs: Vec<(&str, &str)> = Vec::new();
+        for ev in &events {
+            let out = state.add(*ev, ev.2, |e| e.1);
+            for p in &out {
+                indexed_pairs.push((p.first.0, p.second.0));
+            }
+        }
+
+        // Brute force baseline.
+        let mut baseline_pairs: Vec<(&str, &str)> = Vec::new();
+        for j in 0..events.len() {
+            for i in 0..j {
+                let (a, b) = (&events[i], &events[j]);
+                if a.1 == b.1 && (b.2 - a.2).abs() <= window_ms {
+                    baseline_pairs.push((a.0, b.0));
+                }
+            }
+        }
+
+        indexed_pairs.sort();
+        baseline_pairs.sort();
+        assert_eq!(indexed_pairs, baseline_pairs);
     }
 }

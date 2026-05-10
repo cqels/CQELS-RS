@@ -23,8 +23,8 @@ pub use aggregate::{
 pub use bind::BindOperator;
 pub use filter::FilterOperator;
 pub use join::{
-    EdgeInfo, GraphPatternJoinState, IntervalJoinState, JoinFunction, JoinResult, TaggedUnion,
-    VariableLengthPathOperator, WindowedJoinState,
+    EdgeInfo, GraphPatternJoinState, IntervalJoinState, JoinFunction, JoinResult, SelfJoinPair,
+    TaggedUnion, VariableLengthPathOperator, WindowedJoinState, WindowedSelfJoinState,
 };
 pub use minus::{compatible, MinusOperator};
 pub use parallel::{
