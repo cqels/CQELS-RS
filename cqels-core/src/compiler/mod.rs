@@ -11,6 +11,7 @@ pub mod compiled;
 pub mod cqelsql;
 pub mod cypherql;
 pub mod pipeline;
+pub mod self_join;
 
 pub use compiled::{
     CompiledAskQuery, CompiledConstructQuery, CompiledCqelsQuery, CompiledCypherQuery,
@@ -18,6 +19,7 @@ pub use compiled::{
 };
 pub use cqelsql::CqelsQueryCompiler;
 pub use cypherql::CypherQueryCompiler;
+pub use self_join::{detect_self_joins, self_join_hints_by_source, SelfJoinHint};
 
 #[cfg(test)]
 mod tests {
