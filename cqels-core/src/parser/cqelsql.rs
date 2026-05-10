@@ -530,13 +530,58 @@ fn parse_where_clause(
     pair: pest::iterators::Pair<Rule>,
     mut builder: CqelsQueryDefinitionBuilder,
 ) -> ParseResult<CqelsQueryDefinitionBuilder> {
+    let mut groups: Vec<CqelsPatternGroup> = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::pattern_group {
-            let group = parse_pattern_group(inner)?;
-            builder = builder.add_pattern_group(group);
+            groups.push(parse_pattern_group(inner)?);
         }
     }
+
+    apply_implicit_stream_binding(&mut groups, &builder);
+
+    for group in groups {
+        builder = builder.add_pattern_group(group);
+    }
     Ok(builder)
+}
+
+/// Implicit stream binding (Java PR #31, Phase 1).
+///
+/// When the query has exactly one `FROM STREAM`, no FROM-level static/named
+/// graph declarations, and no explicit `STREAM { ... }` blocks in the WHERE,
+/// any bare triple patterns are auto-bound to that single stream — matching
+/// what the user would have written as `STREAM <s> { ... }` explicitly.
+fn apply_implicit_stream_binding(
+    groups: &mut [CqelsPatternGroup],
+    builder: &CqelsQueryDefinitionBuilder,
+) {
+    let has_explicit_stream = groups
+        .iter()
+        .any(|g| matches!(g, CqelsPatternGroup::Stream { .. }));
+    let has_default = groups
+        .iter()
+        .any(|g| matches!(g, CqelsPatternGroup::Default { .. }));
+
+    let eligible = has_default
+        && !has_explicit_stream
+        && builder.streams().len() == 1
+        && builder.static_graphs().is_empty()
+        && builder.named_graphs().is_empty();
+
+    if !eligible {
+        return;
+    }
+
+    let stream_name = builder.streams()[0].name.clone();
+    for group in groups.iter_mut() {
+        if let CqelsPatternGroup::Default { patterns } = group {
+            let patterns = std::mem::take(patterns);
+            *group = CqelsPatternGroup::Stream {
+                source: stream_name.clone(),
+                patterns,
+            };
+        }
+    }
 }
 
 fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPatternGroup> {
@@ -1039,15 +1084,142 @@ mod tests {
             }
         "#;
 
+        // Implicit stream binding (Java PR #31): bare triples + single FROM
+        // STREAM + no graphs → bound to that stream.
         let result = CqelsQlParser::parse(query).unwrap();
         match &result.pattern_groups[0] {
-            CqelsPatternGroup::Default { patterns } => {
+            CqelsPatternGroup::Stream { source, patterns } => {
+                assert_eq!(source, "s");
                 assert_eq!(
                     patterns[0].predicate,
                     "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
                 );
             }
-            _ => panic!("expected default pattern group"),
+            other => panic!("expected stream pattern group, got {other:?}"),
+        }
+    }
+
+    // ─── Implicit stream binding (Java PR #31, Phase 1) ───────────────────────
+
+    #[test]
+    fn implicit_binding_single_stream_wraps_bare_triples() {
+        let query = r#"
+            SELECT ?x ?y
+            FROM STREAM sensor [NOW]
+            WHERE {
+                ?x <http://ex.org/reading> ?y .
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert_eq!(result.pattern_groups.len(), 1);
+        match &result.pattern_groups[0] {
+            CqelsPatternGroup::Stream { source, patterns } => {
+                assert_eq!(source, "sensor");
+                assert_eq!(patterns.len(), 1);
+            }
+            other => panic!("expected implicit stream binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn implicit_binding_multiple_bare_triples_all_bound() {
+        let query = r#"
+            SELECT ?p ?name ?age
+            FROM STREAM people [NOW]
+            WHERE {
+                ?p <http://ex.org/name> ?name .
+                ?p <http://ex.org/age> ?age .
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        assert_eq!(result.pattern_groups.len(), 2);
+        for group in &result.pattern_groups {
+            match group {
+                CqelsPatternGroup::Stream { source, .. } => assert_eq!(source, "people"),
+                other => panic!("expected all groups bound to 'people', got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn implicit_binding_skipped_with_explicit_stream_block() {
+        let query = r#"
+            SELECT ?x ?y ?z
+            FROM STREAM s [NOW]
+            WHERE {
+                STREAM s { ?x <http://ex.org/p> ?y . }
+                ?x <http://ex.org/q> ?z .
+            }
+        "#;
+        // Explicit STREAM block in WHERE disables implicit binding; bare
+        // triples remain Default (Java parity: streamPatterns non-empty).
+        let result = CqelsQlParser::parse(query).unwrap();
+        let mut saw_stream = false;
+        let mut saw_default = false;
+        for group in &result.pattern_groups {
+            match group {
+                CqelsPatternGroup::Stream { .. } => saw_stream = true,
+                CqelsPatternGroup::Default { .. } => saw_default = true,
+                _ => {}
+            }
+        }
+        assert!(saw_stream, "explicit STREAM block should be preserved");
+        assert!(
+            saw_default,
+            "bare triples should NOT be auto-bound when an explicit STREAM block exists"
+        );
+    }
+
+    #[test]
+    fn implicit_binding_skipped_with_multiple_streams() {
+        let query = r#"
+            SELECT ?x ?y
+            FROM STREAM a [NOW]
+            FROM STREAM b [NOW]
+            WHERE {
+                ?x <http://ex.org/p> ?y .
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        // Two streams → ambiguous which to bind to → keep as Default.
+        match &result.pattern_groups[0] {
+            CqelsPatternGroup::Default { .. } => {}
+            other => panic!("expected Default group with multiple streams, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn implicit_binding_skipped_when_static_graph_declared() {
+        let query = r#"
+            SELECT ?x ?y
+            FROM STREAM s [NOW]
+            FROM <http://example.org/static>
+            WHERE {
+                ?x <http://ex.org/p> ?y .
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        // FROM-level static graph disables implicit binding (Java parity).
+        match &result.pattern_groups[0] {
+            CqelsPatternGroup::Default { .. } => {}
+            other => panic!("expected Default group when static graph declared, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn implicit_binding_skipped_when_named_graph_declared() {
+        let query = r#"
+            SELECT ?x ?y
+            FROM STREAM s [NOW]
+            FROM NAMED <http://example.org/g>
+            WHERE {
+                ?x <http://ex.org/p> ?y .
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        match &result.pattern_groups[0] {
+            CqelsPatternGroup::Default { .. } => {}
+            other => panic!("expected Default group when named graph declared, got {other:?}"),
         }
     }
 

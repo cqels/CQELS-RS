@@ -462,6 +462,21 @@ impl CqelsQueryDefinitionBuilder {
         self
     }
 
+    /// Returns the streams currently registered on the builder.
+    pub fn streams(&self) -> &[CqelsStreamDefinition] {
+        &self.streams
+    }
+
+    /// Returns the static graphs currently registered on the builder.
+    pub fn static_graphs(&self) -> &[GraphDefinition] {
+        &self.static_graphs
+    }
+
+    /// Returns the named graphs currently registered on the builder.
+    pub fn named_graphs(&self) -> &[GraphDefinition] {
+        &self.named_graphs
+    }
+
     pub fn add_select_element(mut self, elem: SelectElement) -> Self {
         self.select_elements.push(elem);
         self

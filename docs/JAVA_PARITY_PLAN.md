@@ -35,8 +35,8 @@ Per the project's behavioral guidelines:
 
 **Status note:** Java has parser + AST for `FROM NAMED WINDOW` but execution is unimplemented — `CqelsQueryCompiler` throws `UnsupportedOperationException`, tracked in Java issue #39 (commit `3afb720`). Porting Java's incomplete parser is busywork until Java itself executes named-window queries. **Deferring Phase 1.2b until upstream completes Phase 3.**
 
-- [ ] **1.2a Implicit stream binding** (Java Phase 1, complete and working): bare triple patterns in `WHERE` auto-bind to a single `FROM STREAM` when no `STREAM`/`WINDOW` blocks are present.
-  - **Verify:** parser tests show implicit binding produces same AST as explicit `STREAM { ... }`; existing tests stay green.
+- [x] **1.2a Implicit stream binding** (Java Phase 1, complete and working): bare triple patterns in `WHERE` auto-bind to a single `FROM STREAM` when no `STREAM`/`WINDOW` blocks are present.
+  - **Verify:** [cqels-core/src/parser/cqelsql.rs](../cqels-core/src/parser/cqelsql.rs) — `apply_implicit_stream_binding`; 6 new parser parity tests covering single-stream binding, multi-triple binding, explicit-block bypass, multi-stream skip, static-graph skip, named-graph skip.
 - [!] **1.2b Named window parsing** (`FROM NAMED WINDOW :name ON stream [spec]` + `WINDOW :name { ... }`): defer until Java upstream implements execution.
 
 ### 1.3 Declarative CEP via FILTER(SEQ()) (Java PR #36)
@@ -78,3 +78,4 @@ Decision deferred until Phase 1 completes — benchmarks and user demand will dr
 ## Done log
 
 - **1.1 MinusOperator** — `cqels-core/src/operator/minus.rs`, 14 parity tests; SPARQL 1.1 §8.3 compatibility, disjoint-domain anti-join semantics. Skipped Java's `Builder` and `Duration` timeout (not needed in Rust idiom).
+- **1.2a Implicit stream binding** — `apply_implicit_stream_binding` in `cqels-core/src/parser/cqelsql.rs`. Bare triple patterns auto-bind to the single FROM STREAM when no explicit STREAM block / multiple streams / static or named graphs are present. 6 parser parity tests; updated existing `test_parse_rdf_type_shorthand`. Also exposed `streams()` / `static_graphs()` / `named_graphs()` accessors on the builder.
