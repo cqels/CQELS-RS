@@ -6,6 +6,7 @@ members = [
     "cqels-reasoning",
     "cqels-geo",
     "cqels-storage-spi",
+    "cqels-storage-sled",
     "cqels-asp",
     "cqels-shacl",
     "cqels-benchmarks",
