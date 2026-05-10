@@ -33,10 +33,11 @@ Per the project's behavioral guidelines:
 
 ### 1.2 Named windows + implicit stream binding (Java PR #31)
 
-- [ ] Add `FROM NAMED WINDOW <name> AS <stream> [...]` parsing.
-- [ ] Add `WHERE { WINDOW <name> { ... } }` reference resolution.
-- [ ] Implicit stream binding from window context.
-- **Verify:** parse + execute fixture queries from Java's `cqels-core/src/test/.../NamedWindowTest`; existing tests stay green.
+**Status note:** Java has parser + AST for `FROM NAMED WINDOW` but execution is unimplemented — `CqelsQueryCompiler` throws `UnsupportedOperationException`, tracked in Java issue #39 (commit `3afb720`). Porting Java's incomplete parser is busywork until Java itself executes named-window queries. **Deferring Phase 1.2b until upstream completes Phase 3.**
+
+- [ ] **1.2a Implicit stream binding** (Java Phase 1, complete and working): bare triple patterns in `WHERE` auto-bind to a single `FROM STREAM` when no `STREAM`/`WINDOW` blocks are present.
+  - **Verify:** parser tests show implicit binding produces same AST as explicit `STREAM { ... }`; existing tests stay green.
+- [!] **1.2b Named window parsing** (`FROM NAMED WINDOW :name ON stream [spec]` + `WINDOW :name { ... }`): defer until Java upstream implements execution.
 
 ### 1.3 Declarative CEP via FILTER(SEQ()) (Java PR #36)
 
