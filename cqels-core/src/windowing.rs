@@ -29,6 +29,10 @@ use std::time::Duration;
 
 use crate::stream::TimestampedValue;
 
+pub mod processor;
+
+pub use processor::{TriggerableWindowProcessor, WindowEmission};
+
 // ─── Window bounds ──────────────────────────────────────────────────────────
 
 /// Minimal window-bounds trait used by triggers and evictors.
