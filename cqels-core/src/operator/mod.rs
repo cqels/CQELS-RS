@@ -8,6 +8,7 @@ pub mod aggregate;
 pub mod bind;
 pub mod filter;
 pub mod join;
+pub mod minus;
 pub mod parallel;
 pub mod ranking;
 pub mod rspql;
@@ -25,6 +26,7 @@ pub use join::{
     EdgeInfo, GraphPatternJoinState, IntervalJoinState, JoinFunction, JoinResult, TaggedUnion,
     VariableLengthPathOperator, WindowedJoinState,
 };
+pub use minus::{compatible, MinusOperator};
 pub use parallel::{
     AggregationBackend, ParallelExecutionConfig, ParallelExecutionConfigBuilder, SwagConfig,
 };
