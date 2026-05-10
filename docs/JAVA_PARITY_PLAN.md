@@ -50,10 +50,11 @@ Per the project's behavioral guidelines:
 
 ### 2.1 Triggers and evictors
 
-- [ ] Trigger types: `EventTimeTrigger`, `ProcessingTimeTrigger`, `ContinuousEventTimeTrigger`, `ContinuousProcessingTimeTrigger`, `CountTrigger`, `DeltaTrigger`, `PurgingTrigger`, `ProcessingTimeoutTrigger`.
-- [ ] Evictor types: `CountEvictor`, `TimeEvictor`, `DeltaEvictor`.
-- [ ] Wire into existing `WindowType` so legacy windows keep working.
-- **Verify:** parity tests over event-time vs processing-time scenarios; deterministic ordering tests.
+- [x] Trigger types: `EventTimeTrigger`, `ProcessingTimeTrigger`, `CountTrigger`, `PurgingTrigger`.
+- [!] Deferred: `DeltaTrigger`, `DeltaEvictor` (need `DeltaFunction` machinery); `ContinuousEventTimeTrigger`, `ContinuousProcessingTimeTrigger`, `ProcessingTimeoutTrigger` (need timer service plumbing).
+- [x] Evictor types: `CountEvictor`, `TimeEvictor`.
+- [!] Wire into existing `window::Window<T>` operators — follow-up; new traits live in a separate `windowing` module to avoid disturbing existing operators.
+- **Verify:** 17 parity tests in [cqels-core/src/windowing.rs](../cqels-core/src/windowing.rs) covering watermark thresholds, processing-time fires, count thresholds with reset, purging wrapper, and time/count evictors.
 
 ### 2.2 Windowed self-join with indexed hash join (Java PR #25)
 
@@ -81,3 +82,4 @@ Decision deferred until Phase 1 completes — benchmarks and user demand will dr
 - **1.1 MinusOperator** — `cqels-core/src/operator/minus.rs`, 14 parity tests; SPARQL 1.1 §8.3 compatibility, disjoint-domain anti-join semantics. Skipped Java's `Builder` and `Duration` timeout (not needed in Rust idiom).
 - **1.2a Implicit stream binding** — `apply_implicit_stream_binding` in `cqels-core/src/parser/cqelsql.rs`. Bare triple patterns auto-bind to the single FROM STREAM when no explicit STREAM block / multiple streams / static or named graphs are present. 6 parser parity tests; updated existing `test_parse_rdf_type_shorthand`. Also exposed `streams()` / `static_graphs()` / `named_graphs()` accessors on the builder.
 - **1.3 Declarative CEP via FILTER(SEQ())** — `SeqConstraint`/`SeqArg` AST in `cqels-core::parser::ast`, pest grammar rules (`seq_call`, `seq_arg`, `seq_quantifier`, `seq_not_kw`), parser logic in `parse_seq_call`/`parse_seq_arg`, and `CepPatternCompiler` in `cqels-engine::cep_compiler` that maps SEQ to `Pattern<RdfStreamElement>`. 7 parser tests + 9 compiler tests including 2 end-to-end through `NfaPatternProcessor`. Added `Pattern::previous()` accessor for chain introspection. Not yet ported: single-event/cross-event FILTER predicate evaluation (needs expression evaluator wiring).
+- **2.1 Triggers + evictors** — new `cqels-core::windowing` module with `WindowBounds` (`TimeWindow`, `GlobalWindow`), `TriggerResult`, `TriggerContext`, `Trigger` trait, `Evictor` trait, and concrete `EventTimeTrigger`/`ProcessingTimeTrigger`/`CountTrigger`/`PurgingTrigger`/`CountEvictor`/`TimeEvictor`. 17 parity tests. Triggers hold inline state instead of Java's framework-managed partitioned state. Continuous/delta variants and integration with existing `window::Window<T>` operators are tracked as follow-ups.

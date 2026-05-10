@@ -51,6 +51,7 @@ pub mod query;
 pub mod store;
 pub mod stream;
 pub mod window;
+pub mod windowing;
 
 // Convenience re-exports for common types.
 pub use compiler::{
