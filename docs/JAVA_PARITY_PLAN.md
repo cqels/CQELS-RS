@@ -50,26 +50,37 @@ Per the project's behavioral guidelines:
 
 ### 2.1 Triggers and evictors
 
-- [x] Trigger types: `EventTimeTrigger`, `ProcessingTimeTrigger`, `CountTrigger`, `PurgingTrigger`.
-- [!] Deferred: `DeltaTrigger`, `DeltaEvictor` (need `DeltaFunction` machinery); `ContinuousEventTimeTrigger`, `ContinuousProcessingTimeTrigger`, `ProcessingTimeoutTrigger` (need timer service plumbing).
-- [x] Evictor types: `CountEvictor`, `TimeEvictor`.
-- [!] Wire into existing `window::Window<T>` operators — follow-up; new traits live in a separate `windowing` module to avoid disturbing existing operators.
-- **Verify:** 17 parity tests in [cqels-core/src/windowing.rs](../cqels-core/src/windowing.rs) covering watermark thresholds, processing-time fires, count thresholds with reset, purging wrapper, and time/count evictors.
+- [x] Trigger types: `EventTimeTrigger`, `ProcessingTimeTrigger`, `CountTrigger`, `PurgingTrigger`, `DeltaTrigger`, `ProcessingTimeoutTrigger`, `ContinuousEventTimeTrigger`, `ContinuousProcessingTimeTrigger` (8/8 ported).
+- [x] Evictor types: `CountEvictor`, `TimeEvictor`, `DeltaEvictor` (3/3 ported).
+- [x] Bridge integration via `TriggerableWindowProcessor` in `cqels-core::windowing::processor` — buffers elements and consults a trigger/evictor per-window. Existing `window::Window<T>` operators continue to work unchanged.
+- **Verify:** 33 parity tests across `cqels-core/src/windowing.rs`, `windowing/processor.rs`, `windowing/delta.rs`, `windowing/timeout.rs`, `windowing/continuous.rs`.
 
 ### 2.2 Windowed self-join with indexed hash join (Java PR #25)
 
 - [x] Indexed hash-join state for self-join over a single window (`WindowedSelfJoinState<T, K>` in `cqels-core::operator::join`).
-- [!] Compile-time detection of self-join AST patterns + automatic operator substitution — deferred; the operator is exposed for direct use, but `CqelsQueryCompiler` does not yet rewrite self-join queries to use it. Tracked as follow-up.
-- **Verify:** 6 parity tests including a baseline test that compares the indexed implementation against an O(N²) nested loop over an event log and asserts identical pair sets.
+- [x] Compile-time detection of self-join AST patterns (`detect_self_joins` in `cqels-core::compiler::self_join`). Reports source, shared variables, and pattern indices as `SelfJoinHint`s.
+- [!] Auto-substitution inside `CqelsQueryCompiler::compile` — deferred; the detection function is exposed for downstream rewriters.
+- **Verify:** 6 operator tests + 7 detection tests.
 
-## Phase 3 — Pick ONE direction (decision pending)
+## Phase 3 — Performance + persistence
 
-- [ ] **3a Performance:** parallel hash-join + parallel windowed-aggregate operators; SWAG CTrie index.
-- [ ] **3b cqels-mcp Rust port:** MCP server exposing engine to LLM agents (8 tools, 4 resources).
-- [ ] **3c RocksDB storage backend:** first production persistence backend behind the SPI.
-- [ ] **3d cqels-cdsp Rust port:** COVESA vehicle-data integration.
+### 3a Parallel hash-join (Java PR `ParallelHashJoinOperator`)
 
-Decision deferred until Phase 1 completes — benchmarks and user demand will drive choice.
+- [x] `ParallelHashJoinOperator<L, R, K, Out>` in `cqels-core::operator::parallel_hash_join`. Sequential build phase materializes the left side into `HashMap<K, Vec<L>>`; concurrent probe phase via `futures::stream::buffer_unordered`.
+- **Verify:** 6 tests — basic join, empty inputs, one-to-many, parallelism invariance over {1, 2, 4, 8}, equivalence vs O(N·M) baseline over 50×30 elements.
+- [!] **Deferred:** parallel windowed-aggregate operator and SWAG CTrie index.
+
+### 3b Persistent storage backend
+
+- [x] `cqels-storage-sled` — first production-grade backend implementing all SPI traits (`PersistentBackend`, `EventJournal`, `CheckpointStore`, `StorageBackendProvider`) against the pure-Rust `sled` embedded KV store.
+- **Verify:** 8 tests — append/read round-trip, read-from offset filter, truncate-before, checkpoint write/latest, latest-by-id ordering, delete-older-than, provider creation, next-offset recovery across reopen.
+- [!] **Why sled, not RocksDB?** The Rust `rocksdb` crate and oxigraph's transitively-included `oxrocksdb-sys` both declare `links = "rocksdb"`, so Cargo refuses to compile both in the same workspace. Sled has equivalent semantics for our use case, no native link conflict, and faster compile times. A future RocksDB backend can slot in once `oxrocksdb-sys` is gated behind an opt-in feature.
+- [!] **Deferred:** dedicated LMDB and IoTDB backends.
+
+### 3c External integration modules (not started)
+
+- [ ] **`cqels-mcp` Rust port:** MCP server exposing engine to LLM agents (8 tools, 4 resources).
+- [ ] **`cqels-cdsp` Rust port:** COVESA vehicle-data integration.
 
 ## Out of scope (intentional)
 
@@ -84,3 +95,10 @@ Decision deferred until Phase 1 completes — benchmarks and user demand will dr
 - **1.3 Declarative CEP via FILTER(SEQ())** — `SeqConstraint`/`SeqArg` AST in `cqels-core::parser::ast`, pest grammar rules (`seq_call`, `seq_arg`, `seq_quantifier`, `seq_not_kw`), parser logic in `parse_seq_call`/`parse_seq_arg`, and `CepPatternCompiler` in `cqels-engine::cep_compiler` that maps SEQ to `Pattern<RdfStreamElement>`. 7 parser tests + 9 compiler tests including 2 end-to-end through `NfaPatternProcessor`. Added `Pattern::previous()` accessor for chain introspection. Not yet ported: single-event/cross-event FILTER predicate evaluation (needs expression evaluator wiring).
 - **2.1 Triggers + evictors** — new `cqels-core::windowing` module with `WindowBounds` (`TimeWindow`, `GlobalWindow`), `TriggerResult`, `TriggerContext`, `Trigger` trait, `Evictor` trait, and concrete `EventTimeTrigger`/`ProcessingTimeTrigger`/`CountTrigger`/`PurgingTrigger`/`CountEvictor`/`TimeEvictor`. 17 parity tests. Triggers hold inline state instead of Java's framework-managed partitioned state. Continuous/delta variants and integration with existing `window::Window<T>` operators are tracked as follow-ups.
 - **2.2 Windowed self-join with indexed hash** — `WindowedSelfJoinState<T, K>` in `cqels-core::operator::join` with `SelfJoinPair<T>` result type. Hash index keyed by caller-supplied join key, time-ordered per-key buckets, watermark-driven eviction. 6 parity tests including an O(N²) baseline equivalence check. Compile-time detection (rewriting self-join AST patterns to use this operator) is deferred — the operator is exposed for direct construction.
+- **1.3 follow-up: SEQ FILTER predicates wired** — `classify_filters` + `bind_event_variables` + `term_to_value` in `cqels-engine::cep_compiler` route single-event filters into per-state `where_cond` and cross-event filters into `where_context` at the latest referenced state. Uses the existing `cqels-core::expression::ExpressionEvaluator`. 5 new tests bring the cep_compiler suite to 14.
+- **2.2 follow-up: compile-time self-join detection** — new `cqels-core::compiler::self_join` module with `SelfJoinHint` and `detect_self_joins(query_def)`. Inspects WHERE-level Stream pattern groups, reports pairs sharing source + at least one variable. 7 tests.
+- **2.1 follow-up: TriggerableWindowProcessor** — new `cqels-core::windowing::processor` bridges trigger/evictor framework to a stateful per-window stream processor. 5 tests.
+- **2.1 follow-up: Delta + Timeout triggers/evictors** — `DeltaFunction`, `DeltaTrigger`, `DeltaEvictor` (`windowing::delta`); `ProcessingTimeoutTrigger` (`windowing::timeout`). 11 tests.
+- **2.1 follow-up: Continuous trigger variants** — `ContinuousEventTimeTrigger`, `ContinuousProcessingTimeTrigger` (`windowing::continuous`). 7 tests. Trigger family now 8/8 ported.
+- **3a Parallel hash-join** — `ParallelHashJoinOperator<L, R, K, Out>` in `cqels-core::operator::parallel_hash_join`. Sequential build → concurrent probe via `buffer_unordered`. 6 tests including a baseline equivalence over 50×30 elements.
+- **3b cqels-storage-sled** — first production-grade backend. Implements `PersistentBackend`/`EventJournal`/`CheckpointStore`/`StorageBackendProvider`. Sled trees keyed by 8-byte big-endian offsets/IDs, JSON-encoded payloads, recoverable next-offset counter. 8 tests including reopen-and-resume.
