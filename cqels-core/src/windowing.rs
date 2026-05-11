@@ -33,11 +33,13 @@ pub mod continuous;
 pub mod delta;
 pub mod processor;
 pub mod timeout;
+pub mod triggerable_window;
 
 pub use continuous::{ContinuousEventTimeTrigger, ContinuousProcessingTimeTrigger};
 pub use delta::{DeltaEvictor, DeltaFunction, DeltaTrigger};
 pub use processor::{TriggerableWindowProcessor, WindowEmission};
 pub use timeout::ProcessingTimeoutTrigger;
+pub use triggerable_window::{NoEvictor, TriggerableTimeWindow};
 
 // ─── Window bounds ──────────────────────────────────────────────────────────
 
