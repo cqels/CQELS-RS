@@ -80,7 +80,7 @@ Per the project's behavioral guidelines:
 
 ### 3c External integration modules
 
-- [x] **`cqels-mcp` scaffolding** — protocol-agnostic tool layer with `McpTool` trait, `ToolRegistry`, `ToolInputSchema`/`ToolInvocation`/`ToolResult`, and two reference tools (`parse_query`, `query`). 10 tests. Wiring a JSON-RPC transport (rmcp / custom) is a follow-up. Live execution requires an engine handle. Follow-up tools: `store_memory`, `recall_memory`, `forget_memory`, `register_stream_query`, `reason`, `validate`, `solve`.
+- [x] **`cqels-mcp` crate** — protocol-agnostic tool layer + JSON-RPC 2.0 transport over stdio + executable server binary. Tool surface: `parse_query`, `query` (dry-run), `reasoning_profiles`, `shacl_capabilities`. JSON-RPC methods: `initialize`, `ping`, `tools/list`, `tools/call`. Notifications, parse errors, invalid JSON-RPC versions, and unknown methods all handled correctly. Run with `cargo run -p cqels-mcp --bin cqels_mcp_server` and pipe JSON-RPC on stdin. 26 tests. Follow-up tools that need engine wiring: `store_memory` (sled/lmdb-backed), `recall_memory`, `forget_memory`, `register_stream_query`, live `reason`/`validate`/`solve`.
 - [ ] **`cqels-cdsp` Rust port:** COVESA vehicle-data integration.
 
 ### 3d Property-based testing

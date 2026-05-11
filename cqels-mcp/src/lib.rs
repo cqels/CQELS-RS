@@ -30,7 +30,9 @@
 pub mod registry;
 pub mod tool;
 pub mod tools;
+pub mod transport;
 
 pub use registry::{McpError, ToolRegistry};
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{parse_query_tool, query_tool, reasoning_profiles_tool, shacl_capabilities_tool};
+pub use transport::{handle_request, run_stdio, PROTOCOL_VERSION, SERVER_NAME};

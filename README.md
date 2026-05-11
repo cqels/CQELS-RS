@@ -10,9 +10,14 @@ reasoning. Rust port of the [CQELS 2.0](https://cqels.github.io/) engine.
 
 - **Dual query languages** -- CqelsQL (SPARQL-based) and CypherQL (Cypher-based) with streaming extensions
 - **Four window types** -- Tumbling, sliding, session, and count-based windows
-- **Stream operators** -- Aggregate, filter, join, bind, ranking, and SWAG (Sliding-Window AGgregation)
-- **Complex Event Processing** -- NFA-based pattern matching with strict/relaxed contiguity, quantifiers, negation, and time constraints
-- **RETE reasoning** -- Forward-chaining incremental inference over RDF streams with provenance tracking
+- **Trigger/evictor framework** -- 8 trigger types (event-time, processing-time, count, delta, timeout, continuous variants, purging) and 3 evictor types (count, time, delta)
+- **Stream operators** -- Aggregate, filter, bind, ranking, MINUS, SWAG, indexed self-join, parallel broadcast hash-join, and more
+- **Complex Event Processing** -- NFA-based pattern matching with strict/relaxed contiguity, quantifiers, negation, time constraints. Declarative `FILTER(SEQ(...))` syntax compiles to the NFA pipeline
+- **RETE reasoning** -- Forward-chaining incremental inference with 7 profiles (NONE, RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL) and provenance tracking
+- **GeoSPARQL** -- 6 spatial functions with R-tree indexing
+- **SHACL** -- Shape validation, repair candidates, ASP-based solving
+- **Persistent storage SPI** -- Pluggable backends; production-grade embedded impls via `sled` (`cqels-storage-sled`) and LMDB (`cqels-storage-lmdb`)
+- **MCP tool surface** -- `cqels-mcp` exposes query/reasoning/SHACL capabilities to LLM agents
 - **Async-first** -- Built on tokio with `Stream`-based dataflow composition
 - **RDF ecosystem** -- Bidirectional interop with [oxrdf](https://docs.rs/oxrdf)
 
@@ -59,13 +64,25 @@ let stmt = Statement::new(
 ## Architecture
 
 ```
-cqels-model          Foundational RDF types (Term, Statement, Value, BindingSet)
+cqels-model              Foundational RDF types (Term, Statement, Value, BindingSet)
     |
-cqels-core           Stream processing core (windows, operators, parsers)
+cqels-core               Stream processing core (windows, operators, parsers,
+    |                    triggers/evictors, self-join detection)
     |
-    +-- cqels-engine      Runtime engine + CEP pattern matching
-    +-- cqels-reasoning   RETE forward-chaining inference
-    +-- cqels-benchmarks  Criterion benchmarks + examples
+    +-- cqels-engine         Runtime engine + CEP pattern matching (incl. SEQ compiler)
+    +-- cqels-reasoning      RETE forward-chaining inference
+    +-- cqels-geo            GeoSPARQL functions + R-tree spatial index
+    +-- cqels-shacl          SHACL validation + repair candidates
+    +-- cqels-asp            Answer Set Programming (clingo subprocess)
+    +-- cqels-benchmarks     Criterion benchmarks + examples
+    |
+    +-- cqels-storage-spi    Storage SPI (event journal, checkpoint store)
+    |   +-- cqels-storage-sled    Production-grade embedded backend (pure-Rust sled)
+    |   +-- cqels-storage-lmdb    Production-grade embedded backend (heed/LMDB, MVCC)
+    |
+    +-- cqels-mcp            Model Context Protocol tool surface (exposes the
+                             engine to LLM agents — `parse_query`, `query`,
+                             `reasoning_profiles`, `shacl_capabilities`)
 ```
 
 ## Examples
