@@ -54,7 +54,12 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 needed so `cargo xtask test impact --base origin/main`
+      # can compute the diff against main. The default shallow checkout
+      # (depth=1) leaves origin/main unresolvable on the runner.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
