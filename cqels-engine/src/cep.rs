@@ -732,7 +732,7 @@ fn process_event<T: Clone + Send + Sync + Timestamped>(
             limit = state_explosion_limit,
             "CEP state explosion: truncating partial matches"
         );
-        new_active.sort_by(|a, b| b.state_index.cmp(&a.state_index));
+        new_active.sort_by_key(|m| std::cmp::Reverse(m.state_index));
         new_active.truncate(state_explosion_limit);
     }
 

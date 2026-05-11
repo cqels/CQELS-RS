@@ -372,10 +372,8 @@ fn parse_from_static(
                     .trim_end_matches('>')
                     .to_string();
             }
-            Rule::integer => {
-                if depth.is_none() {
-                    depth = inner.as_str().parse().ok();
-                }
+            Rule::integer if depth.is_none() => {
+                depth = inner.as_str().parse().ok();
             }
             Rule::cache_spec => {
                 cache = Some(parse_duration_from_pair(inner)?);
@@ -408,10 +406,8 @@ fn parse_from_named(
                     .trim_end_matches('>')
                     .to_string();
             }
-            Rule::integer => {
-                if depth.is_none() {
-                    depth = inner.as_str().parse().ok();
-                }
+            Rule::integer if depth.is_none() => {
+                depth = inner.as_str().parse().ok();
             }
             Rule::cache_spec => {
                 cache = Some(parse_duration_from_pair(inner)?);

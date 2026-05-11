@@ -172,10 +172,8 @@ fn parse_from_static(
             Rule::string_literal => {
                 uri = unquote_string(inner.as_str());
             }
-            Rule::integer_literal => {
-                if depth.is_none() {
-                    depth = inner.as_str().parse().ok();
-                }
+            Rule::integer_literal if depth.is_none() => {
+                depth = inner.as_str().parse().ok();
             }
             Rule::cache_spec => {
                 cache = Some(parse_duration_from_pair(inner)?);
@@ -204,10 +202,8 @@ fn parse_from_graph(
             Rule::string_literal => {
                 uri = unquote_string(inner.as_str());
             }
-            Rule::integer_literal => {
-                if depth.is_none() {
-                    depth = inner.as_str().parse().ok();
-                }
+            Rule::integer_literal if depth.is_none() => {
+                depth = inner.as_str().parse().ok();
             }
             Rule::cache_spec => {
                 cache = Some(parse_duration_from_pair(inner)?);
@@ -595,10 +591,8 @@ fn parse_rel_detail(
 ) -> ParseResult<()> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::identifier => {
-                if variable.is_none() {
-                    *variable = Some(inner.as_str().to_string());
-                }
+            Rule::identifier if variable.is_none() => {
+                *variable = Some(inner.as_str().to_string());
             }
             Rule::relationship_types => {
                 for t in inner.into_inner() {

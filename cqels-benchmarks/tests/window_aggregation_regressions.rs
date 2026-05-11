@@ -90,7 +90,7 @@ async fn test_window_grouped_aggregate_then_rank() {
         assert!(!results.is_empty());
 
         let mut ranked: Vec<_> = results.iter().collect();
-        ranked.sort_by(|a, b| b.value.cmp(&a.value));
+        ranked.sort_by_key(|r| std::cmp::Reverse(r.value));
         if ranked.len() > 1 {
             assert!(ranked[0].value >= ranked[1].value);
         }

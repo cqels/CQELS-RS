@@ -3,6 +3,16 @@
 
 [advisories]
 version = 2
+# Known-unmaintained transitive deps of `sled 0.34.7` (cqels-storage-sled,
+# cqels-mcp). These are *unmaintained-advisory* notices, not security
+# vulnerabilities. Sled is the only stable pure-Rust embedded KV store
+# with no native-link conflicts with oxigraph; dropping it would mean
+# losing the sled storage backend entirely. Revisit when sled 1.0
+# lands (currently in alpha) — its dep graph drops both of these.
+ignore = [
+    "RUSTSEC-2025-0057", # fxhash — unmaintained
+    "RUSTSEC-2024-0384", # instant — unmaintained
+]
 
 [licenses]
 version = 2
