@@ -415,11 +415,21 @@ pub struct EdgeInfo {
 /// Graph pattern join operator — incremental graph pattern matching for RDF streams.
 ///
 /// Maps to Java's `GraphPatternJoinOperator`.
+///
+/// # Multiplicity in the indexes
+///
+/// The same `(subject, predicate, object)` triple can recur in a stream
+/// at different timestamps. We track an exact count of how many live
+/// `EdgeInfo`s in `self.edges` reference each `(s, p, o)` so that
+/// [`Self::evict_before`] only drops an index entry when *every* live
+/// edge backing it has expired. Without this, evicting the earlier
+/// occurrence of a duplicate edge would wipe out the index path for
+/// the later, still-live occurrence (regression in issue #20).
 pub struct GraphPatternJoinState {
-    /// subject -> predicate -> set of objects
-    subject_index: HashMap<String, HashMap<String, HashSet<String>>>,
-    /// object -> predicate -> set of subjects
-    object_index: HashMap<String, HashMap<String, HashSet<String>>>,
+    /// subject -> predicate -> {object: live_count}
+    subject_index: HashMap<String, HashMap<String, HashMap<String, usize>>>,
+    /// object -> predicate -> {subject: live_count}
+    object_index: HashMap<String, HashMap<String, HashMap<String, usize>>>,
     /// All edges with timestamps
     edges: Vec<EdgeInfo>,
 }
@@ -439,19 +449,23 @@ impl GraphPatternJoinState {
         let predicate = stmt.predicate.to_string();
         let object = stmt.object.to_string();
 
-        self.subject_index
+        *self
+            .subject_index
             .entry(subject.clone())
             .or_default()
             .entry(predicate.clone())
             .or_default()
-            .insert(object.clone());
+            .entry(object.clone())
+            .or_insert(0) += 1;
 
-        self.object_index
+        *self
+            .object_index
             .entry(object.clone())
             .or_default()
             .entry(predicate.clone())
             .or_default()
-            .insert(subject.clone());
+            .entry(subject.clone())
+            .or_insert(0) += 1;
 
         self.edges.push(EdgeInfo {
             subject,
@@ -475,7 +489,7 @@ impl GraphPatternJoinState {
         self.subject_index
             .get(subject)
             .and_then(|preds| preds.get(predicate))
-            .map(|objs| objs.iter().map(|s| s.as_str()).collect())
+            .map(|objs| objs.keys().map(|s| s.as_str()).collect())
             .unwrap_or_default()
     }
 
@@ -484,7 +498,7 @@ impl GraphPatternJoinState {
         self.object_index
             .get(object)
             .and_then(|preds| preds.get(predicate))
-            .map(|subjs| subjs.iter().map(|s| s.as_str()).collect())
+            .map(|subjs| subjs.keys().map(|s| s.as_str()).collect())
             .unwrap_or_default()
     }
 
@@ -496,37 +510,27 @@ impl GraphPatternJoinState {
     /// Evicts edges older than the given timestamp.
     ///
     /// Uses incremental index removal instead of rebuilding from scratch,
-    /// which is O(evicted) rather than O(total_edges).
+    /// which is O(evicted) rather than O(total_edges). Decrements the
+    /// `(s, p, o)` multiplicity in each index and only removes the index
+    /// entry when its count reaches zero — so a still-live duplicate of
+    /// an evicted edge keeps its lookup path.
     pub fn evict_before(&mut self, cutoff: i64) {
-        // Partition: collect expired edges and remove them from indexes
         let mut i = 0;
         while i < self.edges.len() {
             if self.edges[i].timestamp < cutoff {
                 let edge = self.edges.swap_remove(i);
-                // Remove from subject index
-                if let Some(preds) = self.subject_index.get_mut(&edge.subject) {
-                    if let Some(objs) = preds.get_mut(&edge.predicate) {
-                        objs.remove(&edge.object);
-                        if objs.is_empty() {
-                            preds.remove(&edge.predicate);
-                        }
-                    }
-                    if preds.is_empty() {
-                        self.subject_index.remove(&edge.subject);
-                    }
-                }
-                // Remove from object index
-                if let Some(preds) = self.object_index.get_mut(&edge.object) {
-                    if let Some(subjs) = preds.get_mut(&edge.predicate) {
-                        subjs.remove(&edge.subject);
-                        if subjs.is_empty() {
-                            preds.remove(&edge.predicate);
-                        }
-                    }
-                    if preds.is_empty() {
-                        self.object_index.remove(&edge.object);
-                    }
-                }
+                decrement_triple_index(
+                    &mut self.subject_index,
+                    &edge.subject,
+                    &edge.predicate,
+                    &edge.object,
+                );
+                decrement_triple_index(
+                    &mut self.object_index,
+                    &edge.object,
+                    &edge.predicate,
+                    &edge.subject,
+                );
                 // Don't increment i — swap_remove moved last element here
             } else {
                 i += 1;
@@ -538,6 +542,34 @@ impl GraphPatternJoinState {
 impl Default for GraphPatternJoinState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Decrements `index[outer][middle][inner]` by 1 and removes the
+/// entries that drop to zero (or empty) at each level. Shared between
+/// the subject and object eviction paths so the multiplicity bookkeeping
+/// is identical on both sides.
+fn decrement_triple_index(
+    index: &mut HashMap<String, HashMap<String, HashMap<String, usize>>>,
+    outer: &str,
+    middle: &str,
+    inner: &str,
+) {
+    if let Some(mids) = index.get_mut(outer) {
+        if let Some(inners) = mids.get_mut(middle) {
+            if let Some(count) = inners.get_mut(inner) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    inners.remove(inner);
+                }
+            }
+            if inners.is_empty() {
+                mids.remove(middle);
+            }
+        }
+        if mids.is_empty() {
+            index.remove(outer);
+        }
     }
 }
 
@@ -619,7 +651,7 @@ impl VariableLengthPathOperator {
                 .map(|preds| {
                     preds
                         .values()
-                        .flat_map(|objs| objs.iter().cloned())
+                        .flat_map(|objs| objs.keys().cloned())
                         .collect()
                 })
                 .unwrap_or_default()
@@ -934,6 +966,52 @@ mod tests {
         assert_eq!(state.edges.len(), 1);
         assert!(state.has_edge("<http://e>", "<http://p>"));
         assert!(!state.has_edge("<http://a>", "<http://p>"));
+    }
+
+    /// Regression for issue #20: when the same RDF statement appears at
+    /// multiple timestamps and we evict only the earlier one, the index
+    /// must still report the edge as live (because the later occurrence
+    /// remains in `self.edges`). Pre-fix the index used a HashSet so the
+    /// duplicate's index path was unconditionally wiped on eviction.
+    #[test]
+    fn test_graph_pattern_eviction_preserves_live_duplicate_edges() {
+        let mut state = GraphPatternJoinState::new();
+        let stmt = make_stmt("http://s", "http://p", "http://o");
+        state.add_statement(&stmt, 100);
+        state.add_statement(&stmt, 200);
+
+        // Evict only the t=100 occurrence; t=200 is still live.
+        state.evict_before(150);
+
+        assert_eq!(state.edges.len(), 1, "one live edge remains");
+        assert!(
+            state.has_edge("<http://s>", "<http://p>"),
+            "duplicate edge at t=200 must remain visible in the index"
+        );
+        assert_eq!(
+            state.get_objects("<http://s>", "<http://p>"),
+            vec!["<http://o>"],
+        );
+        assert_eq!(
+            state.get_subjects("<http://o>", "<http://p>"),
+            vec!["<http://s>"],
+        );
+    }
+
+    /// Evicting *all* duplicates must clear the index. Guards against the
+    /// new multiplicity bookkeeping over-retaining entries.
+    #[test]
+    fn test_graph_pattern_eviction_removes_index_when_all_duplicates_expire() {
+        let mut state = GraphPatternJoinState::new();
+        let stmt = make_stmt("http://s", "http://p", "http://o");
+        state.add_statement(&stmt, 100);
+        state.add_statement(&stmt, 200);
+
+        state.evict_before(300);
+
+        assert_eq!(state.edges.len(), 0);
+        assert!(!state.has_edge("<http://s>", "<http://p>"));
+        assert!(state.get_subjects("<http://o>", "<http://p>").is_empty());
     }
 
     #[test]
