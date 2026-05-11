@@ -70,17 +70,21 @@ Per the project's behavioral guidelines:
 - **Verify:** 6 tests — basic join, empty inputs, one-to-many, parallelism invariance over {1, 2, 4, 8}, equivalence vs O(N·M) baseline over 50×30 elements.
 - [!] **Deferred:** parallel windowed-aggregate operator and SWAG CTrie index.
 
-### 3b Persistent storage backend
+### 3b Persistent storage backends
 
-- [x] `cqels-storage-sled` — first production-grade backend implementing all SPI traits (`PersistentBackend`, `EventJournal`, `CheckpointStore`, `StorageBackendProvider`) against the pure-Rust `sled` embedded KV store.
-- **Verify:** 8 tests — append/read round-trip, read-from offset filter, truncate-before, checkpoint write/latest, latest-by-id ordering, delete-older-than, provider creation, next-offset recovery across reopen.
-- [!] **Why sled, not RocksDB?** The Rust `rocksdb` crate and oxigraph's transitively-included `oxrocksdb-sys` both declare `links = "rocksdb"`, so Cargo refuses to compile both in the same workspace. Sled has equivalent semantics for our use case, no native link conflict, and faster compile times. A future RocksDB backend can slot in once `oxrocksdb-sys` is gated behind an opt-in feature.
-- [!] **Deferred:** dedicated LMDB and IoTDB backends.
+- [x] **`cqels-storage-sled`** — production-grade embedded backend using the pure-Rust `sled` KV store. 8 tests.
+- [x] **`cqels-storage-lmdb`** — production-grade embedded backend using the pure-Rust `heed` LMDB binding (memory-mapped, MVCC). 8 tests.
+- [!] **Why no RocksDB?** The Rust `rocksdb` crate and oxigraph's transitively-included `oxrocksdb-sys` both declare `links = "rocksdb"`, so Cargo refuses to compile both in the same workspace. Sled + LMDB cover the embedded-KV slot pragmatically. A future RocksDB backend can slot in once `oxrocksdb-sys` is gated behind an opt-in feature.
+- [!] **Deferred:** IoTDB backend (network database, large surface).
 
-### 3c External integration modules (not started)
+### 3c External integration modules
 
-- [ ] **`cqels-mcp` Rust port:** MCP server exposing engine to LLM agents (8 tools, 4 resources).
+- [x] **`cqels-mcp` scaffolding** — protocol-agnostic tool layer with `McpTool` trait, `ToolRegistry`, `ToolInputSchema`/`ToolInvocation`/`ToolResult`, and two reference tools (`parse_query`, `query`). 10 tests. Wiring a JSON-RPC transport (rmcp / custom) is a follow-up. Live execution requires an engine handle. Follow-up tools: `store_memory`, `recall_memory`, `forget_memory`, `register_stream_query`, `reason`, `validate`, `solve`.
 - [ ] **`cqels-cdsp` Rust port:** COVESA vehicle-data integration.
+
+### 3d Property-based testing
+
+- [x] `cqels-core/tests/proptest_joins.rs` — proptest property tests for `WindowedSelfJoinState` and `ParallelHashJoinOperator` over random event streams, comparing against O(N²)/O(N·M) nested-loop baselines. 3 properties × 50–100 cases each.
 
 ## Out of scope (intentional)
 
@@ -102,3 +106,6 @@ Per the project's behavioral guidelines:
 - **2.1 follow-up: Continuous trigger variants** — `ContinuousEventTimeTrigger`, `ContinuousProcessingTimeTrigger` (`windowing::continuous`). 7 tests. Trigger family now 8/8 ported.
 - **3a Parallel hash-join** — `ParallelHashJoinOperator<L, R, K, Out>` in `cqels-core::operator::parallel_hash_join`. Sequential build → concurrent probe via `buffer_unordered`. 6 tests including a baseline equivalence over 50×30 elements.
 - **3b cqels-storage-sled** — first production-grade backend. Implements `PersistentBackend`/`EventJournal`/`CheckpointStore`/`StorageBackendProvider`. Sled trees keyed by 8-byte big-endian offsets/IDs, JSON-encoded payloads, recoverable next-offset counter. 8 tests including reopen-and-resume.
+- **3b cqels-storage-lmdb** — second production-grade backend using `heed` (pure-Rust LMDB binding). Memory-mapped, MVCC, copy-on-write transactions. Three LMDB databases (`journal`, `checkpoints`, `meta`) in a single env. 8 tests, identical surface to sled.
+- **3c cqels-mcp scaffolding** — `McpTool` trait + `ToolRegistry` + `ToolInputSchema`/`ToolInvocation`/`ToolResult` value types. Reference tools `parse_query` and `query` (dry-run). 10 tests. Transport-agnostic — any Rust MCP SDK can wrap the registry.
+- **3d Property tests** — proptest comparisons of `WindowedSelfJoinState` and `ParallelHashJoinOperator` against brute-force baselines across random event streams (100/100/50 cases).
