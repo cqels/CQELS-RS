@@ -33,4 +33,4 @@ pub mod tools;
 
 pub use registry::{McpError, ToolRegistry};
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
-pub use tools::{parse_query_tool, query_tool};
+pub use tools::{parse_query_tool, query_tool, reasoning_profiles_tool, shacl_capabilities_tool};

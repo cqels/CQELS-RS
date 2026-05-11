@@ -7,6 +7,7 @@
 //! wiring `cqels_engine::CqelsEngine` into the tool handler.
 
 use cqels_core::parser::CqelsQlParser;
+use cqels_reasoning::ReasoningProfile;
 use serde_json::json;
 
 use crate::tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
@@ -137,6 +138,134 @@ impl McpTool for QueryTool {
     }
 }
 
+// ─── reasoning_profiles ──────────────────────────────────────────────
+
+/// Returns a stateless [`ReasoningProfilesTool`] that lists or describes
+/// available reasoning profiles. Mirrors a subset of Java's `reason`
+/// tool — describing capabilities without performing live inference.
+/// Live `reason()` execution against a working memory is a follow-up.
+pub fn reasoning_profiles_tool() -> ReasoningProfilesTool {
+    ReasoningProfilesTool
+}
+
+pub struct ReasoningProfilesTool;
+
+fn all_profiles() -> [ReasoningProfile; 7] {
+    [
+        ReasoningProfile::None,
+        ReasoningProfile::Rdfs,
+        ReasoningProfile::RdfsFull,
+        ReasoningProfile::OwlLite,
+        ReasoningProfile::OwlQl,
+        ReasoningProfile::Owl2El,
+        ReasoningProfile::Owl2Rl,
+    ]
+}
+
+fn profile_summary(profile: ReasoningProfile) -> serde_json::Value {
+    let rules = profile.rules();
+    json!({
+        "name": profile.name(),
+        "description": profile.description(),
+        "rule_count": rules.len(),
+        "requires_recursive_inference": profile.requires_recursive_inference(),
+    })
+}
+
+impl McpTool for ReasoningProfilesTool {
+    fn name(&self) -> &str {
+        "reasoning_profiles"
+    }
+
+    fn description(&self) -> &str {
+        "List supported reasoning profiles (RDFS, OWL-QL, OWL2-EL, OWL2-RL, \
+         etc.) with their rule counts and capabilities, or describe one \
+         specific profile in detail. Returns metadata only — live inference \
+         against a working memory is a separate operation."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object().with_property(
+            "profile",
+            json!({
+                "type": "string",
+                "description": "Optional profile name (e.g., 'RDFS', 'OWL-QL', 'OWL2-RL'). If omitted, lists all profiles.",
+            }),
+        )
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        match invocation.get_str("profile") {
+            None | Some("") => {
+                let profiles: Vec<_> = all_profiles().iter().map(|p| profile_summary(*p)).collect();
+                ToolResult::success(json!({ "profiles": profiles }))
+            }
+            Some(name) => match resolve_profile(name) {
+                Some(p) => ToolResult::success(profile_summary(p)),
+                None => ToolResult::error(format!(
+                    "unknown reasoning profile '{name}'; try one of: NONE, RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL"
+                )),
+            },
+        }
+    }
+}
+
+fn resolve_profile(name: &str) -> Option<ReasoningProfile> {
+    let normalized = name.to_uppercase().replace('_', "-");
+    all_profiles()
+        .into_iter()
+        .find(|p| p.name().to_uppercase() == normalized)
+}
+
+// ─── shacl_capabilities ──────────────────────────────────────────────
+
+/// Returns a [`ShaclCapabilitiesTool`] that describes the SHACL features
+/// supported by `cqels-shacl`. Useful for LLM agents that need to know
+/// which constraints they can author against the engine.
+pub fn shacl_capabilities_tool() -> ShaclCapabilitiesTool {
+    ShaclCapabilitiesTool
+}
+
+pub struct ShaclCapabilitiesTool;
+
+impl McpTool for ShaclCapabilitiesTool {
+    fn name(&self) -> &str {
+        "shacl_capabilities"
+    }
+
+    fn description(&self) -> &str {
+        "Describe the SHACL features supported by the engine: shape kinds, \
+         constraint types, severity levels, and the repair-candidate \
+         pipeline. Returns metadata only."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+    }
+
+    fn call(&self, _invocation: &ToolInvocation) -> ToolResult {
+        ToolResult::success(json!({
+            "shape_kinds": ["NodeShape", "PropertyShape"],
+            "node_kinds": ["IRI", "BlankNode", "Literal", "BlankNodeOrIri", "BlankNodeOrLiteral", "IriOrLiteral"],
+            "supported_constraints": [
+                "sh:targetClass",
+                "sh:path",
+                "sh:datatype",
+                "sh:minCount",
+                "sh:maxCount",
+                "sh:nodeKind",
+                "sh:class",
+            ],
+            "severities": ["Info", "Warning", "Violation"],
+            "features": {
+                "repair_candidates": true,
+                "asp_compilation": true,
+                "continuous_validation": true,
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +283,8 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.install(parse_query_tool());
         reg.install(query_tool());
+        reg.install(reasoning_profiles_tool());
+        reg.install(shacl_capabilities_tool());
         reg.call(name, &args).expect("dispatch")
     }
 
@@ -235,5 +366,74 @@ mod tests {
         assert!(q_schema.properties.contains_key("query"));
         assert!(q_schema.properties.contains_key("dry_run"));
         assert!(q_schema.required.contains(&"query".to_string()));
+    }
+
+    // ─── reasoning_profiles tests ────────────────────────────────────
+
+    #[test]
+    fn reasoning_profiles_lists_all_when_no_argument() {
+        let res = run("reasoning_profiles", ToolInvocation::new());
+        assert!(!res.is_error);
+        let profiles = res.content["profiles"].as_array().expect("array");
+        // Currently 7 profiles ported (None, RDFS, RDFS-Full, OWL-Lite,
+        // OWL-QL, OWL2-EL, OWL2-RL).
+        assert_eq!(profiles.len(), 7);
+        // Every entry must include name + rule_count.
+        for p in profiles {
+            assert!(p["name"].is_string());
+            assert!(p["rule_count"].is_number());
+        }
+    }
+
+    #[test]
+    fn reasoning_profiles_describes_named_profile() {
+        let res = run(
+            "reasoning_profiles",
+            ToolInvocation::new().with_arg("profile", serde_json::json!("RDFS")),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["name"], "RDFS");
+        assert!(res.content["rule_count"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn reasoning_profiles_handles_case_insensitive_name() {
+        let res = run(
+            "reasoning_profiles",
+            ToolInvocation::new().with_arg("profile", serde_json::json!("owl2-rl")),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["name"], "OWL2-RL");
+    }
+
+    #[test]
+    fn reasoning_profiles_rejects_unknown_profile_with_hint() {
+        let res = run(
+            "reasoning_profiles",
+            ToolInvocation::new().with_arg("profile", serde_json::json!("nope")),
+        );
+        assert!(res.is_error);
+        let msg = res.content["message"].as_str().unwrap();
+        assert!(msg.contains("RDFS") && msg.contains("OWL2-RL"));
+    }
+
+    // ─── shacl_capabilities tests ────────────────────────────────────
+
+    #[test]
+    fn shacl_capabilities_returns_supported_constraints() {
+        let res = run("shacl_capabilities", ToolInvocation::new());
+        assert!(!res.is_error);
+        let constraints = res.content["supported_constraints"]
+            .as_array()
+            .expect("array");
+        // Spot-check a handful of the constraints we expose.
+        let names: Vec<&str> = constraints.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(names.iter().any(|c| c == &"sh:targetClass"));
+        assert!(names.iter().any(|c| c == &"sh:minCount"));
+        assert_eq!(
+            res.content["features"]["repair_candidates"],
+            serde_json::Value::Bool(true),
+            "repair candidates flag"
+        );
     }
 }

@@ -11,6 +11,8 @@ keywords.workspace = true
 [dependencies]
 cqels-core.workspace = true
 cqels-model.workspace = true
+cqels-reasoning.workspace = true
+cqels-shacl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
