@@ -9,6 +9,7 @@ members = [
     "cqels-storage-sled",
     "cqels-storage-lmdb",
     "cqels-asp",
+    "cqels-mcp",
     "cqels-shacl",
     "cqels-benchmarks",
     "xtask",

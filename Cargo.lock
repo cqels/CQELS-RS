@@ -334,6 +334,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cqels-mcp"
+version = "0.1.0"
+dependencies = [
+ "cqels-core",
+ "cqels-model",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "cqels-model"
 version = "0.1.0"
 dependencies = [
