@@ -840,6 +840,46 @@ mod tests {
     }
 
     #[test]
+    fn keyword_prefix_identifiers_parse_correctly() {
+        // Regression for the proptest flake where `truea` would parse
+        // as `true` (boolean literal) + a stray `a`. Identifiers that
+        // start with `true` / `false` / `null` must be treated as
+        // identifiers, not as keyword + suffix.
+        for var_name in ["truea", "falseling", "nullable", "true_friend"] {
+            let query = format!(
+                r#"
+                FROM STREAM events [NOW]
+                MATCH ({var_name}:Person)
+                RETURN {var_name}.name
+            "#
+            );
+            let result = CypherQlParser::parse(&query);
+            assert!(
+                result.is_ok(),
+                "identifier '{var_name}' should parse cleanly; got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn bare_boolean_literals_still_parse() {
+        // The boundary guard must not break literal parsing when
+        // followed by whitespace, punctuation, or EOI.
+        for q in [
+            "FROM STREAM s [NOW] MATCH (n:T) WHERE n.flag = true RETURN n",
+            "FROM STREAM s [NOW] MATCH (n:T) WHERE n.flag = false RETURN n",
+        ] {
+            let result = CypherQlParser::parse(q);
+            assert!(
+                result.is_ok(),
+                "bare literal in '{q}' must still parse; got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_register_cypher_query() {
         let query = r#"
             REGISTER QUERY myQ AS

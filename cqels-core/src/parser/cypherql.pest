@@ -206,9 +206,14 @@ string_literal = @{
     | "\"" ~ (!"\"" ~ !"\\" ~ ANY | "\\" ~ ANY)* ~ "\""
 }
 
-boolean_literal = { ^"true" | ^"false" }
+// Note the trailing `!(ASCII_ALPHANUMERIC | "_")` boundary check —
+// without it, the parser would happily match `true` from an identifier
+// like `truea` and leave `a` as a stray token. The `identifier` rule's
+// own `!reserved_word` lookahead enforces the boundary on the other
+// side; this guard keeps the literal rules symmetric with it.
+boolean_literal = @{ (^"true" | ^"false") ~ !(ASCII_ALPHANUMERIC | "_") }
 
-null_literal = { ^"null" }
+null_literal = @{ ^"null" ~ !(ASCII_ALPHANUMERIC | "_") }
 
 integer_literal = @{ ASCII_DIGIT+ }
 
