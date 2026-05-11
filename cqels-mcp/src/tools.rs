@@ -6,10 +6,13 @@
 //! stream queries against a live engine is a follow-up that requires
 //! wiring `cqels_engine::CqelsEngine` into the tool handler.
 
+use std::sync::Arc;
+
 use cqels_core::parser::CqelsQlParser;
 use cqels_reasoning::ReasoningProfile;
 use serde_json::json;
 
+use crate::memory::{MemoryFact, MemoryStore};
 use crate::tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 
 // ─── parse_query ─────────────────────────────────────────────────────
@@ -266,6 +269,183 @@ impl McpTool for ShaclCapabilitiesTool {
     }
 }
 
+// ─── memory tools ────────────────────────────────────────────────────
+
+const DEFAULT_NAMESPACE: &str = "default";
+
+fn namespace_from(invocation: &ToolInvocation) -> String {
+    invocation
+        .get_str("namespace")
+        .unwrap_or(DEFAULT_NAMESPACE)
+        .to_string()
+}
+
+/// Constructs a `store_memory` tool backed by the supplied
+/// [`MemoryStore`].
+pub fn store_memory_tool(store: Arc<dyn MemoryStore>) -> StoreMemoryTool {
+    StoreMemoryTool { store }
+}
+
+pub struct StoreMemoryTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for StoreMemoryTool {
+    fn name(&self) -> &str {
+        "store_memory"
+    }
+
+    fn description(&self) -> &str {
+        "Persist a fact to long-term memory keyed by (namespace, id). \
+         Replaces any existing fact at the same key. Returns the stored \
+         fact's metadata."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("id", json!({
+                "type": "string",
+                "description": "Unique identifier for this fact within the namespace.",
+            }))
+            .with_property("content", json!({
+                "type": "string",
+                "description": "Raw content of the memory (free-form text, JSON, Turtle, etc.).",
+            }))
+            .with_property("namespace", json!({
+                "type": "string",
+                "description": "Logical bucket isolating memories (default: \"default\").",
+                "default": DEFAULT_NAMESPACE,
+            }))
+            .require("id")
+            .require("content")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(id) = invocation.get_str("id").map(str::to_string) else {
+            return ToolResult::error("missing `id` argument");
+        };
+        let Some(content) = invocation.get_str("content").map(str::to_string) else {
+            return ToolResult::error("missing `content` argument");
+        };
+        let namespace = namespace_from(invocation);
+        let fact = MemoryFact::new(namespace.clone(), id.clone(), content);
+        match self.store.store(fact.clone()) {
+            Ok(()) => ToolResult::success(json!({
+                "ok": true,
+                "namespace": fact.namespace,
+                "id": fact.id,
+                "created_at_ms": fact.created_at_ms,
+            })),
+            Err(e) => ToolResult::error(format!("store failed: {e}")),
+        }
+    }
+}
+
+/// Constructs a `recall_memory` tool backed by the supplied
+/// [`MemoryStore`].
+pub fn recall_memory_tool(store: Arc<dyn MemoryStore>) -> RecallMemoryTool {
+    RecallMemoryTool { store }
+}
+
+pub struct RecallMemoryTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for RecallMemoryTool {
+    fn name(&self) -> &str {
+        "recall_memory"
+    }
+
+    fn description(&self) -> &str {
+        "Retrieve memories from a namespace, optionally filtered to facts \
+         whose content contains a query substring. Returns facts sorted \
+         by id."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("namespace", json!({
+                "type": "string",
+                "description": "Namespace to recall from. Defaults to \"default\".",
+                "default": DEFAULT_NAMESPACE,
+            }))
+            .with_property("query", json!({
+                "type": "string",
+                "description": "Substring to match within fact content. Empty/missing returns all facts in the namespace.",
+            }))
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let query = invocation.get_str("query").unwrap_or("").to_string();
+        match self.store.recall(&namespace, &query) {
+            Ok(facts) => ToolResult::success(json!({
+                "namespace": namespace,
+                "query": query,
+                "count": facts.len(),
+                "facts": facts,
+            })),
+            Err(e) => ToolResult::error(format!("recall failed: {e}")),
+        }
+    }
+}
+
+/// Constructs a `forget_memory` tool backed by the supplied
+/// [`MemoryStore`].
+pub fn forget_memory_tool(store: Arc<dyn MemoryStore>) -> ForgetMemoryTool {
+    ForgetMemoryTool { store }
+}
+
+pub struct ForgetMemoryTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for ForgetMemoryTool {
+    fn name(&self) -> &str {
+        "forget_memory"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a memory fact by (namespace, id). Returns whether a \
+         fact was actually removed."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property(
+                "id",
+                json!({
+                    "type": "string",
+                    "description": "Identifier of the memory to forget.",
+                }),
+            )
+            .with_property(
+                "namespace",
+                json!({
+                    "type": "string",
+                    "description": "Namespace the memory lives in. Defaults to \"default\".",
+                    "default": DEFAULT_NAMESPACE,
+                }),
+            )
+            .require("id")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(id) = invocation.get_str("id").map(str::to_string) else {
+            return ToolResult::error("missing `id` argument");
+        };
+        let namespace = namespace_from(invocation);
+        match self.store.forget(&namespace, &id) {
+            Ok(removed) => ToolResult::success(json!({
+                "namespace": namespace,
+                "id": id,
+                "removed": removed,
+            })),
+            Err(e) => ToolResult::error(format!("forget failed: {e}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +615,152 @@ mod tests {
             serde_json::Value::Bool(true),
             "repair candidates flag"
         );
+    }
+
+    // ─── memory tools tests ──────────────────────────────────────────
+
+    use crate::memory::InMemoryMemoryStore;
+
+    fn run_with_memory(
+        store: Arc<InMemoryMemoryStore>,
+        name: &str,
+        args: ToolInvocation,
+    ) -> ToolResult {
+        let mut reg = ToolRegistry::new();
+        reg.install(store_memory_tool(store.clone()));
+        reg.install(recall_memory_tool(store.clone()));
+        reg.install(forget_memory_tool(store));
+        reg.call(name, &args).expect("dispatch")
+    }
+
+    #[test]
+    fn store_memory_persists_a_fact() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("greeting"))
+                .with_arg("content", serde_json::json!("hello world")),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["id"], "greeting");
+        assert_eq!(res.content["namespace"], "default");
+        // Direct check the store has the fact.
+        let facts = store.recall("default", "").unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].content, "hello world");
+    }
+
+    #[test]
+    fn store_memory_requires_id_and_content() {
+        let store = InMemoryMemoryStore::shared();
+        let no_id = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg("content", serde_json::json!("x")),
+        );
+        assert!(no_id.is_error);
+
+        let no_content = run_with_memory(
+            store,
+            "store_memory",
+            ToolInvocation::new().with_arg("id", serde_json::json!("k")),
+        );
+        assert!(no_content.is_error);
+    }
+
+    #[test]
+    fn recall_memory_filters_by_substring_query() {
+        let store = InMemoryMemoryStore::shared();
+        store
+            .store(MemoryFact::new("default", "a", "alpha bravo"))
+            .unwrap();
+        store
+            .store(MemoryFact::new("default", "b", "charlie delta"))
+            .unwrap();
+        let res = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg("query", serde_json::json!("delta")),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["count"], 1);
+        assert_eq!(res.content["facts"][0]["id"], "b");
+    }
+
+    #[test]
+    fn recall_memory_supports_namespaces() {
+        let store = InMemoryMemoryStore::shared();
+        store.store(MemoryFact::new("session-1", "k", "a")).unwrap();
+        store.store(MemoryFact::new("session-2", "k", "b")).unwrap();
+        let res = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg("namespace", serde_json::json!("session-2")),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["count"], 1);
+        assert_eq!(res.content["facts"][0]["content"], "b");
+    }
+
+    #[test]
+    fn forget_memory_removes_existing_fact() {
+        let store = InMemoryMemoryStore::shared();
+        store.store(MemoryFact::new("default", "k", "v")).unwrap();
+        let res = run_with_memory(
+            store.clone(),
+            "forget_memory",
+            ToolInvocation::new().with_arg("id", serde_json::json!("k")),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["removed"], true);
+        assert_eq!(store.len("default").unwrap(), 0);
+    }
+
+    #[test]
+    fn forget_memory_returns_false_when_missing() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store,
+            "forget_memory",
+            ToolInvocation::new().with_arg("id", serde_json::json!("nope")),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["removed"], false);
+    }
+
+    #[test]
+    fn store_recall_forget_cycle_end_to_end() {
+        let store = InMemoryMemoryStore::shared();
+        // Store
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("k"))
+                .with_arg("content", serde_json::json!("the answer is 42")),
+        );
+        // Recall
+        let recall = run_with_memory(
+            store.clone(),
+            "recall_memory",
+            ToolInvocation::new().with_arg("query", serde_json::json!("42")),
+        );
+        assert_eq!(recall.content["count"], 1);
+        // Forget
+        let forget = run_with_memory(
+            store.clone(),
+            "forget_memory",
+            ToolInvocation::new().with_arg("id", serde_json::json!("k")),
+        );
+        assert_eq!(forget.content["removed"], true);
+        // Recall again — empty
+        let recall2 = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg("query", serde_json::json!("42")),
+        );
+        assert_eq!(recall2.content["count"], 0);
     }
 }

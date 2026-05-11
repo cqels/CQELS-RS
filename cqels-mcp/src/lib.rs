@@ -27,12 +27,17 @@
 //! | `validate`         | follow-up (needs cqels-shacl bridge) |
 //! | `solve`            | follow-up (needs cqels-asp bridge) |
 
+pub mod memory;
 pub mod registry;
 pub mod tool;
 pub mod tools;
 pub mod transport;
 
+pub use memory::{InMemoryMemoryStore, MemoryError, MemoryFact, MemoryStore, SledMemoryStore};
 pub use registry::{McpError, ToolRegistry};
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
-pub use tools::{parse_query_tool, query_tool, reasoning_profiles_tool, shacl_capabilities_tool};
+pub use tools::{
+    forget_memory_tool, parse_query_tool, query_tool, reasoning_profiles_tool, recall_memory_tool,
+    shacl_capabilities_tool, store_memory_tool,
+};
 pub use transport::{handle_request, run_stdio, PROTOCOL_VERSION, SERVER_NAME};

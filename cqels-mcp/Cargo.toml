@@ -16,6 +16,9 @@ cqels-shacl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+parking_lot.workspace = true
+sled = "0.34"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"
