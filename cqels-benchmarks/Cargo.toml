@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "engine_facade"
 harness = false
+
+[[bench]]
+name = "parallel_operators"
+harness = false
