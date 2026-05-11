@@ -183,6 +183,12 @@ impl CqelsQueryCompiler {
             format!("cqels-query-{}-{n}", hash_string(query_string))
         });
 
+        // Detect self-join optimization opportunities. Populated whether
+        // or not the runtime currently consumes them — see
+        // `CompiledCqelsQuery::self_join_hints` doc for the planned
+        // substitution path.
+        let self_join_hints = crate::compiler::self_join::detect_self_joins(&definition);
+
         Ok(CompiledCqelsQuery {
             query_string: query_string.to_string(),
             query_id,
@@ -195,6 +201,7 @@ impl CqelsQueryCompiler {
             evaluator: Arc::new(evaluator),
             select_vars: Arc::new(select_vars),
             rdf_store,
+            self_join_hints: Arc::new(self_join_hints),
         })
     }
 }
@@ -350,5 +357,41 @@ mod tests {
         assert!(result.is_ok());
         let compiled = result.unwrap();
         assert!(compiled.evaluator.prefixes().contains_key("ex"));
+    }
+
+    /// Compiling a non-self-join query records zero hints — the
+    /// runtime falls through to the default pattern-matching path.
+    #[test]
+    fn test_compile_basic_query_has_no_self_join_hints() {
+        let def = make_basic_definition();
+        let compiled = CqelsQueryCompiler::compile("...", def).expect("compile");
+        assert!(!compiled.has_self_join_optimization());
+        assert!(compiled.self_join_hints().is_empty());
+    }
+
+    /// Compiling a self-join query (two Stream blocks on the same source
+    /// with a shared variable) populates `self_join_hints` from the
+    /// compile-time detector. Verifies that detection output flows
+    /// through compilation into the executable artifact.
+    #[test]
+    fn test_compile_self_join_query_records_hint() {
+        let query = r#"
+            SELECT ?driver ?passenger
+            FROM STREAM rides [RANGE 10s]
+            WHERE {
+                STREAM rides { ?driver <http://ex.org/in> ?car . }
+                STREAM rides { ?passenger <http://ex.org/in> ?car . }
+            }
+        "#;
+        let def = crate::parser::CqelsQlParser::parse(query).expect("parse");
+        let compiled = CqelsQueryCompiler::compile(query, def).expect("compile");
+        assert!(
+            compiled.has_self_join_optimization(),
+            "self-join query should produce at least one hint"
+        );
+        let hints = compiled.self_join_hints();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].source, "rides");
+        assert!(hints[0].join_keys.contains(&"car".to_string()));
     }
 }

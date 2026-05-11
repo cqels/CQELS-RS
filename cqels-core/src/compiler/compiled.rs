@@ -67,6 +67,28 @@ pub struct CompiledCqelsQuery {
     pub(crate) select_vars: Arc<Vec<String>>,
     /// Optional RDF store for STATIC and GRAPH pattern lookups.
     pub(crate) rdf_store: Option<Arc<dyn RdfStore>>,
+    /// Self-join hints detected at compile time. Populated by
+    /// [`crate::compiler::self_join::detect_self_joins`]. Empty unless the
+    /// query has two or more `Stream { ... }` pattern groups over the same
+    /// source sharing at least one variable.
+    ///
+    /// Runtime can branch on this to substitute
+    /// `cqels_core::operator::join::WindowedSelfJoinState` for the default
+    /// pattern-matching path (O(N+M) vs O(N·M)). Substitution is currently
+    /// a TODO — see issue tracker.
+    pub(crate) self_join_hints: Arc<Vec<crate::compiler::self_join::SelfJoinHint>>,
+}
+
+impl CompiledCqelsQuery {
+    /// Self-join hints discovered at compile time, in declaration order.
+    pub fn self_join_hints(&self) -> &[crate::compiler::self_join::SelfJoinHint] {
+        &self.self_join_hints
+    }
+
+    /// `true` when the compiler detected at least one self-join opportunity.
+    pub fn has_self_join_optimization(&self) -> bool {
+        !self.self_join_hints.is_empty()
+    }
 }
 
 #[async_trait]
@@ -1061,6 +1083,7 @@ mod tests {
             evaluator: Arc::new(ExpressionEvaluator::new()),
             select_vars: Arc::new(vec!["sensor".to_string(), "temp".to_string()]),
             rdf_store: None,
+            self_join_hints: Arc::new(vec![]),
         };
 
         // Create test input stream
