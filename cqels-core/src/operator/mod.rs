@@ -10,6 +10,7 @@ pub mod filter;
 pub mod join;
 pub mod minus;
 pub mod parallel;
+pub mod parallel_aggregate;
 pub mod parallel_hash_join;
 pub mod ranking;
 pub mod rspql;
@@ -31,6 +32,7 @@ pub use minus::{compatible, MinusOperator};
 pub use parallel::{
     AggregationBackend, ParallelExecutionConfig, ParallelExecutionConfigBuilder, SwagConfig,
 };
+pub use parallel_aggregate::ParallelWindowedAggregateOperator;
 pub use parallel_hash_join::ParallelHashJoinOperator;
 pub use ranking::{RankedElement, SortDirection, SortKey, TopKOperator};
 pub use rspql::{DStreamOperator, IStreamOperator, RStreamOperator, WindowSnapshot, WindowUpdate};
