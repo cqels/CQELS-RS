@@ -218,7 +218,7 @@ pub fn run_stdio<R: BufRead, W: Write>(
 mod tests {
     use super::*;
     use crate::{
-        analyze_query_tool, parse_query_tool, query_tool, reasoning_profiles_tool,
+        analyze_query_tool, parse_query_tool, query_tool, reason_tool, reasoning_profiles_tool,
         shacl_capabilities_tool,
     };
 
@@ -229,6 +229,7 @@ mod tests {
         reg.install(analyze_query_tool());
         reg.install(reasoning_profiles_tool());
         reg.install(shacl_capabilities_tool());
+        reg.install(reason_tool());
         reg
     }
 
@@ -265,7 +266,7 @@ mod tests {
         let resp = handle_request(&reg, req).expect("response");
         let value = parse_response(&resp);
         let tools = value["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
         // Spot-check: every tool has name + description + inputSchema.
         for tool in tools {
             assert!(tool["name"].is_string());

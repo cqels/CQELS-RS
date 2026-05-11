@@ -13,10 +13,13 @@
 //! tool handler.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cqels_core::compiler::CqelsQueryCompiler;
 use cqels_core::parser::CqelsQlParser;
-use cqels_reasoning::ReasoningProfile;
+use cqels_core::stream::RdfStreamElement;
+use cqels_model::{IriTerm, LiteralTerm, Statement, Term};
+use cqels_reasoning::{ReasoningConfig, ReasoningProfile, ReteNetwork};
 use serde_json::json;
 
 use crate::memory::{MemoryFact, MemoryStore};
@@ -360,6 +363,179 @@ impl McpTool for ShaclCapabilitiesTool {
     }
 }
 
+// ─── reason ──────────────────────────────────────────────────────────
+
+/// Returns a stateless [`ReasonTool`] that runs a one-shot RETE
+/// inference over a small triple set using a built-in reasoning
+/// profile (RDFS, OWL-RL, etc.).
+///
+/// Inputs:
+/// - `profile`: profile name (`RDFS`, `RDFS-Full`, `OWL-Lite`,
+///   `OWL-QL`, `OWL2-EL`, `OWL2-RL`). Required.
+/// - `triples`: array of `{s, p, o}` objects. `s` and `p` must be IRIs;
+///   `o` is treated as an IRI if it parses as a URL (`http(s)://...`)
+///   or starts with `<` / contains `:`, otherwise as a literal. Required.
+/// - `timestamp` (optional): integer ms timestamp applied to every
+///   asserted fact. Defaults to `0`.
+///
+/// Returns the inferred (closure - asserted) triples plus rule
+/// provenance per inference.
+///
+/// This is a *one-shot* tool: each invocation builds a fresh RETE
+/// network, feeds the asserted triples through `process_element`, and
+/// emits whatever new facts the rules deduce. It does **not**
+/// preserve state between calls — for that, register the inference
+/// against a live engine.
+pub fn reason_tool() -> ReasonTool {
+    ReasonTool
+}
+
+pub struct ReasonTool;
+
+impl McpTool for ReasonTool {
+    fn name(&self) -> &str {
+        "reason"
+    }
+
+    fn description(&self) -> &str {
+        "Run one-shot RETE inference over a triple set using a built-in \
+         reasoning profile (RDFS / OWL-Lite / OWL-QL / OWL2-EL / OWL2-RL). \
+         Inputs: `profile` (string) + `triples` (array of `{s, p, o}` \
+         objects). Returns inferred triples with rule provenance. \
+         Stateless — no engine wiring required."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property(
+                "profile",
+                json!({
+                    "type": "string",
+                    "description": "Reasoning profile name (RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL)."
+                }),
+            )
+            .with_property(
+                "triples",
+                json!({
+                    "type": "array",
+                    "description": "Asserted triples to reason over. Each item is { s, p, o }.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "s": { "type": "string" },
+                            "p": { "type": "string" },
+                            "o": { "type": "string" }
+                        },
+                        "required": ["s", "p", "o"]
+                    }
+                }),
+            )
+            .with_property(
+                "timestamp",
+                json!({
+                    "type": "integer",
+                    "description": "Timestamp (ms) applied to each asserted fact. Defaults to 0.",
+                    "default": 0
+                }),
+            )
+            .require("profile")
+            .require("triples")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(profile_name) = invocation.get_str("profile") else {
+            return ToolResult::error("missing `profile` argument");
+        };
+        let Some(profile) = resolve_profile(profile_name) else {
+            return ToolResult::error(format!(
+                "unknown reasoning profile '{profile_name}'; try one of: \
+                 RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL"
+            ));
+        };
+        let Some(triples) = invocation.get("triples").and_then(|v| v.as_array()) else {
+            return ToolResult::error("missing or non-array `triples` argument");
+        };
+        let timestamp = invocation
+            .get("timestamp")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut elements = Vec::with_capacity(triples.len());
+        for (i, t) in triples.iter().enumerate() {
+            let (s, p, o) = match (
+                t.get("s").and_then(|v| v.as_str()),
+                t.get("p").and_then(|v| v.as_str()),
+                t.get("o").and_then(|v| v.as_str()),
+            ) {
+                (Some(s), Some(p), Some(o)) => (s, p, o),
+                _ => {
+                    return ToolResult::error(format!(
+                        "triple #{i} must be {{ s, p, o }} of strings"
+                    ));
+                }
+            };
+            let stmt = Statement::new(parse_term(s), IriTerm::new(p), parse_term(o));
+            elements.push(RdfStreamElement::new(stmt, timestamp));
+        }
+
+        // Default window covers a year — large enough that asserted
+        // facts persist through the closure-computation pass.
+        let config = ReasoningConfig::builder()
+            .rule_set(profile.rule_set())
+            .default_window(Duration::from_secs(60 * 60 * 24 * 365))
+            .enable_recursive_inference(profile.requires_recursive_inference())
+            .build();
+        let mut network = ReteNetwork::compile(config);
+
+        let mut inferred = Vec::new();
+        for elem in &elements {
+            for inf in network.process_element(elem) {
+                let stmt = &inf.statement;
+                inferred.push(json!({
+                    "s": term_to_string(&stmt.subject),
+                    "p": stmt.predicate.as_str(),
+                    "o": term_to_string(&stmt.object),
+                    "rule_id": inf.inferred_by,
+                }));
+            }
+        }
+
+        ToolResult::success(json!({
+            "profile": profile.name(),
+            "input_count": elements.len(),
+            "inferred_count": inferred.len(),
+            "inferred": inferred,
+        }))
+    }
+}
+
+/// Heuristic: treat strings that look like IRIs as IRIs, everything
+/// else as plain literals. Brackets `<...>` are stripped. This is the
+/// same heuristic used by `cqels-shacl`'s reference parser.
+fn parse_term(s: &str) -> Term {
+    let trimmed = s.trim();
+    if trimmed.starts_with('<') && trimmed.ends_with('>') && trimmed.len() >= 2 {
+        return Term::Iri(IriTerm::new(&trimmed[1..trimmed.len() - 1]));
+    }
+    let looks_like_iri = trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("urn:")
+        || trimmed.starts_with("file://");
+    if looks_like_iri {
+        Term::Iri(IriTerm::new(trimmed))
+    } else {
+        Term::Literal(LiteralTerm::new(trimmed))
+    }
+}
+
+fn term_to_string(t: &Term) -> String {
+    match t {
+        Term::Iri(i) => i.as_str().to_string(),
+        Term::Literal(l) => l.value().to_string(),
+        other => other.to_string(),
+    }
+}
+
 // ─── memory tools ────────────────────────────────────────────────────
 
 const DEFAULT_NAMESPACE: &str = "default";
@@ -557,6 +733,7 @@ mod tests {
         reg.install(analyze_query_tool());
         reg.install(reasoning_profiles_tool());
         reg.install(shacl_capabilities_tool());
+        reg.install(reason_tool());
         reg.call(name, &args).expect("dispatch")
     }
 
@@ -764,6 +941,76 @@ mod tests {
             serde_json::Value::Bool(true),
             "repair candidates flag"
         );
+    }
+
+    // ─── reason tool tests ───────────────────────────────────────────
+
+    #[test]
+    fn reason_runs_rdfs_subclass_inference() {
+        // The classic RDFS test: assert `:Alice rdf:type :Person` and
+        // `:Person rdfs:subClassOf :Animal`, expect the inferred
+        // `:Alice rdf:type :Animal`.
+        let triples = serde_json::json!([
+            {
+                "s": "http://ex.org/alice",
+                "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                "o": "http://ex.org/Person"
+            },
+            {
+                "s": "http://ex.org/Person",
+                "p": "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                "o": "http://ex.org/Animal"
+            }
+        ]);
+        let res = run(
+            "reason",
+            ToolInvocation::new()
+                .with_arg("profile", serde_json::json!("RDFS"))
+                .with_arg("triples", triples),
+        );
+        assert!(!res.is_error, "reason should run without error");
+        assert_eq!(res.content["profile"], "RDFS");
+        let inferred = res.content["inferred"].as_array().expect("inferred array");
+        assert!(
+            inferred.iter().any(|t| {
+                t["s"].as_str() == Some("http://ex.org/alice")
+                    && t["o"].as_str() == Some("http://ex.org/Animal")
+            }),
+            "RDFS should infer :Alice rdf:type :Animal; got: {inferred:?}"
+        );
+    }
+
+    #[test]
+    fn reason_rejects_unknown_profile() {
+        let res = run(
+            "reason",
+            ToolInvocation::new()
+                .with_arg("profile", serde_json::json!("Bogus-Profile"))
+                .with_arg("triples", serde_json::json!([])),
+        );
+        assert!(res.is_error);
+    }
+
+    #[test]
+    fn reason_rejects_missing_triples() {
+        let res = run(
+            "reason",
+            ToolInvocation::new().with_arg("profile", serde_json::json!("RDFS")),
+        );
+        assert!(res.is_error);
+    }
+
+    #[test]
+    fn reason_empty_triples_returns_zero_inferred() {
+        let res = run(
+            "reason",
+            ToolInvocation::new()
+                .with_arg("profile", serde_json::json!("RDFS"))
+                .with_arg("triples", serde_json::json!([])),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["input_count"], 0);
+        assert_eq!(res.content["inferred_count"], 0);
     }
 
     // ─── memory tools tests ──────────────────────────────────────────
