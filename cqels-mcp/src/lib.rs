@@ -17,11 +17,14 @@
 //!
 //! | Java tool          | Status here              |
 //! |--------------------|--------------------------|
-//! | `query`            | ✅ implemented           |
-//! | `parse_query`      | ✅ implemented (new)     |
-//! | `store_memory`     | follow-up (needs store)  |
-//! | `recall_memory`    | follow-up (needs store)  |
-//! | `forget_memory`    | follow-up (needs store)  |
+//! | `query`            | ✅ implemented (dry-run) |
+//! | `parse_query`      | ✅ implemented (Rust-only) |
+//! | `analyze_query`    | ✅ implemented (Rust-only; compiler view) |
+//! | `reasoning_profiles` | ✅ implemented (metadata) |
+//! | `shacl_capabilities` | ✅ implemented (metadata) |
+//! | `store_memory`     | ✅ implemented (in-memory / sled) |
+//! | `recall_memory`    | ✅ implemented (in-memory / sled) |
+//! | `forget_memory`    | ✅ implemented (in-memory / sled) |
 //! | `register_stream_query` | follow-up (needs engine wiring) |
 //! | `reason`           | follow-up (needs cqels-reasoning bridge) |
 //! | `validate`         | follow-up (needs cqels-shacl bridge) |
@@ -37,7 +40,7 @@ pub use memory::{InMemoryMemoryStore, MemoryError, MemoryFact, MemoryStore, Sled
 pub use registry::{McpError, ToolRegistry};
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{
-    forget_memory_tool, parse_query_tool, query_tool, reasoning_profiles_tool, recall_memory_tool,
-    shacl_capabilities_tool, store_memory_tool,
+    analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reasoning_profiles_tool,
+    recall_memory_tool, shacl_capabilities_tool, store_memory_tool,
 };
 pub use transport::{handle_request, run_stdio, PROTOCOL_VERSION, SERVER_NAME};

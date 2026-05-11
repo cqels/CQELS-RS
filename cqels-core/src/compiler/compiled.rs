@@ -89,6 +89,19 @@ impl CompiledCqelsQuery {
     pub fn has_self_join_optimization(&self) -> bool {
         !self.self_join_hints.is_empty()
     }
+
+    /// The parsed query definition, exposing stream sources, pattern
+    /// groups, filters, sort specifications, and limits. Useful for
+    /// callers that need to inspect plan-level shape (e.g. an MCP
+    /// `analyze_query` tool).
+    pub fn definition(&self) -> &CqelsQueryDefinition {
+        &self.definition
+    }
+
+    /// The SELECT-projection variable names, in declaration order.
+    pub fn select_vars(&self) -> &[String] {
+        &self.select_vars
+    }
 }
 
 #[async_trait]

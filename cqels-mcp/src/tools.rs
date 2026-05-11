@@ -1,13 +1,20 @@
 //! Reference MCP tool implementations.
 //!
-//! Two foundational tools that exercise the full pipeline without
-//! requiring a running engine: `parse_query` (lexes/parses CqelsQL) and
-//! `query` (parses + compiles to a definition). Full registration of
-//! stream queries against a live engine is a follow-up that requires
-//! wiring `cqels_engine::CqelsEngine` into the tool handler.
+//! Stateless tools that exercise the parser, compiler, reasoning, and
+//! SHACL surfaces without requiring a running engine:
+//! `parse_query` (lex/parse only), `query` (parse + dry-run validate),
+//! `analyze_query` (full compile + planner-decision report),
+//! `reasoning_profiles`, `shacl_capabilities`. Memory tools
+//! (`store_memory`/`recall_memory`/`forget_memory`) are backed by
+//! pluggable [`MemoryStore`] implementations.
+//!
+//! Full registration of stream queries against a live engine is a
+//! follow-up that requires wiring `cqels_engine::CqelsEngine` into the
+//! tool handler.
 
 use std::sync::Arc;
 
+use cqels_core::compiler::CqelsQueryCompiler;
 use cqels_core::parser::CqelsQlParser;
 use cqels_reasoning::ReasoningProfile;
 use serde_json::json;
@@ -138,6 +145,90 @@ impl McpTool for QueryTool {
             })),
             Err(e) => ToolResult::error(format!("parse error: {e}")),
         }
+    }
+}
+
+// ─── analyze_query ───────────────────────────────────────────────────
+
+/// Returns a stateless [`AnalyzeQueryTool`] that runs the full CqelsQL
+/// compile pipeline and reports planning decisions: pattern groups,
+/// detected self-join optimization hints, fast-path eligibility, plus
+/// the bound projection variables.
+///
+/// This complements [`parse_query_tool`] (AST only) and
+/// [`query_tool`] (light validation). Use it when you want the
+/// compiler's planner-level view: "will my query trigger the
+/// indexed self-join fast path? which variables are projected?".
+pub fn analyze_query_tool() -> AnalyzeQueryTool {
+    AnalyzeQueryTool
+}
+
+pub struct AnalyzeQueryTool;
+
+impl McpTool for AnalyzeQueryTool {
+    fn name(&self) -> &str {
+        "analyze_query"
+    }
+
+    fn description(&self) -> &str {
+        "Compile a CqelsQL query and report planner decisions: stream \
+         sources, pattern groups, detected self-join hints (and whether \
+         the fast path applies), projection variables, GROUP BY / ORDER \
+         BY presence, and FILTER counts. Does not execute the query."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property(
+                "query",
+                json!({
+                    "type": "string",
+                    "description": "CqelsQL query text to compile and analyze"
+                }),
+            )
+            .require("query")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(query) = invocation.get_str("query") else {
+            return ToolResult::error("missing `query` argument");
+        };
+        let definition = match CqelsQlParser::parse(query) {
+            Ok(def) => def,
+            Err(e) => return ToolResult::error(format!("parse error: {e}")),
+        };
+        let compiled = match CqelsQueryCompiler::compile(query, definition) {
+            Ok(c) => c,
+            Err(e) => return ToolResult::error(format!("compile error: {e}")),
+        };
+        let def = compiled.definition();
+        let hints: Vec<_> = compiled
+            .self_join_hints()
+            .iter()
+            .map(|h| {
+                json!({
+                    "source": h.source,
+                    "shared_variables": h.join_keys,
+                    "pattern_indices": [h.pattern_indices.0, h.pattern_indices.1],
+                })
+            })
+            .collect();
+        let stream_sources: Vec<_> = def.streams.iter().map(|s| &s.name).collect();
+        let select_vars: Vec<&str> = compiled.select_vars().iter().map(String::as_str).collect();
+
+        ToolResult::success(json!({
+            "query_type": format!("{:?}", def.query_type),
+            "streams": stream_sources,
+            "pattern_groups": def.pattern_groups.len(),
+            "select_variables": select_vars,
+            "self_join_hints": hints,
+            "has_self_join_optimization": compiled.has_self_join_optimization(),
+            "has_group_by": def.has_group_by(),
+            "has_order_by": def.has_order_by(),
+            "has_limit": def.has_limit(),
+            "distinct": def.distinct,
+            "has_seq_constraint": def.seq_constraint.is_some(),
+        }))
     }
 }
 
@@ -463,6 +554,7 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.install(parse_query_tool());
         reg.install(query_tool());
+        reg.install(analyze_query_tool());
         reg.install(reasoning_profiles_tool());
         reg.install(shacl_capabilities_tool());
         reg.call(name, &args).expect("dispatch")
@@ -526,6 +618,63 @@ mod tests {
             ToolInvocation::new()
                 .with_arg("query", serde_json::json!(sample_query()))
                 .with_arg("dry_run", serde_json::json!(false)),
+        );
+        assert!(res.is_error);
+    }
+
+    // ─── analyze_query tests ─────────────────────────────────────────
+
+    #[test]
+    fn analyze_query_reports_basic_plan_shape() {
+        let res = run(
+            "analyze_query",
+            ToolInvocation::new().with_arg("query", serde_json::json!(sample_query())),
+        );
+        assert!(!res.is_error, "analyze_query should accept valid input");
+        assert_eq!(res.content["query_type"], "Select");
+        assert_eq!(res.content["streams"][0], "sensors");
+        assert_eq!(res.content["has_self_join_optimization"], false);
+        assert_eq!(
+            res.content["self_join_hints"].as_array().unwrap().len(),
+            0,
+            "no self-join in single-pattern query"
+        );
+        // SELECT projects ?sensor + ?temp.
+        let projected = res.content["select_variables"].as_array().unwrap();
+        assert_eq!(projected.len(), 2);
+    }
+
+    #[test]
+    fn analyze_query_detects_self_join_optimization() {
+        let self_join_query = r#"
+            SELECT ?driver ?passenger
+            FROM STREAM rides [RANGE 10s]
+            WHERE {
+                STREAM rides { ?driver <http://ex.org/in> ?car . }
+                STREAM rides { ?passenger <http://ex.org/in> ?car . }
+            }
+        "#;
+        let res = run(
+            "analyze_query",
+            ToolInvocation::new().with_arg("query", serde_json::json!(self_join_query)),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["has_self_join_optimization"], true);
+        let hints = res.content["self_join_hints"].as_array().unwrap();
+        assert_eq!(hints.len(), 1, "one self-join hint detected");
+        assert_eq!(hints[0]["source"], "rides");
+        let shared = hints[0]["shared_variables"].as_array().unwrap();
+        assert!(
+            shared.iter().any(|v| v == "car"),
+            "shared variable ?car appears in hint"
+        );
+    }
+
+    #[test]
+    fn analyze_query_reports_parse_error_clearly() {
+        let res = run(
+            "analyze_query",
+            ToolInvocation::new().with_arg("query", serde_json::json!("THIS IS NOT VALID CQELS")),
         );
         assert!(res.is_error);
     }
