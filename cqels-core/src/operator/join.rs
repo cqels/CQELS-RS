@@ -93,6 +93,11 @@ impl<L: Clone, R: Clone> WindowedJoinState<L, R> {
     }
 
     /// Adds a left element and joins with matching right elements.
+    ///
+    /// Searches the right buffer across the full window
+    /// `[timestamp - window, timestamp + window]` so late-arriving left
+    /// events still pair with already-buffered later right events. The
+    /// join semantics depend only on event time, not on arrival order.
     pub fn add_left<Out, F: JoinFunction<L, R, Out>>(
         &mut self,
         element: L,
@@ -106,8 +111,9 @@ impl<L: Clone, R: Clone> WindowedJoinState<L, R> {
 
         let mut results = Vec::new();
         let lower_bound = timestamp - self.window_size_ms;
+        let upper_bound = timestamp.saturating_add(self.window_size_ms);
 
-        for (_ts, right_elements) in self.right_buffer.range(lower_bound..=timestamp) {
+        for (_ts, right_elements) in self.right_buffer.range(lower_bound..=upper_bound) {
             for right in right_elements {
                 if let Some(out) = join_fn.join(&element, right) {
                     results.push(JoinResult {
@@ -121,6 +127,10 @@ impl<L: Clone, R: Clone> WindowedJoinState<L, R> {
     }
 
     /// Adds a right element and joins with matching left elements.
+    ///
+    /// Searches the left buffer across the full window
+    /// `[timestamp - window, timestamp + window]` for the same reason as
+    /// [`Self::add_left`].
     pub fn add_right<Out, F: JoinFunction<L, R, Out>>(
         &mut self,
         element: R,
@@ -134,8 +144,9 @@ impl<L: Clone, R: Clone> WindowedJoinState<L, R> {
 
         let mut results = Vec::new();
         let lower_bound = timestamp - self.window_size_ms;
+        let upper_bound = timestamp.saturating_add(self.window_size_ms);
 
-        for (_ts, left_elements) in self.left_buffer.range(lower_bound..=timestamp) {
+        for (_ts, left_elements) in self.left_buffer.range(lower_bound..=upper_bound) {
             for left in left_elements {
                 if let Some(out) = join_fn.join(left, &element) {
                     results.push(JoinResult {
@@ -792,6 +803,62 @@ mod tests {
         let results = state.add_right(2, 3000, &join_fn);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].value, 2);
+    }
+
+    /// Regression for issue #19: a right event arriving early and then a
+    /// late left event (smaller timestamp) within the window must still
+    /// pair. The previous range-bound only covered timestamps `<= ts`,
+    /// so the late left missed the buffered right.
+    #[test]
+    fn test_windowed_join_late_left_arrival_still_pairs_with_buffered_right() {
+        let mut state: WindowedJoinState<i32, i32> =
+            WindowedJoinState::new(Duration::from_secs(10));
+        let join_fn = |l: &i32, r: &i32| Some(l + r);
+
+        // Right at t=5000 buffered first.
+        let initial = state.add_right(20, 5000, &join_fn);
+        assert!(initial.is_empty(), "no left in buffer yet");
+
+        // Late left at t=1000 — within the 10s window of the buffered right.
+        let results = state.add_left(10, 1000, &join_fn);
+        assert_eq!(
+            results.len(),
+            1,
+            "late left must pair with buffered right within window"
+        );
+        assert_eq!(results[0].value, 30);
+    }
+
+    /// Symmetric case: a left event arriving early, then a late right
+    /// (smaller timestamp) within the window. Same bug in `add_right`.
+    #[test]
+    fn test_windowed_join_late_right_arrival_still_pairs_with_buffered_left() {
+        let mut state: WindowedJoinState<i32, i32> =
+            WindowedJoinState::new(Duration::from_secs(10));
+        let join_fn = |l: &i32, r: &i32| Some(l * r);
+
+        state.add_left(7, 5000, &join_fn);
+        let results = state.add_right(3, 1000, &join_fn);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].value, 21);
+    }
+
+    /// Events further apart than the window must NOT pair, regardless of
+    /// arrival order. Guards against over-broad ranges that would emit
+    /// false matches.
+    #[test]
+    fn test_windowed_join_far_apart_events_still_do_not_pair() {
+        let mut state: WindowedJoinState<i32, i32> =
+            WindowedJoinState::new(Duration::from_secs(10));
+        let join_fn = |l: &i32, r: &i32| Some(l + r);
+
+        // 11s apart — outside the 10s window.
+        state.add_right(20, 12_000, &join_fn);
+        let results = state.add_left(10, 1_000, &join_fn);
+        assert!(
+            results.is_empty(),
+            "events 11s apart must not pair under 10s window"
+        );
     }
 
     #[test]
