@@ -61,16 +61,17 @@ Per the project's behavioral guidelines:
 - [x] Compile-time detection of self-join AST patterns (`detect_self_joins` in `cqels-core::compiler::self_join`). Reports source, shared variables, and pattern indices as `SelfJoinHint`s.
 - [x] Compile-time hint flow into `CompiledCqelsQuery::self_join_hints()`. `CqelsQueryCompiler::compile` now invokes `detect_self_joins` during compilation and stores the resulting hints on the compiled artifact. `has_self_join_optimization()` is the runtime decision point.
 - [x] **Runtime fast path** in `CompiledCqelsQuery::execute` (`try_self_join_fast_path`). When the query shape matches a strict template (1 hint, 1 shared variable in object position, no aggregates / order-by / limit / distinct / filters / binds), execution routes through `WindowedSelfJoinState` (O(N+M)) instead of the default pattern matcher (O(N·M)). Any other query shape falls through to the existing pipeline unchanged.
-- [!] Generalize the fast path beyond the strict shape (subject-position joins, with FILTER, with projection beyond the pair vars) — follow-up.
-- **Verify:** 6 operator tests + 7 detection tests.
+- [x] **Generalized fast path** (PR #24): subject-position joins (`?shared <p> ?bound`) in addition to object-position; FILTER predicates over `{left, right, shared}` variables evaluated inline before emission. Mixed-position and cross-predicate joins still fall through to the generic pipeline.
+- **Verify:** 6 operator tests + 7 detection tests + 5 end-to-end fast-path tests.
 
 ## Phase 3 — Performance + persistence
 
 ### 3a Parallel hash-join (Java PR `ParallelHashJoinOperator`)
 
 - [x] `ParallelHashJoinOperator<L, R, K, Out>` in `cqels-core::operator::parallel_hash_join`. Sequential build phase materializes the left side into `HashMap<K, Vec<L>>`; concurrent probe phase via `futures::stream::buffer_unordered`.
-- **Verify:** 6 tests — basic join, empty inputs, one-to-many, parallelism invariance over {1, 2, 4, 8}, equivalence vs O(N·M) baseline over 50×30 elements.
-- [!] **Deferred:** parallel windowed-aggregate operator and SWAG CTrie index.
+- [x] `ParallelWindowedAggregateOperator` in `cqels-core::operator::parallel_aggregate` — hash-partitioned parallel windowed aggregation; partitions per-window batches by group key and processes partitions concurrently. 5 tests.
+- **Verify:** 6 hash-join tests + 5 aggregate tests — basic join/aggregation, empty inputs, one-to-many, parallelism invariance over {1, 2, 4, 8}, equivalence vs sequential baseline.
+- [!] **Deferred:** SWAG CTrie index for factorized window views.
 
 ### 3b Persistent storage backends
 
@@ -111,3 +112,5 @@ Per the project's behavioral guidelines:
 - **3b cqels-storage-lmdb** — second production-grade backend using `heed` (pure-Rust LMDB binding). Memory-mapped, MVCC, copy-on-write transactions. Three LMDB databases (`journal`, `checkpoints`, `meta`) in a single env. 8 tests, identical surface to sled.
 - **3c cqels-mcp scaffolding** — `McpTool` trait + `ToolRegistry` + `ToolInputSchema`/`ToolInvocation`/`ToolResult` value types. Reference tools `parse_query` and `query` (dry-run). 10 tests. Transport-agnostic — any Rust MCP SDK can wrap the registry.
 - **3d Property tests** — proptest comparisons of `WindowedSelfJoinState` and `ParallelHashJoinOperator` against brute-force baselines across random event streams (100/100/50 cases).
+- **3a follow-up: parallel windowed-aggregate** — `ParallelWindowedAggregateOperator` in `cqels-core::operator::parallel_aggregate`. Hash-partitioned by group key; per-partition aggregation runs concurrently then merges. 5 tests.
+- **2.2 follow-up: generalized self-join fast path (PR #24)** — extends `try_self_join_fast_path` to accept (a) subject-position self-joins via new `JoinKeyPosition` enum and (b) FILTER predicates over `{left_bound, right_bound, shared}` variables, evaluated inline with `ExpressionEvaluator` before emission. New `simple_join_pattern` returns the position; new `collect_variables` walks expressions to check filter scope. Mixed-position and cross-predicate joins still fall through. 2 new integration tests bring the fast-path suite to 5.

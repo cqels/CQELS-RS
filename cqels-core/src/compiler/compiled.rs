@@ -538,10 +538,10 @@ fn try_self_join_fast_path(
     }
     let definition = &query.definition;
 
-    // Strict shape: no aggregates, no group-by, no order-by, no limit,
-    // no distinct, no filter/bind expressions.
-    if !query.filter_expressions.is_empty()
-        || !query.bind_expressions.is_empty()
+    // Strict shape (excluding FILTER — FILTER is now supported below):
+    // no aggregates, no group-by, no order-by, no limit, no distinct,
+    // no BIND expressions.
+    if !query.bind_expressions.is_empty()
         || !query.order_by_expressions.is_empty()
         || !query.aggregate_specs.is_empty()
         || !definition.group_by_variables.is_empty()
@@ -561,18 +561,40 @@ fn try_self_join_fast_path(
     let shared_var = hint.join_keys[0].clone();
 
     // The two stream pattern groups referenced by the hint must each
-    // contain exactly one triple pattern that binds `shared_var` in the
-    // object position.
+    // contain exactly one triple pattern that binds `shared_var` in
+    // either the subject or object position.
     let pat_l = stream_pattern_at(definition, hint.pattern_indices.0)?;
     let pat_r = stream_pattern_at(definition, hint.pattern_indices.1)?;
     let stream_name = pat_l.0.clone();
-    let (left_subject_var, predicate_l) = simple_object_join_pattern(&pat_l, &shared_var)?;
-    let (right_subject_var, predicate_r) = simple_object_join_pattern(&pat_r, &shared_var)?;
+    let (left_bound_var, left_position, predicate_l) = simple_join_pattern(&pat_l, &shared_var)?;
+    let (right_bound_var, right_position, predicate_r) = simple_join_pattern(&pat_r, &shared_var)?;
     if predicate_l != predicate_r {
         // We don't yet handle cross-predicate joins on the same key.
         return None;
     }
+    if left_position != right_position {
+        // Mixed-position joins (subject-on-one-side, object-on-other)
+        // need the operator to consider each event under both roles.
+        // Out of scope for the fast path today; fall back to generic.
+        return None;
+    }
     let resolved_predicate = resolve_iri_term(&predicate_l, &definition.prefixes);
+
+    // The set of variables our post-join FILTER predicates can reference.
+    // Anything outside this set means the filter touches a variable the
+    // fast path can't bind — fall back to the generic pipeline.
+    let known_vars = [
+        left_bound_var.as_str(),
+        right_bound_var.as_str(),
+        shared_var.as_str(),
+    ];
+    for expr in query.filter_expressions.iter() {
+        for var in collect_variables(expr) {
+            if !known_vars.iter().any(|k| *k == var) {
+                return None;
+            }
+        }
+    }
 
     // Pick the input stream — both groups reference the same source.
     let input_stream = inputs.take_stream(&stream_name)?;
@@ -591,10 +613,13 @@ fn try_self_join_fast_path(
         input_stream,
         window_duration,
         resolved_predicate,
-        left_subject_var,
-        right_subject_var,
+        left_bound_var,
+        left_position,
+        right_bound_var,
         shared_var,
         Arc::clone(&query.select_vars),
+        Arc::clone(&query.filter_expressions),
+        Arc::clone(&query.evaluator),
     );
     Some(stream)
 }
@@ -611,27 +636,90 @@ fn stream_pattern_at(
     }
 }
 
+/// Where the shared join key sits in the triple pattern. The "other"
+/// position is the variable that ends up bound for this side of the
+/// pair (e.g., `?driver` / `?passenger`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JoinKeyPosition {
+    /// Triple of shape `?shared <p> ?bound` — the shared variable is
+    /// in the subject position, the bound variable in the object.
+    Subject,
+    /// Triple of shape `?bound <p> ?shared` — the shared variable is
+    /// in the object position, the bound variable in the subject.
+    Object,
+}
+
 /// For a stream pattern with exactly one triple pattern of shape
-/// `?subj <predicate> ?shared`, return `(subj_var_name, predicate_term)`.
-fn simple_object_join_pattern(
+/// `?bound <predicate> ?shared` (object position) or
+/// `?shared <predicate> ?bound` (subject position), return
+/// `(bound_var_name, key_position, predicate_term)`. Returns `None`
+/// for anything else — multiple triples, variable predicates, both
+/// terms variable but neither equal to `shared_var`, etc.
+fn simple_join_pattern(
     pat: &(String, Vec<crate::parser::ast::TriplePattern>),
     shared_var: &str,
-) -> Option<(String, String)> {
+) -> Option<(String, JoinKeyPosition, String)> {
     let patterns = &pat.1;
     if patterns.len() != 1 {
         return None;
     }
     let tp = &patterns[0];
-    let subj_var = strip_var_prefix(&tp.subject)?;
     // Predicate must be a constant (IRI or prefixed name), not a variable.
     if is_variable_term(&tp.predicate) {
         return None;
     }
-    let obj_var = strip_var_prefix(&tp.object)?;
-    if obj_var != shared_var {
-        return None;
+    let subj_var = strip_var_prefix(&tp.subject);
+    let obj_var = strip_var_prefix(&tp.object);
+    match (subj_var, obj_var) {
+        (Some(s), Some(o)) if o == shared_var && s != shared_var => {
+            Some((s, JoinKeyPosition::Object, tp.predicate.clone()))
+        }
+        (Some(s), Some(o)) if s == shared_var && o != shared_var => {
+            Some((o, JoinKeyPosition::Subject, tp.predicate.clone()))
+        }
+        _ => None,
     }
-    Some((subj_var, tp.predicate.clone()))
+}
+
+/// Walks an `Expression` tree collecting referenced variable names
+/// (without the `?`/`$` prefix). Used by the self-join fast path to
+/// determine whether a FILTER's variables fit in the
+/// `{left, right, shared}` scope it knows how to bind.
+fn collect_variables(expr: &Expression) -> Vec<String> {
+    fn walk(expr: &Expression, out: &mut Vec<String>) {
+        match expr {
+            Expression::Variable(name) | Expression::Bound(name) => {
+                out.push(name.trim_start_matches(['?', '$']).to_string());
+            }
+            Expression::PropertyAccess { variable, .. } => {
+                out.push(variable.trim_start_matches(['?', '$']).to_string());
+            }
+            Expression::BinaryOp { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
+            Expression::UnaryOp { operand, .. } => walk(operand, out),
+            Expression::FunctionCall { args, .. } => {
+                for arg in args {
+                    walk(arg, out);
+                }
+            }
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                walk(condition, out);
+                walk(then_expr, out);
+                walk(else_expr, out);
+            }
+            Expression::Aggregate { argument, .. } => walk(argument, out),
+            Expression::Literal(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(expr, &mut out);
+    out
 }
 
 fn is_variable_term(term: &str) -> bool {
@@ -663,20 +751,25 @@ fn build_self_join_stream(
     input: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,
     window: Duration,
     resolved_predicate: String,
-    left_subject_var: String,
-    right_subject_var: String,
+    left_bound_var: String,
+    join_position: JoinKeyPosition,
+    right_bound_var: String,
     shared_var: String,
     select_vars: Arc<Vec<String>>,
+    filter_expressions: Arc<Vec<Expression>>,
+    evaluator: Arc<ExpressionEvaluator>,
 ) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
     use crate::operator::join::WindowedSelfJoinState;
     use cqels_model::Value;
 
-    // Operator state captured by the fold closure. `subject` is the
-    // string form of the matched stream element's subject term; the
-    // join key is the string form of the matched object.
+    // Per-event state stored by the join. `bound_value` is the string
+    // form of the "other" position relative to the shared key (e.g.
+    // the subject IRI when the shared key sits in the object slot).
+    // `key` is the shared-key value used to match.
     #[derive(Clone)]
     struct StoredEvent {
-        subject: String,
+        bound_value: String,
+        key: String,
         #[allow(dead_code)]
         timestamp: i64,
     }
@@ -685,10 +778,12 @@ fn build_self_join_stream(
 
     let stream = futures::stream::unfold((input, state), move |(mut input, mut state)| {
         let resolved_predicate = resolved_predicate.clone();
-        let left_subject_var = left_subject_var.clone();
-        let right_subject_var = right_subject_var.clone();
+        let left_bound_var = left_bound_var.clone();
+        let right_bound_var = right_bound_var.clone();
         let shared_var = shared_var.clone();
         let select_vars = Arc::clone(&select_vars);
+        let filter_expressions = Arc::clone(&filter_expressions);
+        let evaluator = Arc::clone(&evaluator);
         async move {
             loop {
                 let elem = input.next().await?;
@@ -709,15 +804,29 @@ fn build_self_join_stream(
                     other => other.to_string(),
                 };
 
+                // The join key is the shared variable's position; the
+                // bound value is the *other* slot. Because both sides
+                // of the self-join scan the same input stream, the
+                // event must populate the join key from whichever
+                // position holds the shared variable. The pattern's
+                // shape is enforced earlier — both sides agree on the
+                // shared position, or the fast path is rejected.
+                //
+                // For a triple `?bound <p> ?shared` (object position),
+                // the key is the object and bound_value is the subject;
+                // for `?shared <p> ?bound` (subject position) it is the
+                // other way round.
+                let (key, bound_value) = match join_position {
+                    JoinKeyPosition::Object => (object_str.clone(), subject_str.clone()),
+                    JoinKeyPosition::Subject => (subject_str.clone(), object_str.clone()),
+                };
+
                 let event = StoredEvent {
-                    subject: subject_str,
+                    bound_value: bound_value.clone(),
+                    key: key.clone(),
                     timestamp: rdf.timestamp,
                 };
-                let pairs = state.add(event, rdf.timestamp, |e| {
-                    // The join key is the object value, captured per-event.
-                    let _ = e.subject.len(); // satisfy borrow
-                    object_str.clone()
-                });
+                let pairs = state.add(event, rdf.timestamp, |e| e.key.clone());
                 if pairs.is_empty() {
                     continue;
                 }
@@ -725,13 +834,31 @@ fn build_self_join_stream(
                 // single chunk before reading the next element.
                 let mut emissions = Vec::with_capacity(pairs.len());
                 for pair in pairs {
+                    // Both sides share the same join position by
+                    // construction (enforced in `try_self_join_fast_path`
+                    // via `left_position == right_position`), so the
+                    // bound values map directly to left/right bound
+                    // variables.
                     let mut bs = BindingSet::new(pair.timestamp);
-                    bs.insert(&left_subject_var, Value::String(pair.first.subject.clone()));
                     bs.insert(
-                        &right_subject_var,
-                        Value::String(pair.second.subject.clone()),
+                        &left_bound_var,
+                        Value::String(pair.first.bound_value.clone()),
                     );
-                    bs.insert(&shared_var, Value::String(object_str.clone()));
+                    bs.insert(
+                        &right_bound_var,
+                        Value::String(pair.second.bound_value.clone()),
+                    );
+                    bs.insert(&shared_var, Value::String(pair.first.key.clone()));
+
+                    // Post-join FILTER evaluation. Skip pairs whose
+                    // filters do not all evaluate to true.
+                    if !filter_expressions
+                        .iter()
+                        .all(|f| evaluator.evaluate_as_bool(f, &bs))
+                    {
+                        continue;
+                    }
+
                     // Restrict to SELECT projection if non-empty.
                     let bs = if select_vars.is_empty() {
                         bs
@@ -739,6 +866,9 @@ fn build_self_join_stream(
                         project(&bs, &select_vars)
                     };
                     emissions.push(bs);
+                }
+                if emissions.is_empty() {
+                    continue;
                 }
                 let _ = pair_timestamp_min(&emissions);
                 return Some((futures::stream::iter(emissions), (input, state)));
