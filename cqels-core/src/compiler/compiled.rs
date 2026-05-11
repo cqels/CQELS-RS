@@ -108,6 +108,17 @@ impl ContinuousQuery for CompiledCqelsQuery {
     }
 
     fn execute(&self, mut inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
+        // Fast path for the simple self-join shape (Java PR #25 optimization).
+        // Routes the query through `WindowedSelfJoinState` for O(N+M)
+        // instead of the default pattern matcher's O(N·M). Falls back to
+        // the generic pipeline when the query has any feature outside the
+        // strict shape (aggregates, filters, projections beyond the join
+        // variables, etc.) — see `try_self_join_fast_path` for the exact
+        // shape.
+        if let Some(stream) = try_self_join_fast_path(self, &mut inputs) {
+            return stream;
+        }
+
         let definition = Arc::clone(&self.definition);
         let filter_expressions = Arc::clone(&self.filter_expressions);
         let bind_expressions = Arc::clone(&self.bind_expressions);
@@ -505,6 +516,252 @@ impl ContinuousQuery for CompiledCqelsQuery {
             }
         }
     }
+}
+
+// ─── Self-join fast path ─────────────────────────────────────────────
+//
+// Detects the simple self-join shape at runtime and routes the query
+// through `WindowedSelfJoinState` (O(N+M)) instead of the default
+// pattern matcher (O(N·M)).
+//
+// Conservative trigger: only fires for queries that exactly match a
+// "two stream patterns on one stream, joined on a single shared object
+// variable, no aggregates/filters/projections" shape. Anything else
+// falls back to the generic pipeline.
+
+fn try_self_join_fast_path(
+    query: &CompiledCqelsQuery,
+    inputs: &mut QueryInputs,
+) -> Option<Pin<Box<dyn Stream<Item = BindingSet> + Send>>> {
+    if !query.has_self_join_optimization() {
+        return None;
+    }
+    let definition = &query.definition;
+
+    // Strict shape: no aggregates, no group-by, no order-by, no limit,
+    // no distinct, no filter/bind expressions.
+    if !query.filter_expressions.is_empty()
+        || !query.bind_expressions.is_empty()
+        || !query.order_by_expressions.is_empty()
+        || !query.aggregate_specs.is_empty()
+        || !definition.group_by_variables.is_empty()
+        || definition.limit.is_some()
+        || definition.distinct
+    {
+        return None;
+    }
+    // Exactly one self-join opportunity.
+    if query.self_join_hints.len() != 1 {
+        return None;
+    }
+    let hint = &query.self_join_hints[0];
+    if hint.join_keys.len() != 1 {
+        return None;
+    }
+    let shared_var = hint.join_keys[0].clone();
+
+    // The two stream pattern groups referenced by the hint must each
+    // contain exactly one triple pattern that binds `shared_var` in the
+    // object position.
+    let pat_l = stream_pattern_at(definition, hint.pattern_indices.0)?;
+    let pat_r = stream_pattern_at(definition, hint.pattern_indices.1)?;
+    let stream_name = pat_l.0.clone();
+    let (left_subject_var, predicate_l) = simple_object_join_pattern(&pat_l, &shared_var)?;
+    let (right_subject_var, predicate_r) = simple_object_join_pattern(&pat_r, &shared_var)?;
+    if predicate_l != predicate_r {
+        // We don't yet handle cross-predicate joins on the same key.
+        return None;
+    }
+    let resolved_predicate = resolve_iri_term(&predicate_l, &definition.prefixes);
+
+    // Pick the input stream — both groups reference the same source.
+    let input_stream = inputs.take_stream(&stream_name)?;
+
+    // Use the first declared stream's window duration for the join
+    // window. NOW / TRIPLES windows degenerate to "no time bound" — we
+    // pick a very long window so the join state retains every event
+    // within the stream's natural lifetime.
+    let window_duration = definition
+        .streams
+        .first()
+        .and_then(|s| s.window.duration)
+        .unwrap_or(Duration::from_secs(60 * 60 * 24));
+
+    let stream = build_self_join_stream(
+        input_stream,
+        window_duration,
+        resolved_predicate,
+        left_subject_var,
+        right_subject_var,
+        shared_var,
+        Arc::clone(&query.select_vars),
+    );
+    Some(stream)
+}
+
+fn stream_pattern_at(
+    definition: &CqelsQueryDefinition,
+    idx: usize,
+) -> Option<(String, Vec<crate::parser::ast::TriplePattern>)> {
+    match definition.pattern_groups.get(idx) {
+        Some(CqelsPatternGroup::Stream { source, patterns }) => {
+            Some((source.clone(), patterns.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// For a stream pattern with exactly one triple pattern of shape
+/// `?subj <predicate> ?shared`, return `(subj_var_name, predicate_term)`.
+fn simple_object_join_pattern(
+    pat: &(String, Vec<crate::parser::ast::TriplePattern>),
+    shared_var: &str,
+) -> Option<(String, String)> {
+    let patterns = &pat.1;
+    if patterns.len() != 1 {
+        return None;
+    }
+    let tp = &patterns[0];
+    let subj_var = strip_var_prefix(&tp.subject)?;
+    // Predicate must be a constant (IRI or prefixed name), not a variable.
+    if is_variable_term(&tp.predicate) {
+        return None;
+    }
+    let obj_var = strip_var_prefix(&tp.object)?;
+    if obj_var != shared_var {
+        return None;
+    }
+    Some((subj_var, tp.predicate.clone()))
+}
+
+fn is_variable_term(term: &str) -> bool {
+    term.starts_with('?') || term.starts_with('$')
+}
+
+fn strip_var_prefix(term: &str) -> Option<String> {
+    if !is_variable_term(term) {
+        return None;
+    }
+    Some(term.trim_start_matches(['?', '$']).to_string())
+}
+
+fn resolve_iri_term(term: &str, prefixes: &std::collections::HashMap<String, String>) -> String {
+    let trimmed = term.trim();
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+    if let Some((prefix, local)) = trimmed.split_once(':') {
+        if let Some(base) = prefixes.get(prefix) {
+            return format!("{base}{local}");
+        }
+    }
+    trimmed.to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_self_join_stream(
+    input: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,
+    window: Duration,
+    resolved_predicate: String,
+    left_subject_var: String,
+    right_subject_var: String,
+    shared_var: String,
+    select_vars: Arc<Vec<String>>,
+) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
+    use crate::operator::join::WindowedSelfJoinState;
+    use cqels_model::Value;
+
+    // Operator state captured by the fold closure. `subject` is the
+    // string form of the matched stream element's subject term; the
+    // join key is the string form of the matched object.
+    #[derive(Clone)]
+    struct StoredEvent {
+        subject: String,
+        #[allow(dead_code)]
+        timestamp: i64,
+    }
+
+    let state: WindowedSelfJoinState<StoredEvent, String> = WindowedSelfJoinState::new(window);
+
+    let stream = futures::stream::unfold((input, state), move |(mut input, mut state)| {
+        let resolved_predicate = resolved_predicate.clone();
+        let left_subject_var = left_subject_var.clone();
+        let right_subject_var = right_subject_var.clone();
+        let shared_var = shared_var.clone();
+        let select_vars = Arc::clone(&select_vars);
+        async move {
+            loop {
+                let elem = input.next().await?;
+                let Some(rdf) = elem.as_rdf() else {
+                    continue;
+                };
+                let stmt = &rdf.statement;
+                if stmt.predicate.as_str() != resolved_predicate {
+                    continue;
+                }
+                let subject_str = match &stmt.subject {
+                    Term::Iri(iri) => iri.as_str().to_string(),
+                    other => other.to_string(),
+                };
+                let object_str = match &stmt.object {
+                    Term::Iri(iri) => iri.as_str().to_string(),
+                    Term::Literal(lit) => lit.value().to_string(),
+                    other => other.to_string(),
+                };
+
+                let event = StoredEvent {
+                    subject: subject_str,
+                    timestamp: rdf.timestamp,
+                };
+                let pairs = state.add(event, rdf.timestamp, |e| {
+                    // The join key is the object value, captured per-event.
+                    let _ = e.subject.len(); // satisfy borrow
+                    object_str.clone()
+                });
+                if pairs.is_empty() {
+                    continue;
+                }
+                // Build BindingSets for the pairs and emit them as a
+                // single chunk before reading the next element.
+                let mut emissions = Vec::with_capacity(pairs.len());
+                for pair in pairs {
+                    let mut bs = BindingSet::new(pair.timestamp);
+                    bs.insert(&left_subject_var, Value::String(pair.first.subject.clone()));
+                    bs.insert(
+                        &right_subject_var,
+                        Value::String(pair.second.subject.clone()),
+                    );
+                    bs.insert(&shared_var, Value::String(object_str.clone()));
+                    // Restrict to SELECT projection if non-empty.
+                    let bs = if select_vars.is_empty() {
+                        bs
+                    } else {
+                        project(&bs, &select_vars)
+                    };
+                    emissions.push(bs);
+                }
+                let _ = pair_timestamp_min(&emissions);
+                return Some((futures::stream::iter(emissions), (input, state)));
+            }
+        }
+    })
+    .flatten();
+    Box::pin(stream)
+}
+
+fn pair_timestamp_min(emissions: &[BindingSet]) -> i64 {
+    emissions.iter().map(|b| b.timestamp()).min().unwrap_or(0)
+}
+
+fn project(bs: &BindingSet, select_vars: &[String]) -> BindingSet {
+    let mut out = BindingSet::new(bs.timestamp());
+    for var in select_vars {
+        let key = var.trim_start_matches(['?', '$']);
+        if let Some(value) = bs.get(key) {
+            out.insert(key, value.clone());
+        }
+    }
+    out
 }
 
 /// A compiled ASK query that produces `bool` — `true` for each matching binding.

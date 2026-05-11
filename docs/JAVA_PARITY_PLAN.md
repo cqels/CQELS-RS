@@ -60,7 +60,8 @@ Per the project's behavioral guidelines:
 - [x] Indexed hash-join state for self-join over a single window (`WindowedSelfJoinState<T, K>` in `cqels-core::operator::join`).
 - [x] Compile-time detection of self-join AST patterns (`detect_self_joins` in `cqels-core::compiler::self_join`). Reports source, shared variables, and pattern indices as `SelfJoinHint`s.
 - [x] Compile-time hint flow into `CompiledCqelsQuery::self_join_hints()`. `CqelsQueryCompiler::compile` now invokes `detect_self_joins` during compilation and stores the resulting hints on the compiled artifact. `has_self_join_optimization()` is the runtime decision point.
-- [!] Auto-substitution inside the runtime pattern matcher (`compiler::pipeline`) — deferred; hints are available, but `compiled::execute` does not yet branch on them to use `WindowedSelfJoinState`. Requires surgical rewrite of the pattern-matching path.
+- [x] **Runtime fast path** in `CompiledCqelsQuery::execute` (`try_self_join_fast_path`). When the query shape matches a strict template (1 hint, 1 shared variable in object position, no aggregates / order-by / limit / distinct / filters / binds), execution routes through `WindowedSelfJoinState` (O(N+M)) instead of the default pattern matcher (O(N·M)). Any other query shape falls through to the existing pipeline unchanged.
+- [!] Generalize the fast path beyond the strict shape (subject-position joins, with FILTER, with projection beyond the pair vars) — follow-up.
 - **Verify:** 6 operator tests + 7 detection tests.
 
 ## Phase 3 — Performance + persistence
