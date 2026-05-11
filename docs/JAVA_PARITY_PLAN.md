@@ -72,7 +72,7 @@ Per the project's behavioral guidelines:
 - [x] `ParallelHashJoinOperator<L, R, K, Out>` in `cqels-core::operator::parallel_hash_join`. Sequential build phase materializes the left side into `HashMap<K, Vec<L>>`; concurrent probe phase via `futures::stream::buffer_unordered`.
 - [x] `ParallelWindowedAggregateOperator` in `cqels-core::operator::parallel_aggregate` — hash-partitioned parallel windowed aggregation; partitions per-window batches by group key and processes partitions concurrently. 5 tests.
 - **Verify:** 6 hash-join tests + 5 aggregate tests — basic join/aggregation, empty inputs, one-to-many, parallelism invariance over {1, 2, 4, 8}, equivalence vs sequential baseline.
-- [!] **Deferred:** SWAG CTrie index for factorized window views.
+- [x] **SWAG CTrie index** in `cqels-core::operator::swag_ctrie` — `TimeIndex<P>` (time-bucketed range index with bag semantics) + `CTrieIndex<K, P>` (fixed-depth trie nesting one `TimeIndex` per leaf, with wildcard partial-key queries). Ported from Java's `org.cqels.operator.aggregate.swag.join.{TimeIndex, CTrieIndex}`. Single-threaded (`BTreeMap` rather than `ConcurrentSkipListMap`) and typed-keys (`K` generic rather than raw `Object`). 18 tests + 1 doctest. The downstream F-IVM planner / multi-way join state (`MultiWayJoinState`, `FactorizedViewPlan`, `WindowedJoinAggregateOperator` — 5K+ Java lines) is a deferred follow-up that consumes these primitives.
 
 ### 3b Persistent storage backends
 

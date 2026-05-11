@@ -15,6 +15,7 @@ pub mod parallel_hash_join;
 pub mod ranking;
 pub mod rspql;
 pub mod swag;
+pub mod swag_ctrie;
 
 // Re-export key types for ergonomic imports.
 pub use aggregate::{
@@ -40,3 +41,4 @@ pub use swag::{
     MeanPartial, SwagCountOp, SwagMaxOp, SwagMeanOp, SwagMinOp, SwagOp, SwagSumOp,
     TwoStacksLiteWindow,
 };
+pub use swag_ctrie::{CTrieIndex, RangeResult, TimeIndex, TimeIndexEntry};
