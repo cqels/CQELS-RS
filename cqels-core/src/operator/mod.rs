@@ -16,6 +16,7 @@ pub mod ranking;
 pub mod rspql;
 pub mod swag;
 pub mod swag_ctrie;
+pub mod swag_join;
 
 // Re-export key types for ergonomic imports.
 pub use aggregate::{
@@ -42,3 +43,6 @@ pub use swag::{
     TwoStacksLiteWindow,
 };
 pub use swag_ctrie::{CTrieIndex, RangeResult, TimeIndex, TimeIndexEntry};
+pub use swag_join::{
+    IndexStats, JoinRecord, KeyExtractor, KeyIndexedTimeIndex, VariableOrder, VariableOrderMethod,
+};
