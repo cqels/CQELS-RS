@@ -1,12 +1,27 @@
 name: CI
 
+# ──────────────────────────────────────────────────────────────────────
+# GitHub-hosted runner triggers are disabled while the HiveIntel org
+# Actions account is billing-blocked. Every push / pull_request / cron
+# event was being scheduled and then instantly failing with
+# "recent account payments have failed or your spending limit needs
+# to be increased", which left dozens of red ✗ checks across the PR
+# history without ever running any of the jobs.
+#
+# Local CI is the gate in the meantime — `cargo xtask test pr` runs
+# the equivalent fmt + clippy + workspace tests + doc suite, and PR
+# descriptions document its results.
+#
+# To restore GitHub-hosted CI after the billing block clears, put
+# back:
+#     push:
+#       branches: [main]
+#     pull_request:
+#       branches: [main]
+#     schedule:
+#       - cron: "0 5 * * *"
+# ──────────────────────────────────────────────────────────────────────
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    - cron: "0 5 * * *"
   workflow_dispatch:
 
 env:

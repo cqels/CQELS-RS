@@ -469,10 +469,7 @@ where
     /// Drives the join state from a merged update stream and emits
     /// one event per processed update. Consumes `self` because the
     /// returned stream owns the state.
-    pub fn process(
-        mut self,
-        updates: BoxedUpdateStream<S::L, S::R>,
-    ) -> BoxedEventStream<S::V>
+    pub fn process(mut self, updates: BoxedUpdateStream<S::L, S::R>) -> BoxedEventStream<S::V>
     where
         S: Send + 'static,
         S::L: Send + 'static,
