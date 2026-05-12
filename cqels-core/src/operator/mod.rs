@@ -21,6 +21,7 @@ pub mod swag_join_graph;
 pub mod swag_join_specs;
 pub mod swag_join_state;
 pub mod swag_multiway;
+pub mod swag_multiway_cache;
 pub mod swag_triangle;
 
 // Re-export key types for ergonomic imports.

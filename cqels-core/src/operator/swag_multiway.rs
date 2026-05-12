@@ -41,6 +41,7 @@ use std::sync::Arc;
 use crate::operator::swag_ctrie::CTrieIndex;
 use crate::operator::swag_join::JoinRecord;
 use crate::operator::swag_join_graph::{FactorizedViewPlan, JoinGraph};
+use crate::operator::swag_multiway_cache::{RangeCache, RangeCacheKey};
 
 // ─── MultiWayAggregateSpec ──────────────────────────────────────────
 
@@ -221,12 +222,21 @@ where
     extractors: HashMap<String, RelationExtractors<E, K, S::P>>,
     /// Per-edge indices: `relation -> neighbor -> CTrieIndex<K, JoinRecord<E, P>>`.
     indices: EdgeIndices<K, E, <S as MultiWayAggregateSpec>::P>,
+    /// Memoizes per-edge range query results during recursive
+    /// delta computation. Invalidated on every `insert`/`delete`
+    /// of the participating relation. See
+    /// [`crate::operator::swag_multiway_cache`] for semantics.
+    range_cache: RangeCache<K, E, S::P>,
     aggregate: S::V,
     variable_order: crate::operator::swag_join::VariableOrder,
     view_plan: FactorizedViewPlan,
     total_inserts: u64,
     total_matches: u64,
 }
+
+/// Capacity for the recursive-join [`RangeCache`]. Picked to match
+/// Java's `MultiWayJoinState` default of 1024 entries.
+const RANGE_CACHE_CAPACITY: usize = 1024;
 
 impl<E, K, S> MultiWayJoinState<E, K, S>
 where
@@ -298,6 +308,7 @@ where
             spec: Arc::new(spec),
             extractors: owned,
             indices,
+            range_cache: RangeCache::new(RANGE_CACHE_CAPACITY),
             aggregate,
             variable_order,
             view_plan,
@@ -345,9 +356,16 @@ where
                 idx.clear();
             }
         }
+        self.range_cache.clear();
         self.aggregate = self.spec.zero();
         self.total_inserts = 0;
         self.total_matches = 0;
+    }
+
+    /// Number of currently-cached range queries. Exposed for tests
+    /// and diagnostics — the actual cache content is private.
+    pub fn range_cache_len(&self) -> usize {
+        self.range_cache.len()
     }
 
     /// Insert `element` into `relation_name` at `timestamp`. Returns
@@ -362,6 +380,9 @@ where
         let delta = self.compute_delta(relation_name, timestamp, &element, &payload);
         self.aggregate = self.spec.add(&self.aggregate, &delta);
         self.index_element(relation_name, timestamp, element, payload);
+        // Mutation invalidates cached ranges that include this
+        // relation on either side.
+        self.range_cache.invalidate_relation(relation_name);
         delta
     }
 
@@ -380,6 +401,10 @@ where
         if !removed {
             return self.spec.zero();
         }
+        // Invalidate cached ranges that touch the mutated relation
+        // before the delta walk, so the recursive query sees
+        // post-eviction state.
+        self.range_cache.invalidate_relation(relation_name);
         let positive = self.compute_delta(relation_name, timestamp, &element, &payload);
         let delta = self.spec.negate(&positive);
         self.aggregate = self.spec.add(&self.aggregate, &delta);
@@ -518,7 +543,21 @@ where
         let Some(next_idx) = self.indices.get(&next).and_then(|m| m.get(&driver)) else {
             return self.spec.zero();
         };
-        let entries = next_idx.query_range_entries(&[Some(query_key)], start, end);
+        // Memoize the range query through the per-edge cache so
+        // repeated `(neighbor, driver, key, start, end)` lookups
+        // during recursive enumeration don't reprobe the CTrie.
+        // Mirrors Java's MultiWayJoinState.queryRangeEntries
+        // cache wrapper.
+        let cache_key =
+            RangeCacheKey::new(next.clone(), driver.clone(), query_key.clone(), start, end);
+        let entries = match self.range_cache.get(&cache_key) {
+            Some(cached) => cached.clone(),
+            None => {
+                let fresh = next_idx.query_range_entries(&[Some(query_key.clone())], start, end);
+                self.range_cache.put(cache_key, fresh.clone());
+                fresh
+            }
+        };
         if entries.is_empty() {
             return self.spec.zero();
         }
@@ -920,9 +959,105 @@ mod tests {
         assert_eq!(state.aggregate(), 0);
         assert_eq!(state.total_inserts(), 0);
         assert_eq!(state.total_matches(), 0);
+        assert_eq!(state.range_cache_len(), 0, "clear empties the range cache");
         // Fresh inserts still work.
         state.insert("A", 0, (1, 100));
         state.insert("B", 10, (1, 200));
         assert_eq!(state.aggregate(), 1);
+    }
+
+    // ─── RangeCache integration ───────────────────────────────────
+    //
+    // The cache is scratch space WITHIN a single `compute_delta`
+    // call: we populate it on the recursive range-query path, then
+    // invalidate the mutated relation's entries before the next
+    // insert/delete starts its own walk. So `range_cache_len()`
+    // reads zero between operations from the outside — that's
+    // intentional, mirroring Java's eager invalidation. The tests
+    // below verify aggregate correctness under the cache, plus the
+    // observable `range_cache_len() == 0` invariant after each
+    // insert.
+
+    #[test]
+    fn range_cache_does_not_corrupt_recursive_join_aggregate() {
+        // Triangle topology so the executor takes the
+        // `recursive_join` path (binary fast path bypasses the
+        // cache). Single matching tuple at key=1.
+        let mut g = JoinGraph::new();
+        g.add_relation("R1", &["x"]);
+        g.add_relation("R2", &["x"]);
+        g.add_relation("R3", &["x"]);
+        g.add_edge("R1", "R2", 0, 1000);
+        g.add_edge("R2", "R3", 0, 1000);
+        g.add_edge("R1", "R3", 0, 1000);
+        let extractors = labeled_count_extractors(&["R1", "R2", "R3"]);
+        let mut state = MultiWayJoinState::with_extractors(g, MultiWayCount, extractors);
+        state.insert("R1", 0, (1, "a"));
+        state.insert("R2", 10, (1, "b"));
+        state.insert("R3", 20, (1, "c"));
+        assert_eq!(state.aggregate(), 1);
+        // External observer always sees an empty cache between
+        // operations — invalidation happens eagerly.
+        assert_eq!(state.range_cache_len(), 0);
+    }
+
+    #[test]
+    fn range_cache_invalidated_between_inserts() {
+        let mut g = JoinGraph::new();
+        g.add_relation("R1", &["x"]);
+        g.add_relation("R2", &["x"]);
+        g.add_relation("R3", &["x"]);
+        g.add_edge("R1", "R2", 0, 1000);
+        g.add_edge("R2", "R3", 0, 1000);
+        g.add_edge("R1", "R3", 0, 1000);
+        let extractors = labeled_count_extractors(&["R1", "R2", "R3"]);
+        let mut state = MultiWayJoinState::with_extractors(g, MultiWayCount, extractors);
+        state.insert("R1", 0, (1, "a"));
+        state.insert("R2", 10, (1, "b"));
+        state.insert("R3", 20, (1, "c"));
+        assert_eq!(state.range_cache_len(), 0);
+
+        // Adding a second R3 with the same key forms a second
+        // triangle. If invalidation were broken the cached R3
+        // queries from the first insert would mask the new R3
+        // record and the aggregate would stay at 1.
+        state.insert("R3", 30, (1, "d"));
+        assert_eq!(state.aggregate(), 2);
+        assert_eq!(state.range_cache_len(), 0);
+    }
+
+    #[test]
+    fn range_cache_correctness_under_eviction() {
+        // Star topology with 4 satellites — each satellite insert
+        // routes through recursive_join, exercising the cache on
+        // both populate + invalidate paths. Cross-check the
+        // aggregate matches the F-IVM-correct answer.
+        let mut g = JoinGraph::new();
+        g.add_relation("R0", &["x"]);
+        g.add_relation("R1", &["x"]);
+        g.add_relation("R2", &["x"]);
+        g.add_relation("R3", &["x"]);
+        g.add_edge("R0", "R1", 0, 1000);
+        g.add_edge("R0", "R2", 0, 1000);
+        g.add_edge("R0", "R3", 0, 1000);
+        let extractors = labeled_count_extractors(&["R0", "R1", "R2", "R3"]);
+        let mut state = MultiWayJoinState::with_extractors(g, MultiWayCount, extractors);
+        state.insert("R0", 0, (1, "r0"));
+        state.insert("R1", 10, (1, "r1"));
+        state.insert("R2", 20, (1, "r2"));
+        // No full star tuple yet: only the central R0 + 2 satellites.
+        // Layer-5a's F-IVM-correct multi_way_delta means each
+        // satellite insert with all four relations present yields a
+        // full delta, but until R3 arrives the running aggregate
+        // stays at 0.
+        assert_eq!(state.aggregate(), 0);
+        state.insert("R3", 30, (1, "r3"));
+        // Single matching star → 1.
+        assert_eq!(state.aggregate(), 1);
+        // Aggregate stays correct as we add more matching satellites.
+        state.insert("R1", 40, (1, "r1b"));
+        assert_eq!(state.aggregate(), 2);
+        state.insert("R2", 50, (1, "r2b"));
+        assert_eq!(state.aggregate(), 4);
     }
 }
