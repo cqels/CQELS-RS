@@ -33,6 +33,7 @@ pub mod continuous;
 pub mod delta;
 pub mod processor;
 pub mod timeout;
+pub mod triggerable_session_window;
 pub mod triggerable_sliding_window;
 pub mod triggerable_window;
 
@@ -40,6 +41,7 @@ pub use continuous::{ContinuousEventTimeTrigger, ContinuousProcessingTimeTrigger
 pub use delta::{DeltaEvictor, DeltaFunction, DeltaTrigger};
 pub use processor::{TriggerableWindowProcessor, WindowEmission};
 pub use timeout::ProcessingTimeoutTrigger;
+pub use triggerable_session_window::TriggerableSessionWindow;
 pub use triggerable_sliding_window::TriggerableSlidingWindow;
 pub use triggerable_window::{NoEvictor, TriggerableTimeWindow};
 

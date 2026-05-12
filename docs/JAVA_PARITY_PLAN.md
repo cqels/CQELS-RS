@@ -53,7 +53,7 @@ Per the project's behavioral guidelines:
 - [x] Trigger types: `EventTimeTrigger`, `ProcessingTimeTrigger`, `CountTrigger`, `PurgingTrigger`, `DeltaTrigger`, `ProcessingTimeoutTrigger`, `ContinuousEventTimeTrigger`, `ContinuousProcessingTimeTrigger` (8/8 ported).
 - [x] Evictor types: `CountEvictor`, `TimeEvictor`, `DeltaEvictor` (3/3 ported).
 - [x] Bridge integration via `TriggerableWindowProcessor` in `cqels-core::windowing::processor` — buffers elements and consults a trigger/evictor per-window. Existing `window::Window<T>` operators continue to work unchanged.
-- [x] **`Window<T>` adapter** in `cqels-core::windowing::triggerable_window` — `TriggerableTimeWindow<T, Tr, Ev>` implements the existing `Window<T>` trait by routing each incoming event to a per-window `TriggerableWindowProcessor` (cloned from a template). Closes the "follow-up" note. Tumbling time-window assignment only in this MVP; sliding/session variants are tracked as further follow-ups.
+- [x] **`Window<T>` adapter** — `TriggerableTimeWindow<T, Tr, Ev>` (tumbling), `TriggerableSlidingWindow<T, Tr, Ev>`, and `TriggerableSessionWindow<T, Tr, Ev>` in `cqels-core::windowing` all implement the existing `Window<T>` trait by delegating emission to a caller-supplied trigger + optional evictor. Tumbling/sliding use per-window `TriggerableWindowProcessor`; session windows manage state inline because their bounds grow with the data. **2.1 fully covered.**
 - **Verify:** 33 framework tests + 5 adapter tests across `cqels-core/src/windowing.rs`, `windowing/processor.rs`, `windowing/delta.rs`, `windowing/timeout.rs`, `windowing/continuous.rs`, `windowing/triggerable_window.rs`.
 
 ### 2.2 Windowed self-join with indexed hash join (Java PR #25)
