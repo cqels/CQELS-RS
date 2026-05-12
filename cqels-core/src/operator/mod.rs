@@ -24,6 +24,7 @@ pub mod swag_multiway;
 pub mod swag_multiway_cache;
 pub mod swag_parallel;
 pub mod swag_triangle;
+pub mod swag_windowed_join;
 
 // Re-export key types for ergonomic imports.
 pub use aggregate::{
@@ -67,3 +68,7 @@ pub use swag_multiway::{
 };
 pub use swag_parallel::{ParallelJoinAggregator, DEFAULT_PARALLEL_THRESHOLD};
 pub use swag_triangle::{TriangleCount, TriangleJoinAggregateSpec, TriangleSumProduct};
+pub use swag_windowed_join::{
+    JoinAggregateResult as WindowedJoinAggregateResult, Side as WindowedJoinSide,
+    TumblingWindowAssigner, WindowAssigner, WindowedJoinAggregateOperator,
+};
