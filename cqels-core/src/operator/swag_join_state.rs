@@ -342,6 +342,28 @@ where
         }
     }
 
+    /// Read-only reference to the left payload `TimeIndex`, when
+    /// the operator is in cross-product mode. Returns `None` for
+    /// equi-join (key-indexed) mode. Exposed so Tier-2 callers
+    /// (e.g.
+    /// [`ParallelJoinAggregator`](crate::operator::swag_parallel::ParallelJoinAggregator))
+    /// can run a batch recompute without going through the
+    /// operator's incremental API.
+    pub fn left_time_index(&self) -> Option<&TimeIndex<S::PL>> {
+        match &self.indexes {
+            Indexes::CrossProduct { left, .. } => Some(left),
+            Indexes::KeyIndexed { .. } => None,
+        }
+    }
+
+    /// Counterpart of [`Self::left_time_index`] for the right side.
+    pub fn right_time_index(&self) -> Option<&TimeIndex<S::PR>> {
+        match &self.indexes {
+            Indexes::CrossProduct { right, .. } => Some(right),
+            Indexes::KeyIndexed { .. } => None,
+        }
+    }
+
     /// Drops all indexed payloads and resets the aggregate to zero.
     /// Maps to a window PURGE event.
     pub fn clear(&mut self) {
