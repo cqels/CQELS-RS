@@ -17,6 +17,7 @@ pub mod rspql;
 pub mod swag;
 pub mod swag_ctrie;
 pub mod swag_join;
+pub mod swag_join_state;
 
 // Re-export key types for ergonomic imports.
 pub use aggregate::{
@@ -46,3 +47,4 @@ pub use swag_ctrie::{CTrieIndex, RangeResult, TimeIndex, TimeIndexEntry};
 pub use swag_join::{
     IndexStats, JoinRecord, KeyExtractor, KeyIndexedTimeIndex, VariableOrder, VariableOrderMethod,
 };
+pub use swag_join_state::{IntervalBounds, JoinAggregateSpec, PayloadType, WindowJoinState};
