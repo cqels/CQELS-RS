@@ -18,6 +18,7 @@ pub mod swag;
 pub mod swag_ctrie;
 pub mod swag_join;
 pub mod swag_join_graph;
+pub mod swag_join_specs;
 pub mod swag_join_state;
 
 // Re-export key types for ergonomic imports.
@@ -51,5 +52,9 @@ pub use swag_join::{
 pub use swag_join_graph::{
     Edge as JoinGraphEdge, FactorizedViewPlan, Hyperedge, Hypergraph, JoinGraph,
     Relation as JoinGraphRelation, ViewLayer,
+};
+pub use swag_join_specs::{
+    CountSpec, F64Bits, JoinAggregateEvent, JoinUpdate, Side as JoinSide, SumLeftSpec,
+    SumProductSpec, SumRightSpec, WindowedJoinAggregator,
 };
 pub use swag_join_state::{IntervalBounds, JoinAggregateSpec, PayloadType, WindowJoinState};
