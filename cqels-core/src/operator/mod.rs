@@ -20,6 +20,7 @@ pub mod swag_join;
 pub mod swag_join_graph;
 pub mod swag_join_specs;
 pub mod swag_join_state;
+pub mod swag_multiway;
 
 // Re-export key types for ergonomic imports.
 pub use aggregate::{
@@ -58,3 +59,6 @@ pub use swag_join_specs::{
     SumProductSpec, SumRightSpec, WindowedJoinAggregator,
 };
 pub use swag_join_state::{IntervalBounds, JoinAggregateSpec, PayloadType, WindowJoinState};
+pub use swag_multiway::{
+    MultiWayAggregateSpec, MultiWayCount, MultiWayJoinState, MultiWaySumProduct, RelationExtractors,
+};
