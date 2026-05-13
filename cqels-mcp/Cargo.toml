@@ -10,6 +10,7 @@ keywords.workspace = true
 
 [dependencies]
 cqels-core.workspace = true
+cqels-engine.workspace = true
 cqels-model.workspace = true
 cqels-reasoning.workspace = true
 cqels-shacl.workspace = true
@@ -17,8 +18,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync"] }
 sled = "0.34"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"

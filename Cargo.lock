@@ -338,6 +338,7 @@ name = "cqels-mcp"
 version = "0.1.0"
 dependencies = [
  "cqels-core",
+ "cqels-engine",
  "cqels-model",
  "cqels-reasoning",
  "cqels-shacl",

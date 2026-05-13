@@ -25,19 +25,28 @@
 //! | `store_memory`     | ✅ implemented (in-memory / sled) |
 //! | `recall_memory`    | ✅ implemented (in-memory / sled) |
 //! | `forget_memory`    | ✅ implemented (in-memory / sled) |
-//! | `register_stream_query` | follow-up (needs engine wiring) |
+//! | `register_stream_query` | ✅ implemented (engine-bound; see [`stream_query`]) |
+//! | `list_stream_queries` | ✅ implemented (engine-bound) |
+//! | `unregister_stream_query` | ✅ implemented (engine-bound) |
+//! | `poll_stream_results` | ✅ implemented (engine-bound) |
 //! | `reason`           | ✅ implemented (one-shot RETE inference) |
 //! | `validate`         | follow-up (needs cqels-shacl bridge) |
 //! | `solve`            | follow-up (needs cqels-asp bridge) |
 
 pub mod memory;
 pub mod registry;
+pub mod stream_query;
 pub mod tool;
 pub mod tools;
 pub mod transport;
 
 pub use memory::{InMemoryMemoryStore, MemoryError, MemoryFact, MemoryStore, SledMemoryStore};
 pub use registry::{McpError, ToolRegistry};
+pub use stream_query::{
+    list_stream_queries_tool, poll_stream_results_tool, register_stream_query_tool,
+    unregister_stream_query_tool, ListStreamQueriesTool, PollStreamResultsTool,
+    RegisterStreamQueryTool, StreamQueryHub, UnregisterStreamQueryTool,
+};
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{
     analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reason_tool,
