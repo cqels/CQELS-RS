@@ -31,10 +31,11 @@
 //! | `poll_stream_results` | ✅ implemented (engine-bound) |
 //! | `reason`           | ✅ implemented (one-shot RETE inference) |
 //! | `validate`         | ✅ implemented (SHACL bridge; see [`validate`]) |
-//! | `solve`            | follow-up (needs cqels-asp bridge) |
+//! | `solve`            | ✅ implemented (ASP bridge; see [`solve`]) |
 
 pub mod memory;
 pub mod registry;
+pub mod solve;
 pub mod stream_query;
 pub mod tool;
 pub mod tools;
@@ -43,6 +44,7 @@ pub mod validate;
 
 pub use memory::{InMemoryMemoryStore, MemoryError, MemoryFact, MemoryStore, SledMemoryStore};
 pub use registry::{McpError, ToolRegistry};
+pub use solve::{solve_tool, solve_tool_with_solver, SolveTool};
 pub use stream_query::{
     list_stream_queries_tool, poll_stream_results_tool, register_stream_query_tool,
     unregister_stream_query_tool, ListStreamQueriesTool, PollStreamResultsTool,
