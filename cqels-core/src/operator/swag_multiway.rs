@@ -411,6 +411,71 @@ where
         delta
     }
 
+    /// Delete every previously-inserted occurrence of `relation_name`
+    /// whose timestamp falls in `[start, end]`. Returns the
+    /// accumulated F-IVM negative delta.
+    ///
+    /// Unlike Java's `deleteRange` — which Java itself flags as
+    /// returning zero delta due to missing tuple info — this
+    /// implementation has the full `JoinRecord<E, P>` in every
+    /// per-edge `CTrieIndex`, so we can replay each removed
+    /// `(element, timestamp)` through the regular `delete` path
+    /// and recover the true negative delta.
+    ///
+    /// Returns `spec.zero()` if `start > end` or if no entries
+    /// match. The aggregate is updated in-place; the returned
+    /// `S::V` is the same delta folded in.
+    pub fn delete_range(&mut self, relation_name: &str, start: i64, end: i64) -> S::V {
+        assert!(
+            self.indices.contains_key(relation_name),
+            "unknown relation: {relation_name}"
+        );
+        if start > end {
+            return self.spec.zero();
+        }
+        // Snapshot every element-at-timestamp in range. We use the
+        // first incident edge's CTrieIndex as the source-of-truth
+        // for the relation — all per-edge indices carry the same
+        // `JoinRecord`s (one per insert), so picking any one is
+        // sufficient.
+        let occurrences: Vec<(i64, E)> = {
+            let Some(edge_map) = self.indices.get(relation_name) else {
+                return self.spec.zero();
+            };
+            // Pick any neighbor's index for this relation; all
+            // per-edge indices for the same relation contain the
+            // same set of (timestamp, JoinRecord) pairs because
+            // `index_element` writes to every neighbor edge.
+            let Some((_, any_idx)) = edge_map.iter().next() else {
+                return self.spec.zero();
+            };
+            // Wildcard partial-keys (single None) requests every
+            // join-key bucket in the index — the trie is depth 1,
+            // so this is the full range scan we want.
+            let entries = any_idx.query_range_entries(&[None], start, end);
+            // Expand each `(timestamp, record, count)` triple into
+            // `count` copies so the F-IVM replay below evicts the
+            // correct number of occurrences per bucket.
+            let mut out: Vec<(i64, E)> = Vec::new();
+            for entry in entries {
+                for _ in 0..entry.count {
+                    out.push((entry.timestamp, entry.payload.element.clone()));
+                }
+            }
+            out
+        };
+
+        // Replay each deletion through the regular `delete` path
+        // so the F-IVM delta and the cache invalidation logic stay
+        // in one place.
+        let mut total = self.spec.zero();
+        for (ts, elem) in occurrences {
+            let delta = self.delete(relation_name, ts, elem);
+            total = self.spec.add(&total, &delta);
+        }
+        total
+    }
+
     // ─── delta computation ───────────────────────────────────────
 
     fn compute_delta(
@@ -1059,5 +1124,115 @@ mod tests {
         assert_eq!(state.aggregate(), 2);
         state.insert("R2", 50, (1, "r2b"));
         assert_eq!(state.aggregate(), 4);
+    }
+
+    // ─── delete_range (Layer 5f) ──────────────────────────────────
+
+    #[test]
+    fn delete_range_empty_on_inverted_bounds() {
+        let mut g = JoinGraph::new();
+        g.add_relation("A", &["x"]);
+        g.add_relation("B", &["x"]);
+        g.add_edge("A", "B", 0, 100);
+        let extractors = pair_count_extractors(&["A", "B"]);
+        let mut state = MultiWayJoinState::with_extractors(g, MultiWayCount, extractors);
+        state.insert("A", 10, (1, 100));
+        state.insert("B", 20, (1, 200));
+        assert_eq!(state.aggregate(), 1);
+        // start > end → no-op.
+        let delta = state.delete_range("A", 100, 10);
+        assert_eq!(delta, 0);
+        assert_eq!(state.aggregate(), 1);
+    }
+
+    #[test]
+    fn delete_range_undoes_inserts_in_window() {
+        // Triangle topology — guarantees the recursive_join path,
+        // exercising the cache + invalidation across many calls.
+        let mut g = JoinGraph::new();
+        g.add_relation("R1", &["x"]);
+        g.add_relation("R2", &["x"]);
+        g.add_relation("R3", &["x"]);
+        g.add_edge("R1", "R2", 0, 1000);
+        g.add_edge("R2", "R3", 0, 1000);
+        g.add_edge("R1", "R3", 0, 1000);
+        let extractors = labeled_count_extractors(&["R1", "R2", "R3"]);
+        let mut state = MultiWayJoinState::with_extractors(g, MultiWayCount, extractors);
+
+        // Two triangles at key=1: timestamps {(0,10,20), (100,110,120)}.
+        // Edges use a `[0, 1000]` window from the inserting side, so
+        // the temporal-compatibility filter restricts the set:
+        //
+        // R1=0   → R2 ∈ {10, 110}, R3 ∈ ({20, 120} via R2=10) ∪ ({120} via R2=110) = 3
+        // R1=100 → R2 ∈ {110},     R3 ∈ ({120} via R2=110) = 1
+        //
+        // Total: 4 triangles.
+        state.insert("R1", 0, (1, "a1"));
+        state.insert("R2", 10, (1, "b1"));
+        state.insert("R3", 20, (1, "c1"));
+        state.insert("R1", 100, (1, "a2"));
+        state.insert("R2", 110, (1, "b2"));
+        state.insert("R3", 120, (1, "c2"));
+        assert_eq!(state.aggregate(), 4);
+
+        // Delete every R3 in [15, 125] — that's both R3 inserts.
+        let delta = state.delete_range("R3", 15, 125);
+        assert_eq!(delta, -4, "removing both R3s zeros the count");
+        assert_eq!(state.aggregate(), 0);
+
+        // Confirm subsequent inserts still work after the range
+        // delete (cache invalidation + index state are clean).
+        // R3=200 pairs with R1∈{0,100} via R2∈{10,110}:
+        //   R1=0 → R2 ∈ {10, 110}; from each, R3=200 within
+        //   [R2.ts, R2.ts+1000] ∩ [0,1000] = {200} for both → 2
+        //   R1=100 → R2=110; R3=200 within [110,1110] ∩ [100,1100] = {200} → 1
+        // Total: 3.
+        state.insert("R3", 200, (1, "c3"));
+        assert_eq!(state.aggregate(), 3);
+    }
+
+    #[test]
+    fn delete_range_with_no_matching_timestamps_returns_zero() {
+        let mut g = JoinGraph::new();
+        g.add_relation("A", &["x"]);
+        g.add_relation("B", &["x"]);
+        g.add_edge("A", "B", 0, 100);
+        let extractors = pair_count_extractors(&["A", "B"]);
+        let mut state = MultiWayJoinState::with_extractors(g, MultiWayCount, extractors);
+        state.insert("A", 10, (1, 100));
+        state.insert("B", 20, (1, 200));
+        // Range that doesn't touch any insertion.
+        let delta = state.delete_range("A", 1000, 2000);
+        assert_eq!(delta, 0);
+        assert_eq!(state.aggregate(), 1);
+    }
+
+    #[test]
+    fn delete_range_handles_bag_multiplicity() {
+        // Insert the same element multiple times at the same
+        // timestamp — bag semantics. delete_range should remove
+        // every occurrence and emit the correct accumulated delta.
+        let mut g = JoinGraph::new();
+        g.add_relation("R1", &["x"]);
+        g.add_relation("R2", &["x"]);
+        g.add_relation("R3", &["x"]);
+        g.add_edge("R1", "R2", 0, 1000);
+        g.add_edge("R2", "R3", 0, 1000);
+        g.add_edge("R1", "R3", 0, 1000);
+        let extractors = labeled_count_extractors(&["R1", "R2", "R3"]);
+        let mut state = MultiWayJoinState::with_extractors(g, MultiWayCount, extractors);
+
+        state.insert("R1", 0, (1, "a"));
+        state.insert("R2", 10, (1, "b"));
+        // Insert the same R3 element twice at the same timestamp
+        // (bag semantics — both contribute).
+        state.insert("R3", 20, (1, "c"));
+        state.insert("R3", 20, (1, "c"));
+        // 1 R1 × 1 R2 × 2 R3 = 2 triangles.
+        assert_eq!(state.aggregate(), 2);
+
+        let delta = state.delete_range("R3", 0, 100);
+        assert_eq!(delta, -2);
+        assert_eq!(state.aggregate(), 0);
     }
 }
