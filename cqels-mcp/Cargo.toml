@@ -9,11 +9,13 @@ repository.workspace = true
 keywords.workspace = true
 
 [dependencies]
+cqels-asp.workspace = true
 cqels-core.workspace = true
 cqels-engine.workspace = true
 cqels-model.workspace = true
 cqels-reasoning.workspace = true
 cqels-shacl.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

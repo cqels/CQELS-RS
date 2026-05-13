@@ -30,7 +30,7 @@
 //! | `unregister_stream_query` | ✅ implemented (engine-bound) |
 //! | `poll_stream_results` | ✅ implemented (engine-bound) |
 //! | `reason`           | ✅ implemented (one-shot RETE inference) |
-//! | `validate`         | follow-up (needs cqels-shacl bridge) |
+//! | `validate`         | ✅ implemented (SHACL bridge; see [`validate`]) |
 //! | `solve`            | follow-up (needs cqels-asp bridge) |
 
 pub mod memory;
@@ -39,6 +39,7 @@ pub mod stream_query;
 pub mod tool;
 pub mod tools;
 pub mod transport;
+pub mod validate;
 
 pub use memory::{InMemoryMemoryStore, MemoryError, MemoryFact, MemoryStore, SledMemoryStore};
 pub use registry::{McpError, ToolRegistry};
@@ -53,3 +54,4 @@ pub use tools::{
     reasoning_profiles_tool, recall_memory_tool, shacl_capabilities_tool, store_memory_tool,
 };
 pub use transport::{handle_request, run_stdio, PROTOCOL_VERSION, SERVER_NAME};
+pub use validate::{validate_tool, validate_tool_with_solver, ValidateTool};

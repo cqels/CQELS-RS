@@ -337,6 +337,8 @@ dependencies = [
 name = "cqels-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "cqels-asp",
  "cqels-core",
  "cqels-engine",
  "cqels-model",
