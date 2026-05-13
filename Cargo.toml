@@ -9,6 +9,7 @@ members = [
     "cqels-storage-sled",
     "cqels-storage-lmdb",
     "cqels-asp",
+    "cqels-cdsp",
     "cqels-mcp",
     "cqels-shacl",
     "cqels-benchmarks",
@@ -82,4 +83,5 @@ cqels-reasoning = { path = "cqels-reasoning" }
 cqels-geo = { path = "cqels-geo" }
 cqels-storage-spi = { path = "cqels-storage-spi" }
 cqels-asp = { path = "cqels-asp" }
+cqels-cdsp = { path = "cqels-cdsp" }
 cqels-shacl = { path = "cqels-shacl" }

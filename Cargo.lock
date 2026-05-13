@@ -275,6 +275,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cqels-cdsp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cqels-core",
+ "cqels-model",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "cqels-core"
 version = "0.1.0"
 dependencies = [
