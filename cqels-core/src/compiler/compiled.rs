@@ -120,6 +120,21 @@ impl ContinuousQuery for CompiledCqelsQuery {
         QueryType::Sparql
     }
 
+    fn input_stream_aliases(&self) -> Vec<(String, String)> {
+        // Surfaces the (synthetic, source) pairs created by the
+        // named-window lowering pass so the engine can fan source
+        // data into the synthetic stream names.
+        self.definition
+            .streams
+            .iter()
+            .filter_map(|s| {
+                s.source_stream
+                    .as_ref()
+                    .map(|src| (s.name.clone(), src.clone()))
+            })
+            .collect()
+    }
+
     fn execute(&self, mut inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
         // Fast path for the simple self-join shape (Java PR #25 optimization).
         // Routes the query through `WindowedSelfJoinState` for O(N+M)
@@ -1442,10 +1457,7 @@ mod tests {
             description: None,
             query_type: CqelsQueryType::Select,
             prefixes: HashMap::new(),
-            streams: vec![CqelsStreamDefinition {
-                name: "sensors".to_string(),
-                window: WindowSpec::now(),
-            }],
+            streams: vec![CqelsStreamDefinition::root("sensors", WindowSpec::now())],
             named_windows: vec![],
             static_graphs: vec![],
             named_graphs: vec![],

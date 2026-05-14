@@ -482,10 +482,7 @@ mod tests {
             description: None,
             query_type: CqelsQueryType::Select,
             prefixes: HashMap::new(),
-            streams: vec![CqelsStreamDefinition {
-                name: "events".to_string(),
-                window: WindowSpec::now(),
-            }],
+            streams: vec![CqelsStreamDefinition::root("events", WindowSpec::now())],
             named_windows: vec![],
             static_graphs: vec![],
             named_graphs: vec![],

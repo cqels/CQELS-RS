@@ -244,6 +244,23 @@ impl ReactiveStreamEngine {
 
     /// Builds QueryInputs from all currently registered streams.
     pub async fn build_query_inputs(&self) -> QueryInputs {
+        self.build_query_inputs_with_aliases(&[]).await
+    }
+
+    /// Like [`Self::build_query_inputs`], but additionally subscribes
+    /// to each `(synthetic, source)` alias: the synthetic name gets
+    /// its own broadcast subscriber tapping the source stream's
+    /// output. The compiler's named-window lowering pass uses this
+    /// to materialize RSP-QL named windows that share a source but
+    /// have distinct window specs — each synthetic view receives the
+    /// same elements as its source so per-view window state stays
+    /// independent. Aliases whose source isn't registered are
+    /// silently skipped (`execute` will see no elements for that
+    /// view, matching the behavior of a missing input stream).
+    pub async fn build_query_inputs_with_aliases(
+        &self,
+        aliases: &[(String, String)],
+    ) -> QueryInputs {
         let mut inputs = QueryInputs::new();
         let streams = self.streams.lock().await;
 
@@ -254,6 +271,17 @@ impl ReactiveStreamEngine {
                 futures::future::ready(result.ok())
             });
             inputs.add_stream(name.clone(), Box::pin(stream));
+        }
+
+        for (synthetic, source) in aliases {
+            if let Some(s) = streams.get(source) {
+                let rx = s.sender.subscribe();
+                let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
+                let stream = futures::StreamExt::filter_map(stream, |result| {
+                    futures::future::ready(result.ok())
+                });
+                inputs.add_stream(synthetic.clone(), Box::pin(stream));
+            }
         }
 
         inputs
@@ -269,7 +297,8 @@ impl ReactiveStreamEngine {
         query: Box<dyn ContinuousQuery<Result = BindingSet>>,
     ) -> Result<Pin<Box<dyn Stream<Item = BindingSet> + Send>>, CqelsError> {
         let query_id = query.query_id().to_string();
-        let inputs = self.build_query_inputs().await;
+        let aliases = query.input_stream_aliases();
+        let inputs = self.build_query_inputs_with_aliases(&aliases).await;
         let raw_stream = query.execute(inputs);
         self.wrap_with_cancellation(query_id, raw_stream).await
     }
@@ -785,6 +814,73 @@ mod tests {
 
         let ids = engine.registered_query_ids().await;
         assert!(ids.is_empty());
+
+        engine.stop().await.unwrap();
+    }
+
+    /// Verifies the named-window aliased-view plumbing: a `(synthetic,
+    /// source)` alias passed to `build_query_inputs_with_aliases`
+    /// makes the synthetic stream name receive every element pushed
+    /// onto `source`. Used by the named-window lowering pass to fan
+    /// a single user-registered stream into multiple windowed views.
+    #[tokio::test]
+    async fn build_query_inputs_with_aliases_fans_source_into_synthetic() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+
+        let engine = ReactiveStreamEngine::new();
+        let (sender, _registered) = create_stream_pair(16);
+        engine
+            .register_stream("sensors", _registered)
+            .await
+            .unwrap();
+        engine.start().await.unwrap();
+
+        // Build inputs with one alias: synthetic `__nw__w2` taps
+        // `sensors`.
+        let aliases = vec![("__nw__w2".to_string(), "sensors".to_string())];
+        let mut inputs = engine.build_query_inputs_with_aliases(&aliases).await;
+
+        // Both `sensors` and `__nw__w2` should be in the inputs map.
+        let mut alias_stream = inputs.take_stream("__nw__w2").expect("alias present");
+        let mut root_stream = inputs.take_stream("sensors").expect("root present");
+
+        // Push one element onto `sensors` — both streams should see it.
+        let stmt = Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/s1")),
+            IriTerm::new("http://ex.org/temp"),
+            Term::Literal(LiteralTerm::new("21")),
+        );
+        let elem = StreamElement::Rdf(RdfStreamElement::new(stmt, 1000));
+        sender.send(elem).await.unwrap();
+
+        let root_seen =
+            tokio::time::timeout(std::time::Duration::from_millis(500), root_stream.next())
+                .await
+                .expect("root timed out")
+                .expect("root yielded None");
+        let alias_seen =
+            tokio::time::timeout(std::time::Duration::from_millis(500), alias_stream.next())
+                .await
+                .expect("alias timed out")
+                .expect("alias yielded None");
+        assert!(matches!(root_seen, StreamElement::Rdf(_)));
+        assert!(matches!(alias_seen, StreamElement::Rdf(_)));
+
+        engine.stop().await.unwrap();
+    }
+
+    /// Aliases pointing at non-existent source streams are silently
+    /// skipped (the query just sees no input for that view, same as a
+    /// missing `FROM STREAM` would).
+    #[tokio::test]
+    async fn build_query_inputs_with_aliases_ignores_unknown_sources() {
+        let engine = ReactiveStreamEngine::new();
+        engine.start().await.unwrap();
+
+        let aliases = vec![("__nw__x".to_string(), "no-such-stream".to_string())];
+        let mut inputs = engine.build_query_inputs_with_aliases(&aliases).await;
+        assert!(inputs.take_stream("__nw__x").is_none());
 
         engine.stop().await.unwrap();
     }

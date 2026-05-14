@@ -352,10 +352,7 @@ fn parse_from_stream(
         .ok_or_else(|| ParseError::Syntax("expected window spec".into()))?;
     let window_spec = parse_window_spec(window)?;
 
-    Ok(builder.add_stream(CqelsStreamDefinition {
-        name,
-        window: window_spec,
-    }))
+    Ok(builder.add_stream(CqelsStreamDefinition::root(name, window_spec)))
 }
 
 /// Parses an RSP-QL `FROM NAMED WINDOW :W ON STREAM <name> [<spec>]`

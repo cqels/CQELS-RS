@@ -115,6 +115,23 @@ pub trait ContinuousQuery: Send + Sync {
     /// Returns the query type.
     fn query_type(&self) -> QueryType;
 
+    /// Returns a list of `(synthetic_name, source_name)` pairs the
+    /// engine should set up before calling [`Self::execute`]. For
+    /// each pair, the engine subscribes to the user-registered
+    /// stream named `source_name` and exposes a separate
+    /// [`QueryInputs`] entry under `synthetic_name` so the query
+    /// sees the same data under a different name (typically because
+    /// a different window spec applies to the synthetic view).
+    ///
+    /// Default: empty — no aliasing.
+    ///
+    /// Used by [`crate::compiler::named_window`]-lowered queries
+    /// that contain RSP-QL named windows with distinct specs over
+    /// the same source.
+    fn input_stream_aliases(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Executes this query on the given input streams.
     fn execute(&self, inputs: QueryInputs) -> Pin<Box<dyn Stream<Item = Self::Result> + Send>>;
 }

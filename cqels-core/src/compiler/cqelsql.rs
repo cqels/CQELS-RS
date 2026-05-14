@@ -227,10 +227,7 @@ mod tests {
             description: None,
             query_type: CqelsQueryType::Select,
             prefixes: HashMap::new(),
-            streams: vec![CqelsStreamDefinition {
-                name: "sensors".to_string(),
-                window: WindowSpec::now(),
-            }],
+            streams: vec![CqelsStreamDefinition::root("sensors", WindowSpec::now())],
             named_windows: vec![],
             static_graphs: vec![],
             named_graphs: vec![],
@@ -469,24 +466,53 @@ mod tests {
         assert!(err.to_string().contains("undeclared named window"));
     }
 
-    /// Two named windows on the same source stream with different
-    /// specs are explicitly unsupported. The compiler must reject
-    /// rather than silently picking one.
+    /// Two named windows on the same source with different specs are
+    /// now supported via aliased synthetic stream views — the first
+    /// inlines as the root for `sensors`, the second gets a
+    /// `__nw__…` aliased entry with `source_stream = Some("sensors")`
+    /// so the engine can fan the source's events into a separate
+    /// view with its own window.
     #[test]
-    fn rejects_conflicting_named_window_specs_at_compile_time() {
+    fn compiles_diff_spec_named_windows_via_aliased_views() {
         let query = r#"
             SELECT ?s
             FROM NAMED WINDOW <http://ex.org/w1> ON STREAM sensors [RANGE 10s]
             FROM NAMED WINDOW <http://ex.org/w2> ON STREAM sensors [RANGE 30s]
             WHERE {
                 WINDOW <http://ex.org/w1> { ?s <http://ex.org/p> ?o . }
+                WINDOW <http://ex.org/w2> { ?s <http://ex.org/q> ?o . }
             }
         "#;
         let def = crate::parser::CqelsQlParser::parse(query).expect("parse");
-        let err = match CqelsQueryCompiler::compile(query, def) {
-            Err(e) => e,
-            Ok(_) => panic!("expected compile error for conflicting window specs"),
-        };
-        assert!(err.to_string().contains("multiple distinct window specs"));
+        let compiled = CqelsQueryCompiler::compile(query, def).expect("compile");
+
+        let def = compiled.definition();
+        assert_eq!(def.streams.len(), 2);
+        let root = def
+            .streams
+            .iter()
+            .find(|s| s.name == "sensors")
+            .expect("root sensors entry present");
+        assert!(root.source_stream.is_none());
+        let alias = def
+            .streams
+            .iter()
+            .find(|s| s.source_stream.as_deref() == Some("sensors"))
+            .expect("aliased entry present");
+        assert!(alias.name.starts_with("__nw__"));
+        assert_ne!(root.window, alias.window);
+
+        // Each WINDOW pattern group lowers to a Stream referencing
+        // either the root or the alias.
+        let sources: Vec<&str> = def
+            .pattern_groups
+            .iter()
+            .filter_map(|g| match g {
+                CqelsPatternGroup::Stream { source, .. } => Some(source.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(sources.contains(&"sensors"));
+        assert!(sources.iter().any(|s| s.starts_with("__nw__")));
     }
 }

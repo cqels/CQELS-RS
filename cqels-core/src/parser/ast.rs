@@ -232,10 +232,54 @@ pub enum CqelsQueryType {
 }
 
 /// Stream definition with window semantics for CqelsQL.
+///
+/// When `source_stream` is `None` (the default), the stream is a
+/// "root" stream backed directly by user-registered data — that is,
+/// the engine routes input from a stream of the same `name` that the
+/// caller previously created via `engine.create_stream(name)`.
+///
+/// When `source_stream` is `Some(parent)`, the stream is an
+/// **aliased view** of a parent stream: the engine subscribes to the
+/// parent's broadcast and exposes a separate input under `name`. The
+/// compiler's [`crate::compiler::named_window`] lowering pass uses
+/// this to materialize RSP-QL named windows when multiple windows
+/// over the same source carry distinct specs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CqelsStreamDefinition {
+    /// The stream name referenced by `STREAM <name> { ... }` pattern
+    /// groups. For aliased views, this is the synthetic name generated
+    /// by the lowering pass (e.g. `__nw_<sanitized_iri>`).
     pub name: String,
+    /// Window applied to elements flowing into this stream view.
     pub window: WindowSpec,
+    /// If `Some(src)`, this stream is an aliased view of stream `src`
+    /// — the engine fans `src`'s broadcast out under this name so
+    /// downstream operators see the same elements with a different
+    /// window spec. `None` for root streams backed directly by
+    /// user-registered data.
+    pub source_stream: Option<String>,
+}
+
+impl CqelsStreamDefinition {
+    /// Constructs a root stream definition (no aliasing).
+    pub fn root(name: impl Into<String>, window: WindowSpec) -> Self {
+        Self {
+            name: name.into(),
+            window,
+            source_stream: None,
+        }
+    }
+
+    /// Constructs an aliased view of `source` — the engine fans data
+    /// from `source`'s broadcast into this synthetic stream name and
+    /// applies the supplied `window`.
+    pub fn aliased(name: impl Into<String>, source: impl Into<String>, window: WindowSpec) -> Self {
+        Self {
+            name: name.into(),
+            window,
+            source_stream: Some(source.into()),
+        }
+    }
 }
 
 /// RSP-QL named window declaration.
@@ -1077,10 +1121,7 @@ mod tests {
         let query = CqelsQueryDefinition::builder()
             .name("test-query")
             .query_type(CqelsQueryType::Select)
-            .add_stream(CqelsStreamDefinition {
-                name: "sensor".to_string(),
-                window: WindowSpec::now(),
-            })
+            .add_stream(CqelsStreamDefinition::root("sensor", WindowSpec::now()))
             .add_select_element(SelectElement::Variable("?x".to_string()))
             .distinct(true)
             .limit(10)

@@ -757,6 +757,64 @@ mod tests {
         runtime.stop().await.unwrap();
     }
 
+    /// End-to-end exercise of the aliased-stream-view path: a query
+    /// declares two named windows on the same source stream with
+    /// *different* specs. The lowering pass produces one root entry
+    /// (for the first window's spec, reusing the `sensors` name) plus
+    /// one `__nw__…` aliased entry with `source_stream = Some("sensors")`.
+    /// The engine fan-out subscribes a separate broadcast tap under
+    /// the synthetic name so both pattern groups in the WHERE clause
+    /// see every event.
+    #[tokio::test]
+    async fn test_named_window_aliased_view_delivers_events() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+        use futures::StreamExt;
+
+        let runtime = CqelsRuntime::new();
+
+        // Three sensor readings on the `sensors` stream.
+        let elements: Vec<StreamElement> = (0..3)
+            .map(|i| {
+                StreamElement::Rdf(RdfStreamElement::new(
+                    Statement::new(
+                        Term::Iri(IriTerm::new(format!("http://ex.org/s{i}"))),
+                        IriTerm::new("http://ex.org/temp"),
+                        Term::Literal(LiteralTerm::new(format!("{}", 20 + i))),
+                    ),
+                    (i + 1) * 1000,
+                ))
+            })
+            .collect();
+        let stream = Box::pin(futures::stream::iter(elements));
+        runtime.register_stream("sensors", stream).await.unwrap();
+
+        // Two named windows on `sensors` with different specs. With
+        // aliased views landed, this compiles and the engine wires a
+        // synthetic subscription so the WINDOW :w2 pattern group
+        // observes the same sensor events as WINDOW :w1.
+        let query = r#"
+            SELECT ?s ?v
+            FROM NAMED WINDOW <http://ex.org/w1> ON STREAM sensors [NOW]
+            FROM NAMED WINDOW <http://ex.org/w2> ON STREAM sensors [RANGE 30s]
+            WHERE {
+                WINDOW <http://ex.org/w1> { ?s <http://ex.org/temp> ?v . }
+            }
+        "#;
+        let reg = runtime
+            .register_cqelsql_query(query)
+            .await
+            .expect("compile + register aliased-view query");
+        runtime.start().await.unwrap();
+
+        let results: Vec<_> = reg.stream.take(3).collect().await;
+        assert_eq!(results.len(), 3);
+        assert!(results[0].contains("s"));
+        assert!(results[0].contains("v"));
+
+        runtime.stop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_register_cypherql_query_end_to_end() {
         use cqels_core::stream::{RdfStreamElement, StreamElement};
