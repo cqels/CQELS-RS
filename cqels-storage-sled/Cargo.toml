@@ -1,6 +1,6 @@
 [package]
 name = "cqels-storage-sled"
-description = "Embedded sled-backed persistent storage for CQELS (pure-Rust alternative; chosen because RocksDB's native link conflicts with oxigraph's oxrocksdb-sys)"
+description = "Embedded sled-backed persistent storage for CQELS (pure-Rust alternative; sits alongside cqels-storage-rocksdb and cqels-storage-lmdb)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -90,7 +90,7 @@ Per the project's behavioral guidelines:
 
 - [x] **`cqels-storage-sled`** — production-grade embedded backend using the pure-Rust `sled` KV store. 8 tests.
 - [x] **`cqels-storage-lmdb`** — production-grade embedded backend using the pure-Rust `heed` LMDB binding (memory-mapped, MVCC). 8 tests.
-- [!] **Why no RocksDB?** The Rust `rocksdb` crate and oxigraph's transitively-included `oxrocksdb-sys` both declare `links = "rocksdb"`, so Cargo refuses to compile both in the same workspace. Sled + LMDB cover the embedded-KV slot pragmatically. A future RocksDB backend can slot in once `oxrocksdb-sys` is gated behind an opt-in feature.
+- [x] **`cqels-storage-rocksdb`** — RocksDB backend (mirrors Java's `cqels-storage-rocksdb`). The previously-blocking `links = "rocksdb"` collision between the user-space `rocksdb` crate and oxigraph's transitive `oxrocksdb-sys` was lifted by disabling oxigraph's `rocksdb` *default* feature at the workspace level: we only use `Store::new()` (the in-memory variant available unconditionally), never `Store::open(path)` (the rocksdb-gated API). Column-family layout: `journal`, `checkpoints`, `meta`. Uses `delete_range_cf` for cheap range truncation. 8 tests, same shape as the sled backend.
 - [!] **Deferred:** IoTDB backend (network database, large surface).
 
 ### 3c External integration modules

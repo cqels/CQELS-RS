@@ -8,6 +8,7 @@ members = [
     "cqels-storage-spi",
     "cqels-storage-sled",
     "cqels-storage-lmdb",
+    "cqels-storage-rocksdb",
     "cqels-asp",
     "cqels-cdsp",
     "cqels-mcp",
@@ -26,8 +27,13 @@ repository = "https://github.com/cqels/cqels-rs"
 keywords = ["rdf", "streaming", "sparql", "cypher", "rete"]
 
 [workspace.dependencies]
-# RDF
-oxigraph = "0.4"
+# RDF — oxigraph's `rocksdb` default feature is disabled so the
+# transitive `oxrocksdb-sys` no longer claims the `links = "rocksdb"`
+# slot, freeing it for the `rocksdb` crate used by
+# `cqels-storage-rocksdb`. We only use `Store::new()` (in-memory),
+# never `Store::open(path)` (which is the rocksdb-gated API), so this
+# is a no-op for our codebase.
+oxigraph = { version = "0.4", default-features = false }
 oxrdf = "0.2"
 
 # Async runtime
