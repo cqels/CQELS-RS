@@ -1,0 +1,21 @@
+[package]
+name = "cqels-storage-iotdb"
+description = "Apache IoTDB-backed persistent storage adapter for CQELS (executor-based; ships an in-memory reference impl, wire your own Thrift client for live IoTDB)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+cqels-storage-spi.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
