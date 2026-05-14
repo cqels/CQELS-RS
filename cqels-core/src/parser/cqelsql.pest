@@ -87,9 +87,23 @@ limit_clause = { ^"limit" ~ integer }
 
 from_clauses = { from_clause+ }
 
-from_clause = { from_stream | from_static | from_named }
+// Order matters: `from_named_window` starts with `FROM NAMED WINDOW`,
+// which is a prefix of `FROM NAMED <iri>` (the static named-graph
+// form). The window variant must be tried *before* the bare named
+// form so pest matches the more specific rule first.
+from_clause = { from_stream | from_named_window | from_static | from_named }
 
 from_stream = { ^"from" ~ ^"stream" ~ identifier ~ "[" ~ window_spec ~ "]" }
+
+// RSP-QL `FROM NAMED WINDOW :W ON STREAM <name> [<window_spec>]`.
+// The window is identified by an IRI; the stream uses the same bare
+// identifier form as `from_stream` to stay consistent with the rest
+// of the cqels grammar.
+from_named_window = {
+    ^"from" ~ ^"named" ~ ^"window" ~ iri_ref
+    ~ ^"on" ~ ^"stream" ~ identifier
+    ~ "[" ~ window_spec ~ "]"
+}
 
 from_static = {
     ^"from" ~ ^"static"? ~ iri_ref
@@ -123,6 +137,7 @@ where_clause = { "{" ~ pattern_group+ ~ "}" }
 
 pattern_group = {
     stream_pattern_group
+    | window_pattern_group
     | static_pattern_group
     | named_graph_pattern_group
     | filter_constraint
@@ -157,6 +172,12 @@ union_pattern = { "{" ~ pattern_group+ ~ "}" ~ ^"union" ~ "{" ~ pattern_group+ ~
 minus_pattern = { ^"minus" ~ "{" ~ triple_pattern+ ~ "}" }
 
 stream_pattern_group = { ^"stream" ~ identifier ~ "{" ~ triple_pattern+ ~ "}" }
+
+// RSP-QL `WINDOW :W { ... }` — patterns scoped to a previously-declared
+// named window. The IRI must match a `from_named_window` declaration
+// for the query to be well-formed (the parser does not enforce this;
+// the compiler / planner will once execution semantics land).
+window_pattern_group = { ^"window" ~ iri_ref ~ "{" ~ triple_pattern+ ~ "}" }
 
 static_pattern_group = { ^"static" ~ "{" ~ triple_pattern+ ~ "}" }
 

@@ -37,7 +37,7 @@ Per the project's behavioral guidelines:
 
 - [x] **1.2a Implicit stream binding** (Java Phase 1, complete and working): bare triple patterns in `WHERE` auto-bind to a single `FROM STREAM` when no `STREAM`/`WINDOW` blocks are present.
   - **Verify:** [cqels-core/src/parser/cqelsql.rs](../cqels-core/src/parser/cqelsql.rs) — `apply_implicit_stream_binding`; 6 new parser parity tests covering single-stream binding, multi-triple binding, explicit-block bypass, multi-stream skip, static-graph skip, named-graph skip.
-- [!] **1.2b Named window parsing** (`FROM NAMED WINDOW :name ON stream [spec]` + `WINDOW :name { ... }`): defer until Java upstream implements execution.
+- [x] **1.2b Named window parsing** (`FROM NAMED WINDOW :name ON STREAM <name> [<spec>]` + `WINDOW :name { ... }`): pest grammar extended with `from_named_window` and `window_pattern_group` rules; new `NamedWindowDefinition` AST type carries `(iri, stream, window_spec)`; new `CqelsPatternGroup::Window { window_iri, patterns }` variant. `CqelsQueryDefinition.named_windows` lists the declarations. The window-form rule is tried ahead of the bare `FROM NAMED <iri>` (static graph) form so prefix overlap doesn't shadow it. **Parser-only — execution is still deferred**: the compiler / engine continue to treat queries with named windows as unsupported at runtime. Surfacing the AST unblocks the MCP `parse_query` / `analyze_query` tools, IDE integrations, and future planner work. 7 tests cover declaration registration, `WINDOW {}` pattern groups, prefix-overlap with static `FROM NAMED`, multiple windows with different specs, TRIPLES specs, and error cases (missing spec, missing IRI).
 
 ### 1.3 Declarative CEP via FILTER(SEQ()) (Java PR #36)
 

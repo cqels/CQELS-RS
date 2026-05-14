@@ -238,6 +238,30 @@ pub struct CqelsStreamDefinition {
     pub window: WindowSpec,
 }
 
+/// RSP-QL named window declaration.
+///
+/// Produced by `FROM NAMED WINDOW :W ON STREAM <name> [<window_spec>]`
+/// in the FROM clause. The window is identified by an IRI and can be
+/// referenced by zero or more [`CqelsPatternGroup::Window`] groups in
+/// the WHERE clause.
+///
+/// Execution semantics are intentionally not wired yet — Java upstream
+/// has not finalized the runtime behavior for named windows. The
+/// parser produces this AST node so downstream tools (the MCP
+/// `parse_query` surface, IDE integrations, future planner work) can
+/// see the declaration; the compiler / engine treat queries that
+/// contain named windows as unsupported at execution time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedWindowDefinition {
+    /// Window identifier IRI, e.g. `<http://ex.org/w1>`. Stored
+    /// without surrounding angle brackets.
+    pub iri: String,
+    /// Bare stream name the window draws from.
+    pub stream: String,
+    /// Window semantics (range, slide, triples, now).
+    pub window: WindowSpec,
+}
+
 /// Aggregate specification for CqelsQL SELECT.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AggregateSpec {
@@ -297,6 +321,17 @@ pub enum CqelsPatternGroup {
     /// Patterns from a named stream source.
     Stream {
         source: String,
+        patterns: Vec<TriplePattern>,
+    },
+    /// Patterns scoped to a previously-declared RSP-QL named window.
+    ///
+    /// Produced by `WINDOW :W { ... }` in the WHERE clause. The
+    /// referenced `window_iri` must match a
+    /// [`NamedWindowDefinition::iri`] in the same query for the query
+    /// to be well-formed; the parser does not enforce this — the
+    /// compiler / planner will once execution semantics land.
+    Window {
+        window_iri: String,
         patterns: Vec<TriplePattern>,
     },
     /// Patterns from static data.
@@ -439,6 +474,9 @@ pub struct CqelsQueryDefinition {
     pub query_type: CqelsQueryType,
     pub prefixes: HashMap<String, String>,
     pub streams: Vec<CqelsStreamDefinition>,
+    /// RSP-QL named window declarations from
+    /// `FROM NAMED WINDOW :W ON STREAM <name> [<spec>]`.
+    pub named_windows: Vec<NamedWindowDefinition>,
     pub static_graphs: Vec<GraphDefinition>,
     pub named_graphs: Vec<GraphDefinition>,
     pub select_elements: Vec<SelectElement>,
@@ -487,6 +525,7 @@ pub struct CqelsQueryDefinitionBuilder {
     query_type: Option<CqelsQueryType>,
     prefixes: HashMap<String, String>,
     streams: Vec<CqelsStreamDefinition>,
+    named_windows: Vec<NamedWindowDefinition>,
     static_graphs: Vec<GraphDefinition>,
     named_graphs: Vec<GraphDefinition>,
     select_elements: Vec<SelectElement>,
@@ -526,6 +565,18 @@ impl CqelsQueryDefinitionBuilder {
     pub fn add_stream(mut self, stream: CqelsStreamDefinition) -> Self {
         self.streams.push(stream);
         self
+    }
+
+    /// Registers a named window declaration on the builder. See
+    /// [`NamedWindowDefinition`].
+    pub fn add_named_window(mut self, window: NamedWindowDefinition) -> Self {
+        self.named_windows.push(window);
+        self
+    }
+
+    /// Returns the named windows currently registered on the builder.
+    pub fn named_windows(&self) -> &[NamedWindowDefinition] {
+        &self.named_windows
     }
 
     pub fn add_static_graph(mut self, graph: GraphDefinition) -> Self {
@@ -616,6 +667,7 @@ impl CqelsQueryDefinitionBuilder {
             query_type: self.query_type.unwrap_or(CqelsQueryType::Select),
             prefixes: self.prefixes,
             streams: self.streams,
+            named_windows: self.named_windows,
             static_graphs: self.static_graphs,
             named_graphs: self.named_graphs,
             select_elements: self.select_elements,

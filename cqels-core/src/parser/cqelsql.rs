@@ -320,6 +320,9 @@ fn parse_from_clauses(
                     Rule::from_stream => {
                         builder = parse_from_stream(clause, builder)?;
                     }
+                    Rule::from_named_window => {
+                        builder = parse_from_named_window(clause, builder)?;
+                    }
                     Rule::from_static => {
                         builder = parse_from_static(clause, builder)?;
                     }
@@ -352,6 +355,51 @@ fn parse_from_stream(
     Ok(builder.add_stream(CqelsStreamDefinition {
         name,
         window: window_spec,
+    }))
+}
+
+/// Parses an RSP-QL `FROM NAMED WINDOW :W ON STREAM <name> [<spec>]`
+/// clause into a [`NamedWindowDefinition`] and registers it on the
+/// builder.
+fn parse_from_named_window(
+    pair: pest::iterators::Pair<Rule>,
+    builder: CqelsQueryDefinitionBuilder,
+) -> ParseResult<CqelsQueryDefinitionBuilder> {
+    let mut iri = None;
+    let mut stream = None;
+    let mut window_pair = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::iri_ref => {
+                iri = Some(
+                    inner
+                        .as_str()
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .to_string(),
+                );
+            }
+            Rule::identifier => {
+                stream = Some(inner.as_str().to_string());
+            }
+            Rule::window_spec => {
+                window_pair = Some(inner);
+            }
+            _ => {}
+        }
+    }
+
+    let iri = iri.ok_or_else(|| ParseError::Syntax("expected window IRI".into()))?;
+    let stream = stream.ok_or_else(|| ParseError::Syntax("expected stream name".into()))?;
+    let window_pair =
+        window_pair.ok_or_else(|| ParseError::Syntax("expected window spec".into()))?;
+    let window = parse_window_spec(window_pair)?;
+
+    Ok(builder.add_named_window(NamedWindowDefinition {
+        iri,
+        stream,
+        window,
     }))
 }
 
@@ -610,6 +658,26 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPa
                     }
                 }
                 return Ok(CqelsPatternGroup::Stream { source, patterns });
+            }
+            Rule::window_pattern_group => {
+                let mut it = inner.into_inner();
+                let window_iri = it
+                    .next()
+                    .ok_or_else(|| ParseError::Syntax("expected window IRI".into()))?
+                    .as_str()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_string();
+                let mut patterns = Vec::new();
+                for tp in it {
+                    if tp.as_rule() == Rule::triple_pattern {
+                        patterns.extend(parse_triple_patterns(tp)?);
+                    }
+                }
+                return Ok(CqelsPatternGroup::Window {
+                    window_iri,
+                    patterns,
+                });
             }
             Rule::static_pattern_group => {
                 let mut patterns = Vec::new();
@@ -1706,5 +1774,152 @@ mod tests {
         assert_eq!(result.streams[1].name, "events");
         assert!(result.has_order_by());
         assert_eq!(result.limit, Some(100));
+    }
+
+    // ─── RSP-QL named windows ──────────────────────────────────────────
+    //
+    // Parser-only support: AST shape, no execution wiring. The
+    // `JAVA_PARITY_PLAN.md` note about deferring named windows applied
+    // to execution; parsing was unblocked once we accepted that the
+    // compiler / engine continue to reject queries that use named
+    // windows at runtime.
+
+    #[test]
+    fn parses_from_named_window_declaration() {
+        let query = r#"
+            SELECT ?sensor ?temp
+            FROM NAMED WINDOW <http://ex.org/w1> ON STREAM sensors [RANGE 10s]
+            WHERE {
+                WINDOW <http://ex.org/w1> {
+                    ?sensor <http://ex.org/temp> ?temp .
+                }
+            }
+        "#;
+        let def = CqelsQlParser::parse(query).expect("parses");
+        // Declaration registered with the IRI stripped of brackets.
+        assert_eq!(def.named_windows.len(), 1);
+        assert_eq!(def.named_windows[0].iri, "http://ex.org/w1");
+        assert_eq!(def.named_windows[0].stream, "sensors");
+        // Bare `FROM STREAM` did NOT also fire — the named-window
+        // form should be matched ahead of the static `FROM NAMED`
+        // and ahead of `from_stream` here.
+        assert!(def.streams.is_empty(), "got: {:?}", def.streams);
+    }
+
+    #[test]
+    fn parses_window_pattern_group() {
+        let query = r#"
+            SELECT ?s
+            FROM NAMED WINDOW <http://ex.org/w> ON STREAM events [RANGE 5s]
+            WHERE {
+                WINDOW <http://ex.org/w> {
+                    ?s <http://ex.org/p> ?o .
+                }
+            }
+        "#;
+        let def = CqelsQlParser::parse(query).expect("parses");
+        let win_group = def
+            .pattern_groups
+            .iter()
+            .find(|g| matches!(g, CqelsPatternGroup::Window { .. }))
+            .expect("window pattern group present");
+        match win_group {
+            CqelsPatternGroup::Window {
+                window_iri,
+                patterns,
+            } => {
+                assert_eq!(window_iri, "http://ex.org/w");
+                assert_eq!(patterns.len(), 1);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn named_window_does_not_shadow_static_named_graph() {
+        // `FROM NAMED <iri>` (static named graph) and
+        // `FROM NAMED WINDOW <iri> ...` share a `FROM NAMED` prefix.
+        // The window form must match without consuming the bare form.
+        let query = r#"
+            SELECT ?s
+            FROM NAMED <http://ex.org/graph>
+            FROM NAMED WINDOW <http://ex.org/w> ON STREAM events [RANGE 5s]
+            WHERE {
+                WINDOW <http://ex.org/w> {
+                    ?s <http://ex.org/p> ?o .
+                }
+            }
+        "#;
+        let def = CqelsQlParser::parse(query).expect("parses");
+        assert_eq!(def.named_graphs.len(), 1, "static named graph kept");
+        assert_eq!(def.named_graphs[0].uri, "http://ex.org/graph");
+        assert_eq!(def.named_windows.len(), 1, "named window registered");
+        assert_eq!(def.named_windows[0].iri, "http://ex.org/w");
+    }
+
+    #[test]
+    fn multiple_named_windows_register_independently() {
+        let query = r#"
+            SELECT ?a ?b
+            FROM NAMED WINDOW <http://ex.org/w1> ON STREAM s1 [RANGE 10s]
+            FROM NAMED WINDOW <http://ex.org/w2> ON STREAM s2 [RANGE 30s STEP 5s]
+            WHERE {
+                WINDOW <http://ex.org/w1> { ?a <http://ex.org/p> ?b . }
+                WINDOW <http://ex.org/w2> { ?a <http://ex.org/q> ?b . }
+            }
+        "#;
+        let def = CqelsQlParser::parse(query).expect("parses");
+        assert_eq!(def.named_windows.len(), 2);
+        let iris: Vec<&str> = def.named_windows.iter().map(|w| w.iri.as_str()).collect();
+        assert!(iris.contains(&"http://ex.org/w1"));
+        assert!(iris.contains(&"http://ex.org/w2"));
+        let win_groups: Vec<_> = def
+            .pattern_groups
+            .iter()
+            .filter(|g| matches!(g, CqelsPatternGroup::Window { .. }))
+            .collect();
+        assert_eq!(win_groups.len(), 2);
+    }
+
+    #[test]
+    fn named_window_with_triples_spec_parses() {
+        let query = r#"
+            SELECT ?s
+            FROM NAMED WINDOW <http://ex.org/w> ON STREAM s1 [TRIPLES 50]
+            WHERE {
+                WINDOW <http://ex.org/w> { ?s <http://ex.org/p> ?o . }
+            }
+        "#;
+        let def = CqelsQlParser::parse(query).expect("parses");
+        assert_eq!(def.named_windows.len(), 1);
+        // Triple-bound windows decode through the same WindowSpec path
+        // as other spec variants; we only verify the AST captured one.
+        let win = &def.named_windows[0].window;
+        assert!(
+            format!("{win}").to_lowercase().contains("triple"),
+            "expected triples window, got: {win}"
+        );
+    }
+
+    #[test]
+    fn from_named_window_missing_spec_is_rejected() {
+        let query = r#"
+            SELECT ?s
+            FROM NAMED WINDOW <http://ex.org/w> ON STREAM events
+            WHERE { ?s ?p ?o . }
+        "#;
+        assert!(CqelsQlParser::parse(query).is_err());
+    }
+
+    #[test]
+    fn window_pattern_group_without_iri_is_rejected() {
+        let query = r#"
+            SELECT ?s
+            FROM NAMED WINDOW <http://ex.org/w> ON STREAM events [RANGE 5s]
+            WHERE {
+                WINDOW { ?s ?p ?o . }
+            }
+        "#;
+        assert!(CqelsQlParser::parse(query).is_err());
     }
 }

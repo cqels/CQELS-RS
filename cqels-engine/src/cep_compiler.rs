@@ -486,6 +486,7 @@ mod tests {
                 name: "events".to_string(),
                 window: WindowSpec::now(),
             }],
+            named_windows: vec![],
             static_graphs: vec![],
             named_graphs: vec![],
             select_elements: vec![SelectElement::Variable("?e1".to_string())],

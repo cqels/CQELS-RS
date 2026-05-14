@@ -223,6 +223,7 @@ mod tests {
                 name: "sensors".to_string(),
                 window: WindowSpec::now(),
             }],
+            named_windows: vec![],
             static_graphs: vec![],
             named_graphs: vec![],
             select_elements: vec![
