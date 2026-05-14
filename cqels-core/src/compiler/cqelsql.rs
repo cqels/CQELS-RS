@@ -91,9 +91,17 @@ impl CqelsQueryCompiler {
     /// resolving `STATIC { ... }` and `GRAPH <uri> { ... }` patterns.
     pub fn compile_with_store(
         query_string: &str,
-        definition: CqelsQueryDefinition,
+        mut definition: CqelsQueryDefinition,
         rdf_store: Option<Arc<dyn RdfStore>>,
     ) -> ParseResult<CompiledCqelsQuery> {
+        // Lower RSP-QL named windows into ordinary stream entries +
+        // `Stream {}` pattern groups before any other compilation
+        // stage runs. The rest of the pipeline (pipeline planning,
+        // self-join detection, pattern projection) only understands
+        // ordinary streams, so this is the one place named windows
+        // need to be acknowledged.
+        super::named_window::lower_named_windows(&mut definition)?;
+
         let evaluator = ExpressionEvaluator::with_prefixes(definition.prefixes.clone());
 
         // Parse FILTER expressions
@@ -394,5 +402,91 @@ mod tests {
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].source, "rides");
         assert!(hints[0].join_keys.contains(&"car".to_string()));
+    }
+
+    // ─── named windows: end-to-end compile + execute ──────────────────
+
+    /// A query that declares a named window and references it via
+    /// `WINDOW :W { ... }` compiles cleanly: the lowering pass
+    /// rewrites it into an ordinary stream + `STREAM {}` group, and
+    /// the rest of the compiler / planner sees nothing exotic.
+    #[test]
+    fn compiles_named_window_query_via_lowering() {
+        let query = r#"
+            SELECT ?sensor ?temp
+            FROM NAMED WINDOW <http://ex.org/w> ON STREAM sensors [RANGE 10s]
+            WHERE {
+                WINDOW <http://ex.org/w> {
+                    ?sensor <http://ex.org/temp> ?temp .
+                }
+            }
+        "#;
+        let def = crate::parser::CqelsQlParser::parse(query).expect("parse");
+        let compiled = CqelsQueryCompiler::compile(query, def).expect("compile");
+
+        // After lowering, the compiled definition should look like a
+        // plain `FROM STREAM sensors` query — no named windows left,
+        // and the `WINDOW {}` group is now a `Stream` group on
+        // `sensors`.
+        let def = compiled.definition();
+        assert!(def.named_windows.is_empty());
+        assert_eq!(def.streams.len(), 1);
+        assert_eq!(def.streams[0].name, "sensors");
+        let stream_sources: Vec<&str> = def
+            .pattern_groups
+            .iter()
+            .filter_map(|g| match g {
+                CqelsPatternGroup::Stream { source, .. } => Some(source.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stream_sources, vec!["sensors"]);
+    }
+
+    /// A compile-time `WINDOW :W { ... }` that references an
+    /// undeclared IRI surfaces a clean `Semantic` parse error.
+    #[test]
+    fn rejects_window_reference_to_undeclared_iri_at_compile_time() {
+        // Note: an undeclared `WINDOW {}` group with NO `FROM NAMED
+        // WINDOW` declarations triggers the parser's stream-inference
+        // heuristic which can rewrite it to `Stream`, so include a
+        // separate declared window IRI to keep the lowering pass on
+        // the error path.
+        let query = r#"
+            SELECT ?s
+            FROM NAMED WINDOW <http://ex.org/declared> ON STREAM events [RANGE 5s]
+            WHERE {
+                WINDOW <http://ex.org/undeclared> {
+                    ?s <http://ex.org/p> ?o .
+                }
+            }
+        "#;
+        let def = crate::parser::CqelsQlParser::parse(query).expect("parse");
+        let err = match CqelsQueryCompiler::compile(query, def) {
+            Err(e) => e,
+            Ok(_) => panic!("expected compile error for undeclared named window"),
+        };
+        assert!(err.to_string().contains("undeclared named window"));
+    }
+
+    /// Two named windows on the same source stream with different
+    /// specs are explicitly unsupported. The compiler must reject
+    /// rather than silently picking one.
+    #[test]
+    fn rejects_conflicting_named_window_specs_at_compile_time() {
+        let query = r#"
+            SELECT ?s
+            FROM NAMED WINDOW <http://ex.org/w1> ON STREAM sensors [RANGE 10s]
+            FROM NAMED WINDOW <http://ex.org/w2> ON STREAM sensors [RANGE 30s]
+            WHERE {
+                WINDOW <http://ex.org/w1> { ?s <http://ex.org/p> ?o . }
+            }
+        "#;
+        let def = crate::parser::CqelsQlParser::parse(query).expect("parse");
+        let err = match CqelsQueryCompiler::compile(query, def) {
+            Err(e) => e,
+            Ok(_) => panic!("expected compile error for conflicting window specs"),
+        };
+        assert!(err.to_string().contains("multiple distinct window specs"));
     }
 }

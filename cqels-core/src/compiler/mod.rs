@@ -10,6 +10,7 @@
 pub mod compiled;
 pub mod cqelsql;
 pub mod cypherql;
+pub mod named_window;
 pub mod pipeline;
 pub mod self_join;
 
