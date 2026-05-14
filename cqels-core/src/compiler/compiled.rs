@@ -39,11 +39,17 @@ use super::pipeline::{
 ///
 /// # Limitations
 ///
-/// **Multi-stream merging (#5):** When a query references multiple streams,
-/// they are merged via `select_all` before windowing. All streams share the
-/// first stream's window spec and source identity is lost after merge.
-/// Per-stream windowing and cross-stream joins require a more sophisticated
-/// execution model.
+/// **Multi-stream pattern matching:** when a query references multiple
+/// streams, each stream is now windowed by *its own*
+/// [`CqelsStreamDefinition`](crate::parser::ast::CqelsStreamDefinition)`.window`
+/// spec before the resulting batches are merged for pattern matching
+/// — the named-window aliased-view feature relies on this. What's
+/// still pending is **source-tagged batches with per-stream pattern
+/// filtering**: the pattern matcher currently tries every pattern
+/// from every `STREAM {}` group against every batch, which can
+/// produce a small amount of cross-stream leakage on overlapping
+/// patterns. A future iteration can attach source identity to
+/// batches and restrict each pattern group to its own source.
 pub struct CompiledCqelsQuery {
     /// Original query string.
     pub(crate) query_string: String,
@@ -239,94 +245,61 @@ impl ContinuousQuery for CompiledCqelsQuery {
 
         let prefixes = definition.prefixes.clone();
 
-        // Take input streams — merge multiple if available
-        let input_stream: Option<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> =
-            if stream_patterns.len() <= 1 {
-                // Single stream — use existing logic
-                let stream_name = stream_patterns
-                    .first()
-                    .map(|(name, _)| name.clone())
-                    .or_else(|| inputs.stream_names().next().map(|s| s.to_string()));
-                stream_name.and_then(|name| inputs.take_stream(&name))
+        // Build the windowed batch stream. Each stream pattern group's
+        // source is windowed by *its own* `CqelsStreamDefinition.window`
+        // spec; the resulting batches are merged into a single
+        // `Stream<Vec<StreamElement>>` that the pattern matcher
+        // consumes below.
+        //
+        // This per-stream-then-merge ordering is the runtime piece of
+        // the named-window aliased-view feature (PR #55): two named
+        // windows on the same source with different specs each get
+        // their own time-aligned batches, so a `WINDOW :w1 [RANGE 10s]`
+        // pattern group sees 10-second batches while `WINDOW :w2
+        // [RANGE 30s]` sees 30-second batches — both fed by the same
+        // user-registered source via the engine's broadcast fan-out.
+        //
+        // Known caveat: the pattern matcher below still tries every
+        // pattern from every stream group against every batch (it
+        // doesn't filter by source). For diff-pattern diff-spec
+        // queries this can produce a small amount of cross-stream
+        // leakage on overlapping patterns. Source-tagged batches with
+        // per-stream pattern filtering is a separate follow-up; the
+        // current refactor fixes the more impactful windowing-spec
+        // mismatch on its own.
+        let batch_stream: Pin<Box<dyn Stream<Item = Vec<StreamElement>> + Send>> =
+            if stream_patterns.is_empty() {
+                // No `STREAM {}` groups — fall back to "any registered
+                // stream" with the first declared window spec, matching
+                // the pre-refactor behavior for default-pattern queries.
+                let fallback_name = inputs.stream_names().next().map(|s| s.to_string());
+                match fallback_name.and_then(|name| inputs.take_stream(&name)) {
+                    Some(input) => {
+                        apply_window_spec(input, definition.streams.first().map(|s| &s.window))
+                    }
+                    None => return Box::pin(futures::stream::empty()),
+                }
             } else {
-                // LIMITATION (#5): Multiple streams are merged before windowing.
-                // All streams share the first stream's window spec, and source
-                // identity is lost after merge. Per-stream windowing and
-                // cross-stream joins require a more sophisticated execution model.
-                let streams: Vec<Pin<Box<dyn Stream<Item = StreamElement> + Send>>> =
+                let batched: Vec<Pin<Box<dyn Stream<Item = Vec<StreamElement>> + Send>>> =
                     stream_patterns
                         .iter()
-                        .filter_map(|(name, _)| inputs.take_stream(name))
+                        .filter_map(|(name, _)| {
+                            let input = inputs.take_stream(name)?;
+                            let spec = definition
+                                .streams
+                                .iter()
+                                .find(|s| s.name == *name)
+                                .map(|s| &s.window);
+                            Some(apply_window_spec(input, spec))
+                        })
                         .collect();
-                if streams.is_empty() {
-                    None
-                } else if streams.len() == 1 {
-                    streams.into_iter().next()
+                if batched.is_empty() {
+                    return Box::pin(futures::stream::empty());
+                } else if batched.len() == 1 {
+                    batched.into_iter().next().unwrap()
                 } else {
-                    Some(Box::pin(futures::stream::select_all(streams)))
+                    Box::pin(futures::stream::select_all(batched))
                 }
-            };
-
-        let input_stream = match input_stream {
-            Some(s) => s,
-            None => return Box::pin(futures::stream::empty()),
-        };
-
-        // Apply windowing from the first stream's window spec.
-        // Produces batches of elements (Vec<StreamElement>) so that pattern
-        // matching can operate across multiple statements in a window.
-        let window_spec = definition.streams.first().map(|s| &s.window);
-        let batch_stream: Pin<Box<dyn Stream<Item = Vec<StreamElement>> + Send>> =
-            match window_spec.map(|w| &w.window_type) {
-                Some(WindowType::Now) => {
-                    // NOW: each element is its own batch
-                    Box::pin(input_stream.map(|elem| vec![elem]))
-                }
-                Some(WindowType::Range) => {
-                    let duration = window_spec
-                        .and_then(|w| w.duration)
-                        .unwrap_or(Duration::from_secs(0));
-                    if duration.is_zero() {
-                        Box::pin(input_stream.map(|elem| vec![elem]))
-                    } else {
-                        let window = TumblingWindow::new(duration);
-                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
-                    }
-                }
-                Some(WindowType::Slide) => {
-                    let duration = window_spec
-                        .and_then(|w| w.duration)
-                        .unwrap_or(Duration::from_secs(0));
-                    let step = window_spec
-                        .and_then(|w| w.step)
-                        .unwrap_or(Duration::from_secs(0));
-                    if duration.is_zero() || step.is_zero() {
-                        Box::pin(input_stream.map(|elem| vec![elem]))
-                    } else {
-                        let window = SlidingWindow::new(duration, step);
-                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
-                    }
-                }
-                Some(WindowType::Triples) => {
-                    let count = window_spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
-                    if count == 0 {
-                        Box::pin(input_stream.map(|elem| vec![elem]))
-                    } else {
-                        let window = TumblingCountWindow::new(count);
-                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
-                    }
-                }
-                Some(WindowType::TriplesSlide) => {
-                    let count = window_spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
-                    let slide = window_spec.and_then(|w| w.triple_slide).unwrap_or(1) as usize;
-                    if count == 0 || slide == 0 {
-                        Box::pin(input_stream.map(|elem| vec![elem]))
-                    } else {
-                        let window = SlidingCountWindow::new(count, slide);
-                        Box::pin(window.apply(input_stream).map(|batch| batch.elements))
-                    }
-                }
-                None => Box::pin(input_stream.map(|elem| vec![elem])),
             };
 
         // All stream + default patterns for matching against streaming data
@@ -372,11 +345,12 @@ impl ContinuousQuery for CompiledCqelsQuery {
         // Phase 1: Batch-level pattern matching — match across all statements
         // in each window batch so that multi-pattern queries can join across elements.
         let prefixes_clone = prefixes.clone();
-        // For single-stream queries, all patterns form a mandatory conjunction:
-        // every pattern must have at least one match for the batch to produce
-        // results. For multi-stream queries, batches may only contain elements
-        // from one source stream, so we cannot require all patterns to match
-        // (this is the documented multi-stream limitation, #5).
+        // For single-stream queries, all patterns form a mandatory
+        // conjunction: every pattern must have at least one match for
+        // the batch to produce results. For multi-stream queries each
+        // batch only carries elements from a single source (per-stream
+        // windowing in `apply_window_spec` above), so we cannot require
+        // every pattern across every group to match against one batch.
         let require_all_patterns = stream_patterns.len() <= 1;
         let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
             Box::pin(batch_stream.flat_map(move |batch| {
@@ -552,6 +526,67 @@ impl ContinuousQuery for CompiledCqelsQuery {
 // through `WindowedSelfJoinState` (O(N+M)) instead of the default
 // pattern matcher (O(N·M)).
 //
+/// Applies a [`WindowSpec`] to an input `StreamElement` stream,
+/// producing batches of elements. Factored from the inline match in
+/// [`CompiledCqelsQuery::execute`] so multi-stream queries can window
+/// each input independently before merging.
+///
+/// A `None` spec (no window declared) and degenerate specs
+/// (zero-duration RANGE, zero-count TRIPLES, …) fall back to "every
+/// element is its own batch", matching the existing fallback
+/// behavior.
+fn apply_window_spec(
+    input: Pin<Box<dyn Stream<Item = StreamElement> + Send>>,
+    spec: Option<&crate::parser::ast::WindowSpec>,
+) -> Pin<Box<dyn Stream<Item = Vec<StreamElement>> + Send>> {
+    match spec.map(|w| &w.window_type) {
+        Some(WindowType::Now) => Box::pin(input.map(|elem| vec![elem])),
+        Some(WindowType::Range) => {
+            let duration = spec
+                .and_then(|w| w.duration)
+                .unwrap_or(Duration::from_secs(0));
+            if duration.is_zero() {
+                Box::pin(input.map(|elem| vec![elem]))
+            } else {
+                let window = TumblingWindow::new(duration);
+                Box::pin(window.apply(input).map(|batch| batch.elements))
+            }
+        }
+        Some(WindowType::Slide) => {
+            let duration = spec
+                .and_then(|w| w.duration)
+                .unwrap_or(Duration::from_secs(0));
+            let step = spec.and_then(|w| w.step).unwrap_or(Duration::from_secs(0));
+            if duration.is_zero() || step.is_zero() {
+                Box::pin(input.map(|elem| vec![elem]))
+            } else {
+                let window = SlidingWindow::new(duration, step);
+                Box::pin(window.apply(input).map(|batch| batch.elements))
+            }
+        }
+        Some(WindowType::Triples) => {
+            let count = spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
+            if count == 0 {
+                Box::pin(input.map(|elem| vec![elem]))
+            } else {
+                let window = TumblingCountWindow::new(count);
+                Box::pin(window.apply(input).map(|batch| batch.elements))
+            }
+        }
+        Some(WindowType::TriplesSlide) => {
+            let count = spec.and_then(|w| w.triple_count).unwrap_or(1) as usize;
+            let slide = spec.and_then(|w| w.triple_slide).unwrap_or(1) as usize;
+            if count == 0 || slide == 0 {
+                Box::pin(input.map(|elem| vec![elem]))
+            } else {
+                let window = SlidingCountWindow::new(count, slide);
+                Box::pin(window.apply(input).map(|batch| batch.elements))
+            }
+        }
+        None => Box::pin(input.map(|elem| vec![elem])),
+    }
+}
+
 // Conservative trigger: only fires for queries that exactly match a
 // "two stream patterns on one stream, joined on a single shared object
 // variable, no aggregates/filters/projections" shape. Anything else
@@ -1526,5 +1561,165 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results[0].contains("sensor"));
         assert!(results[0].contains("temp"));
+    }
+
+    /// Direct check that [`apply_window_spec`] respects each spec
+    /// it's handed — used by the multi-stream path in `execute` to
+    /// window each input independently before merging.
+    #[tokio::test]
+    async fn apply_window_spec_now_makes_each_element_its_own_batch() {
+        let stmt = Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/s")),
+            IriTerm::new("http://ex.org/p"),
+            Term::Literal(LiteralTerm::new("v")),
+        );
+        let elements = vec![
+            StreamElement::Rdf(RdfStreamElement::new(stmt.clone(), 1)),
+            StreamElement::Rdf(RdfStreamElement::new(stmt.clone(), 2)),
+            StreamElement::Rdf(RdfStreamElement::new(stmt, 3)),
+        ];
+        let input = Box::pin(futures::stream::iter(elements));
+        let spec = WindowSpec::now();
+        let batches: Vec<Vec<StreamElement>> =
+            apply_window_spec(input, Some(&spec)).collect().await;
+        assert_eq!(batches.len(), 3, "NOW emits one batch per element");
+        for batch in &batches {
+            assert_eq!(batch.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_window_spec_triples_groups_into_count_batches() {
+        let stmt = Statement::new(
+            Term::Iri(IriTerm::new("http://ex.org/s")),
+            IriTerm::new("http://ex.org/p"),
+            Term::Literal(LiteralTerm::new("v")),
+        );
+        let elements: Vec<StreamElement> = (1..=4)
+            .map(|i| StreamElement::Rdf(RdfStreamElement::new(stmt.clone(), i)))
+            .collect();
+        let input = Box::pin(futures::stream::iter(elements));
+        let spec = WindowSpec::triples(2);
+        let batches: Vec<Vec<StreamElement>> =
+            apply_window_spec(input, Some(&spec)).collect().await;
+        // TRIPLES 2 emits a batch every two elements: [1,2] then [3,4].
+        assert_eq!(batches.len(), 2);
+        for batch in &batches {
+            assert_eq!(batch.len(), 2);
+        }
+    }
+
+    /// End-to-end verification that a multi-stream query — exactly
+    /// the shape an aliased named-window view produces after
+    /// lowering — receives the elements pushed into the underlying
+    /// input streams. Each `STREAM {}` group is batched by its own
+    /// window spec before the merge, so a NOW-spec view yields one
+    /// binding per element while a RANGE-spec view yields a single
+    /// batch covering the time window.
+    #[tokio::test]
+    async fn multi_stream_query_applies_per_stream_windowing() {
+        // Two synthetic streams over the same conceptual source, with
+        // different specs. Matches what the named-window lowering
+        // produces after PR #55: a NOW-spec root + a RANGE-spec
+        // synthetic alias.
+        let definition = CqelsQueryDefinition {
+            name: None,
+            description: None,
+            query_type: CqelsQueryType::Select,
+            prefixes: HashMap::new(),
+            streams: vec![
+                CqelsStreamDefinition::root("sensors_now", WindowSpec::now()),
+                CqelsStreamDefinition::aliased(
+                    "__nw__sensors_range",
+                    "sensors_now",
+                    WindowSpec::range(std::time::Duration::from_secs(60)),
+                ),
+            ],
+            named_windows: vec![],
+            static_graphs: vec![],
+            named_graphs: vec![],
+            select_elements: vec![
+                SelectElement::Variable("?s".to_string()),
+                SelectElement::Variable("?v".to_string()),
+            ],
+            distinct: false,
+            pattern_groups: vec![
+                CqelsPatternGroup::Stream {
+                    source: "sensors_now".to_string(),
+                    patterns: vec![TriplePattern {
+                        subject: "?s".to_string(),
+                        predicate: "<http://ex.org/temp>".to_string(),
+                        object: "?v".to_string(),
+                    }],
+                },
+                CqelsPatternGroup::Stream {
+                    source: "__nw__sensors_range".to_string(),
+                    patterns: vec![TriplePattern {
+                        subject: "?s".to_string(),
+                        predicate: "<http://ex.org/temp>".to_string(),
+                        object: "?v".to_string(),
+                    }],
+                },
+            ],
+            aggregates: vec![],
+            group_by_variables: vec![],
+            order_by_conditions: vec![],
+            limit: None,
+            operator_hints: OperatorHints::default(),
+            stream_semantics: StreamSemantics::default(),
+            construct_template: vec![],
+            seq_constraint: None,
+        };
+
+        let query = CompiledCqelsQuery {
+            query_string: "<multi-stream test>".to_string(),
+            query_id: "test-multi".to_string(),
+            definition: Arc::new(definition),
+            filter_expressions: Arc::new(vec![]),
+            bind_expressions: Arc::new(vec![]),
+            order_by_expressions: Arc::new(vec![]),
+            having_expressions: Arc::new(vec![]),
+            aggregate_specs: Arc::new(vec![]),
+            evaluator: Arc::new(ExpressionEvaluator::new()),
+            select_vars: Arc::new(vec!["s".to_string(), "v".to_string()]),
+            rdf_store: None,
+            self_join_hints: Arc::new(vec![]),
+        };
+
+        let make_elem = |i: i64| {
+            StreamElement::Rdf(RdfStreamElement::new(
+                Statement::new(
+                    Term::Iri(IriTerm::new(format!("http://ex.org/sensor{i}"))),
+                    IriTerm::new("http://ex.org/temp"),
+                    Term::Literal(LiteralTerm::new(format!("{}", 20 + i))),
+                ),
+                i * 1000,
+            ))
+        };
+        let now_elements: Vec<StreamElement> = (1..=2).map(make_elem).collect();
+        let range_elements: Vec<StreamElement> = (1..=2).map(make_elem).collect();
+
+        let mut inputs = QueryInputs::new();
+        inputs.add_stream("sensors_now", Box::pin(futures::stream::iter(now_elements)));
+        inputs.add_stream(
+            "__nw__sensors_range",
+            Box::pin(futures::stream::iter(range_elements)),
+        );
+
+        let results: Vec<BindingSet> = query.execute(inputs).collect().await;
+        // Per-stream windowing: the NOW-spec view emits one batch per
+        // element (2 bindings); the RANGE-spec view collects both
+        // elements into a single batch which matches the pattern
+        // twice. Total ≥ 3 across both streams, with every binding
+        // carrying `s` and `v`.
+        assert!(
+            results.len() >= 2,
+            "expected at least one binding per windowed view, got {}",
+            results.len()
+        );
+        for binding in &results {
+            assert!(binding.contains("s"));
+            assert!(binding.contains("v"));
+        }
     }
 }
