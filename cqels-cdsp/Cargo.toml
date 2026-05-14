@@ -1,12 +1,20 @@
 [package]
 name = "cqels-cdsp"
-description = "COVESA Data Service Platform (VSS) signal ingestion adapter for CQELS"
+description = "COVESA Data Service Platform (VSS) signal ingestion adapter for CQELS (in-memory channel source ships by default; opt-in `kuksa` feature pulls in kuksa-rust-sdk for a live KUKSA.val Databroker subscription)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 keywords.workspace = true
+
+[features]
+default = []
+# Enables `KuksaVssSignalSource` backed by `kuksa-rust-sdk`'s gRPC
+# Databroker v2 client. Off by default because the SDK pulls in
+# tonic + prost + a build-time `protoc` invocation; enable when you
+# want to subscribe to a live KUKSA.val Databroker.
+kuksa = ["dep:kuksa-rust-sdk", "dep:http", "dep:prost-types"]
 
 [dependencies]
 cqels-core.workspace = true
@@ -17,6 +25,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
+
+# Optional — enabled by the `kuksa` feature.
+kuksa-rust-sdk = { version = "0.2", optional = true }
+http = { version = "1", optional = true }
+prost-types = { version = "0.14", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

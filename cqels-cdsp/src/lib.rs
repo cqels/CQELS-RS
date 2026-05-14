@@ -50,11 +50,15 @@
 //! ```
 
 pub mod error;
+#[cfg(feature = "kuksa")]
+pub mod kuksa_source;
 pub mod mapper;
 pub mod signal;
 pub mod source;
 
 pub use error::CdspError;
+#[cfg(feature = "kuksa")]
+pub use kuksa_source::{KuksaConnectConfig, KuksaVssSignalSource};
 pub use mapper::{PredicateStrategy, VssSignalMapper};
 pub use signal::{VssSignal, VssValue};
 pub use source::{ChannelVssSignalSource, VssSignalSource};
