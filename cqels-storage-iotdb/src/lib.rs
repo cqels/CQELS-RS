@@ -8,17 +8,13 @@
 //! onto two such time-series, using the offset / checkpoint-id as the
 //! IoTDB `time` field and the row payload as a binary measurement.
 //!
-//! ## Why a scaffold, not a baked-in Thrift client?
+//! ## Three executor options
 //!
-//! The IoTDB wire protocol is Thrift-based with a wide surface
+//! IoTDB's wire protocol is Thrift-based with a wide surface
 //! (`Session` open/close, storage-group creation, schemas, batched
-//! inserts, range deletes, query plans). The Rust ecosystem has
-//! several IoTDB client crates — `iotdb-client-rs`, `iotdb-client`,
-//! `tsfile-writer` — but they're heavyweight, sync-only, and pin
-//! a specific Thrift version. Hard-wiring one would make this crate
-//! brittle.
-//!
-//! Instead the crate is split:
+//! inserts, range deletes, query plans). To keep the dep graph
+//! light by default while still shipping a real client, the crate
+//! is split:
 //!
 //! - **[`IotDbExecutor`]** — a narrow async trait (`put`, `read_from`,
 //!   `latest`, `delete_range`, `close`) that captures *exactly* what
@@ -28,7 +24,11 @@
 //! - **[`InMemoryIotDbExecutor`]** — a fully-functional reference
 //!   implementation backed by per-device `BTreeMap<u64, Vec<u8>>`,
 //!   used as the default backend, in tests, and as a development
-//!   sandbox.
+//!   sandbox. **Always available — no feature flag needed.**
+//! - **`ThriftIotDbExecutor`** — opt-in real IoTDB session client
+//!   built on top of `iotdb-client-rs`. Enable with the `thrift`
+//!   Cargo feature. The module is gated on that feature; see its
+//!   inline docs for live-test gating via `IOTDB_HOST`.
 //! - **[`IotDbPersistentBackend`]** — implements
 //!   `cqels_storage_spi::PersistentBackend` on top of any
 //!   `Arc<dyn IotDbExecutor>`.
@@ -68,6 +68,8 @@
 
 pub mod executor;
 pub mod in_memory;
+#[cfg(feature = "thrift")]
+pub mod thrift_executor;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -81,6 +83,8 @@ use tokio::sync::Mutex;
 
 pub use executor::{IotDbError, IotDbExecutor};
 pub use in_memory::InMemoryIotDbExecutor;
+#[cfg(feature = "thrift")]
+pub use thrift_executor::{ThriftConnectConfig, ThriftIotDbExecutor};
 
 /// Default device path for the event journal.
 pub const DEFAULT_JOURNAL_DEVICE: &str = "root.cqels.journal";

@@ -1,12 +1,19 @@
 [package]
 name = "cqels-storage-iotdb"
-description = "Apache IoTDB-backed persistent storage adapter for CQELS (executor-based; ships an in-memory reference impl, wire your own Thrift client for live IoTDB)"
+description = "Apache IoTDB-backed persistent storage adapter for CQELS (executor-based; in-memory reference impl is the default, `thrift` feature pulls in iotdb-client-rs for a live IoTDB session)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 keywords.workspace = true
+
+[features]
+default = []
+# Enables `ThriftIotDbExecutor` backed by the official `iotdb-client-rs`
+# Thrift session client. Off by default to keep the dep graph light;
+# enable when you want to talk to a real IoTDB cluster.
+thrift = ["dep:iotdb-client-rs", "dep:base64", "tokio/rt-multi-thread"]
 
 [dependencies]
 cqels-storage-spi.workspace = true
@@ -16,6 +23,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
+
+# Optional — enabled by the `thrift` feature. Pinning a recent
+# minor lets us track patch-level fixes in the iotdb-lab crate.
+iotdb-client-rs = { version = "0.3", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
