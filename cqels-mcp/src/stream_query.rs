@@ -365,6 +365,28 @@ mod tests {
         (hub, runtime)
     }
 
+    /// Like [`fresh_hub`] but pre-creates a `sensors` stream so a
+    /// query that subscribes to `FROM STREAM sensors` stays alive past
+    /// the initial `execute()` poll. Avoids races between the
+    /// drain-task auto-cleanup and explicit `unregister` in tests
+    /// that don't actually feed data through the stream.
+    fn fresh_hub_with_sensors_stream() -> (StreamQueryHub, Arc<Runtime>) {
+        let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
+        let mut engine = runtime
+            .block_on(async { CqelsEngine::builder().build() })
+            .expect("engine builds");
+        // Create the `sensors` stream — we never push data into it,
+        // we just need it registered so the query's drain task has
+        // something to await rather than terminating on an empty
+        // input.
+        let _sender = runtime
+            .block_on(async { engine.create_stream("sensors").await })
+            .expect("create_stream");
+        let handle = runtime.handle().clone();
+        let hub = StreamQueryHub::new(Arc::new(engine), handle);
+        (hub, runtime)
+    }
+
     fn install_all(hub: &StreamQueryHub) -> ToolRegistry {
         let mut reg = ToolRegistry::new();
         reg.install(register_stream_query_tool(hub.clone()));
@@ -385,7 +407,7 @@ mod tests {
 
     #[test]
     fn register_then_list_includes_returned_id() {
-        let (hub, _rt) = fresh_hub();
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
         let reg = install_all(&hub);
         let res = reg
             .call(
@@ -414,7 +436,11 @@ mod tests {
 
     #[test]
     fn unregister_removes_query_from_list_and_clears_buffer() {
-        let (hub, _rt) = fresh_hub();
+        // Pre-register `sensors` so the query's drain task doesn't
+        // race to auto-cleanup before the explicit `unregister` call
+        // — the test exercises the unregister path, not stream
+        // lifecycle.
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
         let reg = install_all(&hub);
         let res = reg
             .call(
@@ -448,7 +474,7 @@ mod tests {
 
     #[test]
     fn poll_returns_empty_for_fresh_registration() {
-        let (hub, _rt) = fresh_hub();
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
         let reg = install_all(&hub);
         let res = reg
             .call(

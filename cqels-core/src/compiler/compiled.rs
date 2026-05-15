@@ -264,65 +264,63 @@ impl ContinuousQuery for CompiledCqelsQuery {
         // for the batch's source* to each batch, eliminating
         // cross-stream leakage on overlapping patterns.
         let batch_stream: SourceTaggedBatchStream = if stream_patterns.is_empty() {
-                // No `STREAM {}` groups — fall back to "any registered
-                // stream" with the first declared window spec, matching
-                // the pre-refactor behavior for default-pattern queries.
-                // The fallback stream's name is recorded as the batch
-                // source, but since `patterns_by_source` (built below)
-                // is empty, only `default_patterns` will apply to
-                // these batches.
-                let fallback_name = inputs.stream_names().next().map(|s| s.to_string());
-                match fallback_name {
-                    Some(name) => match inputs.take_stream(&name) {
-                        Some(input) => {
-                            let spec = definition.streams.first().map(|s| &s.window);
-                            let windowed = apply_window_spec(input, spec);
-                            Box::pin(windowed.map(move |batch| (name.clone(), batch)))
-                        }
-                        None => return Box::pin(futures::stream::empty()),
-                    },
-                    None => return Box::pin(futures::stream::empty()),
-                }
-            } else {
-                // Per-stream pattern group: window the input and tag
-                // each batch with the source's name. Two pattern
-                // groups can share a source (e.g. self-joins) — each
-                // group registers its own tag, but since `take_stream`
-                // can only return the input once, only one tagged
-                // stream is built per source; the matcher aggregates
-                // patterns across groups sharing a source.
-                let mut seen_sources: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                let batched: Vec<SourceTaggedBatchStream> = stream_patterns
-                    .iter()
-                    .filter_map(|(name, _)| {
-                        if !seen_sources.insert(name.clone()) {
-                            // Already wired this source's windowed
-                            // stream — no double-tap.
-                            return None;
-                        }
-                        let input = inputs.take_stream(name)?;
-                        let spec = definition
-                            .streams
-                            .iter()
-                            .find(|s| s.name == *name)
-                            .map(|s| &s.window);
+            // No `STREAM {}` groups — fall back to "any registered
+            // stream" with the first declared window spec, matching
+            // the pre-refactor behavior for default-pattern queries.
+            // The fallback stream's name is recorded as the batch
+            // source, but since `patterns_by_source` (built below)
+            // is empty, only `default_patterns` will apply to
+            // these batches.
+            let fallback_name = inputs.stream_names().next().map(|s| s.to_string());
+            match fallback_name {
+                Some(name) => match inputs.take_stream(&name) {
+                    Some(input) => {
+                        let spec = definition.streams.first().map(|s| &s.window);
                         let windowed = apply_window_spec(input, spec);
-                        let source = name.clone();
-                        Some(
-                            Box::pin(windowed.map(move |batch| (source.clone(), batch)))
-                                as SourceTaggedBatchStream,
-                        )
-                    })
-                    .collect();
-                if batched.is_empty() {
-                    return Box::pin(futures::stream::empty());
-                } else if batched.len() == 1 {
-                    batched.into_iter().next().unwrap()
-                } else {
-                    Box::pin(futures::stream::select_all(batched))
-                }
-            };
+                        Box::pin(windowed.map(move |batch| (name.clone(), batch)))
+                    }
+                    None => return Box::pin(futures::stream::empty()),
+                },
+                None => return Box::pin(futures::stream::empty()),
+            }
+        } else {
+            // Per-stream pattern group: window the input and tag
+            // each batch with the source's name. Two pattern
+            // groups can share a source (e.g. self-joins) — each
+            // group registers its own tag, but since `take_stream`
+            // can only return the input once, only one tagged
+            // stream is built per source; the matcher aggregates
+            // patterns across groups sharing a source.
+            let mut seen_sources: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let batched: Vec<SourceTaggedBatchStream> = stream_patterns
+                .iter()
+                .filter_map(|(name, _)| {
+                    if !seen_sources.insert(name.clone()) {
+                        // Already wired this source's windowed
+                        // stream — no double-tap.
+                        return None;
+                    }
+                    let input = inputs.take_stream(name)?;
+                    let spec = definition
+                        .streams
+                        .iter()
+                        .find(|s| s.name == *name)
+                        .map(|s| &s.window);
+                    let windowed = apply_window_spec(input, spec);
+                    let source = name.clone();
+                    Some(Box::pin(windowed.map(move |batch| (source.clone(), batch)))
+                        as SourceTaggedBatchStream)
+                })
+                .collect();
+            if batched.is_empty() {
+                return Box::pin(futures::stream::empty());
+            } else if batched.len() == 1 {
+                batched.into_iter().next().unwrap()
+            } else {
+                Box::pin(futures::stream::select_all(batched))
+            }
+        };
 
         // Group stream patterns by source. Two pattern groups on the
         // same source (e.g., a self-join shape) merge into one entry —
