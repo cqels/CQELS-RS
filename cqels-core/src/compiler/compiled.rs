@@ -37,19 +37,17 @@ use super::pipeline::{
 /// cheaply share references with async closures instead of deep-cloning
 /// expression trees and definitions on every call.
 ///
-/// # Limitations
+/// # Multi-stream queries
 ///
-/// **Multi-stream pattern matching:** when a query references multiple
-/// streams, each stream is now windowed by *its own*
+/// When a query references multiple streams (including via the named-
+/// window aliased-view lowering), each stream is windowed by *its own*
 /// [`CqelsStreamDefinition`](crate::parser::ast::CqelsStreamDefinition)`.window`
-/// spec before the resulting batches are merged for pattern matching
-/// — the named-window aliased-view feature relies on this. What's
-/// still pending is **source-tagged batches with per-stream pattern
-/// filtering**: the pattern matcher currently tries every pattern
-/// from every `STREAM {}` group against every batch, which can
-/// produce a small amount of cross-stream leakage on overlapping
-/// patterns. A future iteration can attach source identity to
-/// batches and restrict each pattern group to its own source.
+/// spec before the resulting batches are merged for pattern matching.
+/// Each batch is tagged with its source stream name and the pattern
+/// matcher restricts the patterns it tries to those declared for that
+/// source (plus any unscoped default patterns from the WHERE clause).
+/// Cross-stream pattern leakage is therefore eliminated: a pattern in
+/// `STREAM s1 { ... }` only fires against batches from `s1`.
 pub struct CompiledCqelsQuery {
     /// Original query string.
     pub(crate) query_string: String,
@@ -247,11 +245,13 @@ impl ContinuousQuery for CompiledCqelsQuery {
 
         // Build the windowed batch stream. Each stream pattern group's
         // source is windowed by *its own* `CqelsStreamDefinition.window`
-        // spec; the resulting batches are merged into a single
-        // `Stream<Vec<StreamElement>>` that the pattern matcher
-        // consumes below.
+        // spec, then **tagged with the source name** so the pattern
+        // matcher can restrict its work to patterns declared for that
+        // source. The resulting batches from every source merge via
+        // `select_all` into a single
+        // `Stream<(String, Vec<StreamElement>)>`.
         //
-        // This per-stream-then-merge ordering is the runtime piece of
+        // The per-stream-then-merge ordering is the runtime piece of
         // the named-window aliased-view feature (PR #55): two named
         // windows on the same source with different specs each get
         // their own time-aligned batches, so a `WINDOW :w1 [RANGE 10s]`
@@ -259,40 +259,62 @@ impl ContinuousQuery for CompiledCqelsQuery {
         // [RANGE 30s]` sees 30-second batches — both fed by the same
         // user-registered source via the engine's broadcast fan-out.
         //
-        // Known caveat: the pattern matcher below still tries every
-        // pattern from every stream group against every batch (it
-        // doesn't filter by source). For diff-pattern diff-spec
-        // queries this can produce a small amount of cross-stream
-        // leakage on overlapping patterns. Source-tagged batches with
-        // per-stream pattern filtering is a separate follow-up; the
-        // current refactor fixes the more impactful windowing-spec
-        // mismatch on its own.
-        let batch_stream: Pin<Box<dyn Stream<Item = Vec<StreamElement>> + Send>> =
-            if stream_patterns.is_empty() {
+        // The source-tagging step (this PR) closes the last gap from
+        // PR #56: the matcher now applies *only the patterns declared
+        // for the batch's source* to each batch, eliminating
+        // cross-stream leakage on overlapping patterns.
+        let batch_stream: SourceTaggedBatchStream = if stream_patterns.is_empty() {
                 // No `STREAM {}` groups — fall back to "any registered
                 // stream" with the first declared window spec, matching
                 // the pre-refactor behavior for default-pattern queries.
+                // The fallback stream's name is recorded as the batch
+                // source, but since `patterns_by_source` (built below)
+                // is empty, only `default_patterns` will apply to
+                // these batches.
                 let fallback_name = inputs.stream_names().next().map(|s| s.to_string());
-                match fallback_name.and_then(|name| inputs.take_stream(&name)) {
-                    Some(input) => {
-                        apply_window_spec(input, definition.streams.first().map(|s| &s.window))
-                    }
+                match fallback_name {
+                    Some(name) => match inputs.take_stream(&name) {
+                        Some(input) => {
+                            let spec = definition.streams.first().map(|s| &s.window);
+                            let windowed = apply_window_spec(input, spec);
+                            Box::pin(windowed.map(move |batch| (name.clone(), batch)))
+                        }
+                        None => return Box::pin(futures::stream::empty()),
+                    },
                     None => return Box::pin(futures::stream::empty()),
                 }
             } else {
-                let batched: Vec<Pin<Box<dyn Stream<Item = Vec<StreamElement>> + Send>>> =
-                    stream_patterns
-                        .iter()
-                        .filter_map(|(name, _)| {
-                            let input = inputs.take_stream(name)?;
-                            let spec = definition
-                                .streams
-                                .iter()
-                                .find(|s| s.name == *name)
-                                .map(|s| &s.window);
-                            Some(apply_window_spec(input, spec))
-                        })
-                        .collect();
+                // Per-stream pattern group: window the input and tag
+                // each batch with the source's name. Two pattern
+                // groups can share a source (e.g. self-joins) — each
+                // group registers its own tag, but since `take_stream`
+                // can only return the input once, only one tagged
+                // stream is built per source; the matcher aggregates
+                // patterns across groups sharing a source.
+                let mut seen_sources: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let batched: Vec<SourceTaggedBatchStream> = stream_patterns
+                    .iter()
+                    .filter_map(|(name, _)| {
+                        if !seen_sources.insert(name.clone()) {
+                            // Already wired this source's windowed
+                            // stream — no double-tap.
+                            return None;
+                        }
+                        let input = inputs.take_stream(name)?;
+                        let spec = definition
+                            .streams
+                            .iter()
+                            .find(|s| s.name == *name)
+                            .map(|s| &s.window);
+                        let windowed = apply_window_spec(input, spec);
+                        let source = name.clone();
+                        Some(
+                            Box::pin(windowed.map(move |batch| (source.clone(), batch)))
+                                as SourceTaggedBatchStream,
+                        )
+                    })
+                    .collect();
                 if batched.is_empty() {
                     return Box::pin(futures::stream::empty());
                 } else if batched.len() == 1 {
@@ -302,12 +324,24 @@ impl ContinuousQuery for CompiledCqelsQuery {
                 }
             };
 
-        // All stream + default patterns for matching against streaming data
-        let all_patterns: Vec<crate::parser::ast::TriplePattern> = stream_patterns
-            .iter()
-            .flat_map(|(_, patterns)| patterns.clone())
-            .chain(default_patterns)
-            .collect();
+        // Group stream patterns by source. Two pattern groups on the
+        // same source (e.g., a self-join shape) merge into one entry —
+        // matching against a batch from that source applies *all* of
+        // them as a conjunction.
+        let mut patterns_by_source: std::collections::HashMap<
+            String,
+            Vec<crate::parser::ast::TriplePattern>,
+        > = std::collections::HashMap::new();
+        for (source, patterns) in &stream_patterns {
+            patterns_by_source
+                .entry(source.clone())
+                .or_default()
+                .extend(patterns.iter().cloned());
+        }
+        // `default_patterns` is already in scope from the earlier
+        // collection. Unscoped triples in the WHERE clause apply to
+        // every batch regardless of its source — they're added to
+        // each source's pattern set inside the matcher below.
 
         // Pre-compute static bindings from RDF store (if available)
         let rdf_store = self.rdf_store.clone();
@@ -342,18 +376,18 @@ impl ContinuousQuery for CompiledCqelsQuery {
             vec![]
         };
 
-        // Phase 1: Batch-level pattern matching — match across all statements
-        // in each window batch so that multi-pattern queries can join across elements.
+        // Phase 1: Batch-level pattern matching.
+        //
+        // Each batch is tagged with its source stream name (see
+        // `batch_stream` construction above). The matcher applies
+        // only the patterns declared for that source — plus the
+        // default (unscoped) patterns from the WHERE clause — against
+        // the batch's elements. With source filtering in place, every
+        // selected pattern is mandatory: each must contribute at
+        // least one match for the batch to produce results.
         let prefixes_clone = prefixes.clone();
-        // For single-stream queries, all patterns form a mandatory
-        // conjunction: every pattern must have at least one match for
-        // the batch to produce results. For multi-stream queries each
-        // batch only carries elements from a single source (per-stream
-        // windowing in `apply_window_spec` above), so we cannot require
-        // every pattern across every group to match against one batch.
-        let require_all_patterns = stream_patterns.len() <= 1;
         let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
-            Box::pin(batch_stream.flat_map(move |batch| {
+            Box::pin(batch_stream.flat_map(move |(source, batch)| {
                 let mut stmts: Vec<(Statement, i64)> = Vec::new();
                 for elem in &batch {
                     let ts = elem.timestamp();
@@ -362,11 +396,21 @@ impl ContinuousQuery for CompiledCqelsQuery {
                     }
                 }
 
-                // For each pattern, collect bindings from all matching statements.
-                let total_patterns = all_patterns.len();
+                // Restrict patterns to this batch's source group plus
+                // any unscoped default patterns. Sources that have no
+                // declared patterns (e.g., the fallback case in the
+                // empty-stream-patterns path) yield only the default
+                // patterns; if those are empty too, no results.
+                let source_patterns = patterns_by_source.get(&source);
+                let active_pattern_count =
+                    source_patterns.map(|p| p.len()).unwrap_or(0) + default_patterns.len();
                 let mut pattern_results: Vec<Vec<BindingSet>> = Vec::new();
                 let mut matched_count = 0;
-                for pattern in &all_patterns {
+                let chained = source_patterns
+                    .into_iter()
+                    .flatten()
+                    .chain(default_patterns.iter());
+                for pattern in chained {
                     let matches: Vec<BindingSet> = stmts
                         .iter()
                         .filter_map(|(stmt, ts)| {
@@ -379,11 +423,10 @@ impl ContinuousQuery for CompiledCqelsQuery {
                     }
                 }
 
-                // When all patterns are from the same stream, enforce that
-                // every mandatory pattern contributes at least one match.
-                let results = if pattern_results.is_empty()
-                    || (require_all_patterns && matched_count < total_patterns)
-                {
+                // Every pattern selected for this batch is mandatory:
+                // if any of them fails to contribute, the batch
+                // produces no bindings.
+                let results = if active_pattern_count == 0 || matched_count < active_pattern_count {
                     vec![]
                 } else {
                     let mut accumulated = pattern_results.remove(0);
@@ -526,6 +569,17 @@ impl ContinuousQuery for CompiledCqelsQuery {
 // through `WindowedSelfJoinState` (O(N+M)) instead of the default
 // pattern matcher (O(N·M)).
 //
+/// A batch of stream elements paired with its source stream name.
+/// Pattern matching restricts the patterns it tries against this
+/// batch to those declared for the named source (plus any unscoped
+/// default patterns), eliminating cross-stream leakage in multi-
+/// stream queries.
+type SourceTaggedBatch = (String, Vec<StreamElement>);
+
+/// Boxed stream of source-tagged batches — the shape `execute`
+/// constructs after applying per-stream windowing.
+type SourceTaggedBatchStream = Pin<Box<dyn Stream<Item = SourceTaggedBatch> + Send>>;
+
 /// Applies a [`WindowSpec`] to an input `StreamElement` stream,
 /// producing batches of elements. Factored from the inline match in
 /// [`CompiledCqelsQuery::execute`] so multi-stream queries can window
@@ -1720,6 +1774,125 @@ mod tests {
         for binding in &results {
             assert!(binding.contains("s"));
             assert!(binding.contains("v"));
+        }
+    }
+
+    /// Source-tagged batching test: each pattern group is scoped to
+    /// its own stream's batches. Stream `s_temp` carries `?s :temp ?v`
+    /// triples and `s_pressure` carries `?s :pressure ?p` triples.
+    /// Without source filtering the older matcher would have tried
+    /// every pattern against every batch, producing spurious
+    /// bind-failures (because a pressure batch has no `:temp` match
+    /// and vice-versa) — in this query that manifests as the multi-
+    /// stream non-strict matcher emitting *some* bindings for each
+    /// pattern independently. With source-tagged filtering each
+    /// batch only sees its own group's patterns, and every selected
+    /// pattern is required.
+    #[tokio::test]
+    async fn source_tagged_batches_keep_pattern_matches_per_source() {
+        let definition = CqelsQueryDefinition {
+            name: None,
+            description: None,
+            query_type: CqelsQueryType::Select,
+            prefixes: HashMap::new(),
+            streams: vec![
+                CqelsStreamDefinition::root("s_temp", WindowSpec::now()),
+                CqelsStreamDefinition::root("s_pressure", WindowSpec::now()),
+            ],
+            named_windows: vec![],
+            static_graphs: vec![],
+            named_graphs: vec![],
+            select_elements: vec![
+                SelectElement::Variable("?s".to_string()),
+                SelectElement::Variable("?v".to_string()),
+                SelectElement::Variable("?p".to_string()),
+            ],
+            distinct: false,
+            pattern_groups: vec![
+                CqelsPatternGroup::Stream {
+                    source: "s_temp".to_string(),
+                    patterns: vec![TriplePattern {
+                        subject: "?s".to_string(),
+                        predicate: "<http://ex.org/temp>".to_string(),
+                        object: "?v".to_string(),
+                    }],
+                },
+                CqelsPatternGroup::Stream {
+                    source: "s_pressure".to_string(),
+                    patterns: vec![TriplePattern {
+                        subject: "?s".to_string(),
+                        predicate: "<http://ex.org/pressure>".to_string(),
+                        object: "?p".to_string(),
+                    }],
+                },
+            ],
+            aggregates: vec![],
+            group_by_variables: vec![],
+            order_by_conditions: vec![],
+            limit: None,
+            operator_hints: OperatorHints::default(),
+            stream_semantics: StreamSemantics::default(),
+            construct_template: vec![],
+            seq_constraint: None,
+        };
+
+        let query = CompiledCqelsQuery {
+            query_string: "<source-tagged test>".to_string(),
+            query_id: "test-source-tagged".to_string(),
+            definition: Arc::new(definition),
+            filter_expressions: Arc::new(vec![]),
+            bind_expressions: Arc::new(vec![]),
+            order_by_expressions: Arc::new(vec![]),
+            having_expressions: Arc::new(vec![]),
+            aggregate_specs: Arc::new(vec![]),
+            evaluator: Arc::new(ExpressionEvaluator::new()),
+            select_vars: Arc::new(vec!["s".to_string(), "v".to_string(), "p".to_string()]),
+            rdf_store: None,
+            self_join_hints: Arc::new(vec![]),
+        };
+
+        // s_temp carries one `:temp` reading. The matcher should bind
+        // `?v` to "21".
+        let temp_elem = StreamElement::Rdf(RdfStreamElement::new(
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/sensor1")),
+                IriTerm::new("http://ex.org/temp"),
+                Term::Literal(LiteralTerm::new("21")),
+            ),
+            1000,
+        ));
+        // s_pressure carries one `:pressure` reading. The matcher
+        // should bind `?p` to "1.5".
+        let pressure_elem = StreamElement::Rdf(RdfStreamElement::new(
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/sensor1")),
+                IriTerm::new("http://ex.org/pressure"),
+                Term::Literal(LiteralTerm::new("1.5")),
+            ),
+            2000,
+        ));
+
+        let mut inputs = QueryInputs::new();
+        inputs.add_stream("s_temp", Box::pin(futures::stream::iter(vec![temp_elem])));
+        inputs.add_stream(
+            "s_pressure",
+            Box::pin(futures::stream::iter(vec![pressure_elem])),
+        );
+
+        let results: Vec<BindingSet> = query.execute(inputs).collect().await;
+        assert!(!results.is_empty(), "expected per-source matches");
+
+        // Every binding from `s_temp`'s batch carries `?v`; from
+        // `s_pressure`'s batch carries `?p`. Source-tagged filtering
+        // prevents bindings that lack either expected variable.
+        for binding in &results {
+            let has_v = binding.contains("v");
+            let has_p = binding.contains("p");
+            assert!(
+                has_v ^ has_p,
+                "binding should bind exactly one of (?v, ?p) per source; got both/none: \
+                 contains(v)={has_v} contains(p)={has_p}"
+            );
         }
     }
 }
