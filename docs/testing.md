@@ -3,6 +3,10 @@
 CQELS-RS uses a layered regression strategy so contributors can get fast
 feedback locally while CI still catches broader cross-crate regressions.
 
+> For a point-in-time **parity verification** snapshot — per-crate
+> test counts, Java-feature → Rust-test mapping, CI-gate evidence —
+> see [`TEST_REPORT.md`](./TEST_REPORT.md).
+
 ## Supported entrypoints
 
 The repo-standard workflow is driven by `xtask`:
