@@ -1,0 +1,3 @@
+name = "simple-select-now"
+description = "Baseline SELECT over a NOW window: each event becomes one binding immediately. Exercises parse + compile + NOW windowing + single-pattern matching."
+ground_truth = "hand-spec"

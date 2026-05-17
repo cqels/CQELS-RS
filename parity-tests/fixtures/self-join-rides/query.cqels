@@ -1,0 +1,6 @@
+SELECT ?driver ?passenger
+FROM STREAM rides [RANGE 10s]
+WHERE {
+    STREAM rides { ?driver <http://ex.org/in> ?car . }
+    STREAM rides { ?passenger <http://ex.org/in> ?car . }
+}

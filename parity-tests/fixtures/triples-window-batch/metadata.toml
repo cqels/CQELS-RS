@@ -1,0 +1,3 @@
+name = "triples-window-batch"
+description = "SELECT over a TRIPLES count window. Each batch contains exactly `count` events; the single triple pattern matches every event in the batch, producing `count` bindings per emit. Exercises the count-window compilation + batch-level matching path that's distinct from NOW (per-element) and RANGE (time-keyed)."
+ground_truth = "hand-spec"

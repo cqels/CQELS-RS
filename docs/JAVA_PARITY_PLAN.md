@@ -111,6 +111,10 @@ Per the project's behavioral guidelines:
 
 - [x] `cqels-core/tests/proptest_joins.rs` — proptest property tests for `WindowedSelfJoinState` and `ParallelHashJoinOperator` over random event streams, comparing against O(N²)/O(N·M) nested-loop baselines. 3 properties × 50–100 cases each.
 
+### 3e Cross-language parity harness
+
+- [x] **`parity-tests/`** — a language-neutral workload corpus that lets `cqels-rs` and `cqels-java` run the same queries against the same inputs and check that their outputs agree. Each workload is a directory of `{metadata.toml, query.cqels, streams.jsonl, expected.jsonl}` files. A standalone Rust runner (`runner-rust/`, its own cargo `[workspace]` so `cargo test --workspace` at the repo root is unaffected) loads a workload, drives it through the engine, and diffs produced bindings against `expected.jsonl` (exit code 0 = match, 1 = mismatch with unified diff, 2 = engine error, 3 = load error). Three hand-spec workloads ship in the first iteration: `simple-select-now` (NOW windowing + single triple pattern), `self-join-rides` (Java PR #25 indexed self-join fast path with the optimized "one binding per new pairing" semantic), `triples-window-batch` (TRIPLES count window emit). Java-derived golden outputs and per-workload criterion benchmarks for side-by-side throughput / latency are the planned follow-up.
+
 ## Out of scope (intentional)
 
 - Porting Java's reflection-heavy `BinaryCodecRegistry` generic dispatch — the byte-based Rust SPI is fine for the backends we'll add.

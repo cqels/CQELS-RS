@@ -1,0 +1,3 @@
+{"stream": "rides", "ts": 1000, "s": "http://ex.org/alice", "p": "http://ex.org/in", "o": "http://ex.org/car-X"}
+{"stream": "rides", "ts": 1500, "s": "http://ex.org/bob",   "p": "http://ex.org/in", "o": "http://ex.org/car-X"}
+{"stream": "rides", "ts": 2000, "s": "http://ex.org/cathy", "p": "http://ex.org/in", "o": "http://ex.org/car-Y"}
