@@ -18,6 +18,9 @@ tokio.workspace = true
 futures.workspace = true
 criterion.workspace = true
 rand = "0.8"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
@@ -37,4 +40,8 @@ harness = false
 
 [[bench]]
 name = "parallel_operators"
+harness = false
+
+[[bench]]
+name = "parity_fixtures"
 harness = false
