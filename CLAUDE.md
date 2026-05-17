@@ -58,6 +58,7 @@ Config: `.github/workflows/ci.yml`
 - `cargo xtask test full` — all workspace tests
 - `cargo xtask coverage` — code coverage with cargo-llvm-cov
 - `cargo xtask bench-observe` — benchmark observation run
+- `cargo xtask parity` — Rust + Java parity sweep across all fixtures, prints a side-by-side pass/fail table (`--rust-only` / `--java-only` to limit; Java side skips cleanly if `mvn` or cqels/claude aren't installed locally)
 
 ### MSRV Notes
 - Benchmarks excluded from MSRV check (criterion deps have high MSRV)

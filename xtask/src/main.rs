@@ -36,6 +36,7 @@ fn main() -> Result<()> {
         "coverage" => run_coverage(),
         "bench-observe" => run_bench_observe(),
         "bench-save-baseline" => run_bench_save_baseline(),
+        "parity" => run_parity_sweep(args),
         other => bail!("unknown xtask command: {other}"),
     }
 }
@@ -48,7 +49,8 @@ fn print_usage() {
   cargo xtask test full
   cargo xtask coverage
   cargo xtask bench-observe
-  cargo xtask bench-save-baseline"
+  cargo xtask bench-save-baseline
+  cargo xtask parity [--rust-only|--java-only]"
     );
 }
 
@@ -681,4 +683,362 @@ fn capture_command(program: &str, args: &[&str], envs: &[(&str, &str)]) -> Resul
     }
 
     String::from_utf8(output.stdout).map_err(|err| anyhow!(err))
+}
+
+// ─── parity sweep ────────────────────────────────────────────────────
+//
+// Runs every fixture under `parity-tests/fixtures/` through the Rust
+// runner and the Java runner, then prints a side-by-side pass/fail
+// table. Designed as the single command an operator runs to answer
+// "where do we stand on parity?" without having to remember Maven
+// invocations or the runner-jar paths.
+//
+// Per-runner output is captured into `target/xtask/parity/` so a
+// failing row can be drilled into without re-running.
+//
+// Skips:
+// - Rust runner is unavailable: bails. (cargo is always present.)
+// - Java runner is unavailable (mvn missing, or cqels/claude not in
+//   the local Maven repo): the Java column is reported as `skip` and
+//   the command still exits 0 if the Rust side passes. This matches
+//   the CI job's behavior — keeps the command useful for contributors
+//   who don't have access to cqels/claude.
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunStatus {
+    Ok,
+    Mismatch,
+    EngineError,
+    LoadError,
+    Skipped,
+}
+
+impl RunStatus {
+    fn from_exit_code(code: i32) -> Self {
+        match code {
+            0 => RunStatus::Ok,
+            1 => RunStatus::Mismatch,
+            2 => RunStatus::EngineError,
+            3 => RunStatus::LoadError,
+            _ => RunStatus::EngineError,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            RunStatus::Ok => "ok",
+            RunStatus::Mismatch => "FAIL",
+            RunStatus::EngineError => "ERR",
+            RunStatus::LoadError => "LOAD",
+            RunStatus::Skipped => "skip",
+        }
+    }
+
+    fn is_ok(self) -> bool {
+        matches!(self, RunStatus::Ok)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Side {
+    Rust,
+    Java,
+    Both,
+}
+
+fn run_parity_sweep(mut args: VecDeque<String>) -> Result<()> {
+    let mut side = Side::Both;
+    while let Some(arg) = args.pop_front() {
+        match arg.as_str() {
+            "--rust-only" => side = Side::Rust,
+            "--java-only" => side = Side::Java,
+            other => bail!("unknown flag for `cargo xtask parity`: {other}"),
+        }
+    }
+
+    let fixtures = discover_fixtures()?;
+    if fixtures.is_empty() {
+        bail!("no fixture directories under parity-tests/fixtures/");
+    }
+
+    let log_root = PathBuf::from("target/xtask/parity");
+    fs::create_dir_all(&log_root).context("creating target/xtask/parity")?;
+
+    let rust_log = log_root.join("parity-rust.log");
+    let java_log = log_root.join("parity-java.log");
+
+    let rust_results = if side != Side::Java {
+        run_rust_side(&fixtures, &rust_log)?
+    } else {
+        skipped_results(&fixtures)
+    };
+
+    let java_results = if side != Side::Rust {
+        run_java_side(&fixtures, &java_log)?
+    } else {
+        skipped_results(&fixtures)
+    };
+
+    print_parity_summary(
+        &fixtures,
+        &rust_results,
+        &java_results,
+        &rust_log,
+        &java_log,
+    );
+
+    // Exit nonzero only if a side that was *asked to run* regressed.
+    // Skipped sides (Java unavailable) don't fail the command — they
+    // just narrow what the summary can say.
+    let rust_regressed = side != Side::Java
+        && rust_results
+            .iter()
+            .any(|(_, s)| !s.is_ok() && *s != RunStatus::Skipped);
+    if rust_regressed {
+        bail!("Rust runner reported failures — see {}", rust_log.display());
+    }
+
+    Ok(())
+}
+
+fn discover_fixtures() -> Result<Vec<String>> {
+    let root = PathBuf::from("parity-tests/fixtures");
+    let entries = fs::read_dir(&root).with_context(|| format!("reading {}", root.display()))?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn skipped_results(fixtures: &[String]) -> Vec<(String, RunStatus)> {
+    fixtures
+        .iter()
+        .map(|f| (f.clone(), RunStatus::Skipped))
+        .collect()
+}
+
+fn run_rust_side(
+    fixtures: &[String],
+    log_path: &std::path::Path,
+) -> Result<Vec<(String, RunStatus)>> {
+    println!("── Rust runner (cqels-rs) ──");
+    // Build once in release so per-fixture runs are fast.
+    println!("  building runner-rust (release) ...");
+    let build_status = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--manifest-path",
+            "parity-tests/runner-rust/Cargo.toml",
+        ])
+        .status()
+        .context("invoking cargo build for runner-rust")?;
+    if !build_status.success() {
+        bail!("runner-rust build failed");
+    }
+
+    let runner = PathBuf::from("parity-tests/runner-rust/target/release/cqels-parity-runner");
+    if !runner.exists() {
+        bail!("expected runner binary at {} after build", runner.display());
+    }
+
+    let mut log =
+        fs::File::create(log_path).with_context(|| format!("creating {}", log_path.display()))?;
+    let mut results = Vec::with_capacity(fixtures.len());
+    for fixture in fixtures {
+        let fixture_path = format!("parity-tests/fixtures/{fixture}");
+        let status = run_one_fixture(&runner, &fixture_path, &mut log, fixture)?;
+        println!("  {:<32}  {}", fixture, status.label());
+        results.push((fixture.clone(), status));
+    }
+    Ok(results)
+}
+
+fn run_java_side(
+    fixtures: &[String],
+    log_path: &std::path::Path,
+) -> Result<Vec<(String, RunStatus)>> {
+    println!("── Java runner (cqels-java / cqels/claude) ──");
+
+    if !command_exists("mvn") {
+        println!("  mvn not found on PATH — Java column skipped.");
+        return Ok(skipped_results(fixtures));
+    }
+
+    println!("  building runner-java (mvn package) ...");
+    let build_status = Command::new("mvn")
+        .args(["-q", "-B", "-DskipTests", "package"])
+        .current_dir("parity-tests/runner-java")
+        .status()
+        .context("invoking mvn package for runner-java")?;
+    if !build_status.success() {
+        println!(
+            "  mvn package failed (cqels/claude likely not installed locally) — Java column skipped."
+        );
+        return Ok(skipped_results(fixtures));
+    }
+
+    let jar = find_runner_jar()?;
+    let mut log =
+        fs::File::create(log_path).with_context(|| format!("creating {}", log_path.display()))?;
+    let mut results = Vec::with_capacity(fixtures.len());
+    for fixture in fixtures {
+        let fixture_path = format!("../fixtures/{fixture}");
+        let status = run_one_fixture_java(&jar, &fixture_path, &mut log, fixture)?;
+        println!("  {:<32}  {}", fixture, status.label());
+        results.push((fixture.clone(), status));
+    }
+    Ok(results)
+}
+
+fn find_runner_jar() -> Result<PathBuf> {
+    let dir = PathBuf::from("parity-tests/runner-java/target");
+    for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("cqels-parity-runner-java-")
+            && name_str.ends_with("-jar-with-dependencies.jar")
+        {
+            // Return an absolute path so callers that change cwd to
+            // `parity-tests/runner-java/` (to keep the fixture path
+            // `../fixtures/<name>` working) can still find the jar.
+            return entry
+                .path()
+                .canonicalize()
+                .with_context(|| format!("canonicalizing {}", entry.path().display()));
+        }
+    }
+    bail!(
+        "could not find runner-java jar-with-dependencies in {}",
+        dir.display()
+    );
+}
+
+fn run_one_fixture(
+    runner: &std::path::Path,
+    fixture_path: &str,
+    log: &mut fs::File,
+    fixture: &str,
+) -> Result<RunStatus> {
+    use std::io::Write;
+    let output = Command::new(runner)
+        .arg(fixture_path)
+        .output()
+        .with_context(|| format!("running rust runner against {fixture}"))?;
+    writeln!(log, "── {fixture} ──").ok();
+    log.write_all(&output.stdout).ok();
+    log.write_all(&output.stderr).ok();
+    Ok(RunStatus::from_exit_code(
+        output.status.code().unwrap_or(-1),
+    ))
+}
+
+fn run_one_fixture_java(
+    jar: &std::path::Path,
+    fixture_path: &str,
+    log: &mut fs::File,
+    fixture: &str,
+) -> Result<RunStatus> {
+    use std::io::Write;
+    // Java runner expects fixture path relative to its CWD. We invoke
+    // it from `parity-tests/runner-java/` so the same relative form
+    // (`../fixtures/<name>`) works as in the README.
+    let output = Command::new("java")
+        .args(["-jar", jar.to_str().unwrap()])
+        .arg(fixture_path)
+        .current_dir("parity-tests/runner-java")
+        .output()
+        .with_context(|| format!("running java runner against {fixture}"))?;
+    writeln!(log, "── {fixture} ──").ok();
+    log.write_all(&output.stdout).ok();
+    log.write_all(&output.stderr).ok();
+    Ok(RunStatus::from_exit_code(
+        output.status.code().unwrap_or(-1),
+    ))
+}
+
+fn command_exists(cmd: &str) -> bool {
+    Command::new(cmd)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn print_parity_summary(
+    fixtures: &[String],
+    rust: &[(String, RunStatus)],
+    java: &[(String, RunStatus)],
+    rust_log: &std::path::Path,
+    java_log: &std::path::Path,
+) {
+    println!();
+    println!("Parity sweep — cqels-rs vs cqels-java");
+    println!();
+    let width = fixtures.iter().map(|f| f.len()).max().unwrap_or(20).max(20);
+    println!("  {:<width$} | Rust | Java", "Fixture", width = width);
+    println!("  {:-<width$} | ---- | ----", "", width = width);
+    let mut rust_pass = 0;
+    let mut java_pass = 0;
+    let mut java_skipped = 0;
+    for fixture in fixtures {
+        let r = rust.iter().find(|(f, _)| f == fixture).map(|(_, s)| *s);
+        let j = java.iter().find(|(f, _)| f == fixture).map(|(_, s)| *s);
+        if matches!(r, Some(RunStatus::Ok)) {
+            rust_pass += 1;
+        }
+        match j {
+            Some(RunStatus::Ok) => java_pass += 1,
+            Some(RunStatus::Skipped) => java_skipped += 1,
+            _ => {}
+        }
+        println!(
+            "  {:<width$} | {:<4} | {:<4}",
+            fixture,
+            r.map(|s| s.label()).unwrap_or("?"),
+            j.map(|s| s.label()).unwrap_or("?"),
+            width = width
+        );
+    }
+    println!("  {:-<width$} | ---- | ----", "", width = width);
+    let total = fixtures.len();
+    let rust_skipped = rust
+        .iter()
+        .filter(|(_, s)| *s == RunStatus::Skipped)
+        .count();
+    let rust_summary = if rust_skipped == total {
+        "skip".to_string()
+    } else {
+        format!("{rust_pass}/{total}")
+    };
+    let java_summary = if java_skipped == total {
+        "skip".to_string()
+    } else {
+        format!("{java_pass}/{total}")
+    };
+    println!(
+        "  {:<width$} | {:<4} | {:<4}",
+        "TOTAL",
+        rust_summary,
+        java_summary,
+        width = width
+    );
+    println!();
+    println!("  Logs:");
+    println!("    Rust:  {}", rust_log.display());
+    println!("    Java:  {}", java_log.display());
+    println!();
+    println!(
+        "  Status legend: ok=match, FAIL=binding mismatch, ERR=engine error, LOAD=fixture parse error, skip=runner unavailable"
+    );
 }

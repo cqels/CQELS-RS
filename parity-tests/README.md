@@ -95,6 +95,36 @@ If `_ts` is omitted in an expected line, the timestamp on the
 produced binding is **not** checked — only the variable bindings
 need to match.
 
+## One command for the whole sweep
+
+```bash
+cargo xtask parity              # both runners, side-by-side pass/fail table
+cargo xtask parity --rust-only  # only the Rust runner
+cargo xtask parity --java-only  # only the Java runner
+```
+
+`cargo xtask parity` discovers every fixture under `fixtures/`, builds
+both runners (release mode for Rust, `mvn package` for Java), runs
+each fixture through both, and prints a compact table at the end:
+
+```
+Parity sweep — cqels-rs vs cqels-java
+
+  Fixture                    | Rust | Java
+  -------------------------- | ---- | ----
+  cep-sequence-two-events    | ok   | FAIL
+  range-window-low-volume    | ok   | ok
+  ...
+  -------------------------- | ---- | ----
+  TOTAL                      | 7/7  | 4/7
+```
+
+Per-runner output is captured into `target/xtask/parity/parity-rust.log`
+and `target/xtask/parity/parity-java.log` for drilling into failures.
+The Java column reports `skip` if `mvn` or cqels/claude aren't
+installed locally — useful for forks that don't have access to the
+private cqels/claude repo.
+
 ## Running the Rust runner
 
 ```bash
