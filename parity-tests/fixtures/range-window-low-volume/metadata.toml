@@ -1,0 +1,12 @@
+name = "range-window-low-volume"
+description = """
+RANGE window with five events arriving inside the window's duration.
+This workload was deferred from the initial parity harness (PR #59)
+because `TumblingWindow` previously buffered up to 1024 elements via
+`futures::StreamExt::chunks(1024)` before emitting any batch — so
+low-volume RANGE queries silently produced no output. The
+watermark-driven `TumblingTimeWindowStream` now flushes the final
+open window when the input ends, restoring correct behavior. Five
+events × one pattern = five bindings in a single batch.
+"""
+ground_truth = "hand-spec"

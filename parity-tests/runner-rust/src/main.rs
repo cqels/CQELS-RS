@@ -274,6 +274,22 @@ async fn run_workload(workload: &Workload) -> Result<Vec<(BTreeMap<String, Strin
         ds.push(elem).await.map_err(|e| format!("push: {e}"))?;
     }
 
+    // Close every input. The engine holds its own clone of each
+    // stream's mpsc sender, so just dropping the runner's
+    // `DataStream` handles isn't enough — `close_stream` removes
+    // the engine's internal clone too and aborts the forwarding
+    // task. With every sender dropped, the broadcast subscribers
+    // see end-of-stream, which lets event-driven operators (notably
+    // `TumblingTimeWindowStream`) flush their final open batch.
+    let stream_names: Vec<String> = data_streams.iter().map(|(n, _)| n.clone()).collect();
+    data_streams.clear();
+    for name in &stream_names {
+        engine
+            .close_stream(name)
+            .await
+            .map_err(|e| format!("close_stream({name}): {e}"))?;
+    }
+
     // Drain. Bindings flow through tokio tasks, so wait a bounded
     // amount of time for the last one to land. The metadata can
     // override the default (1s) for slow tumbling-window workloads.

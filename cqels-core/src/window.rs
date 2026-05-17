@@ -212,29 +212,114 @@ impl<T: Timestamped + Clone + Send + 'static> Window<T> for TumblingWindow {
         &self,
         stream: Pin<Box<dyn Stream<Item = T> + Send>>,
     ) -> Pin<Box<dyn Stream<Item = WindowedBatch<T>> + Send>> {
-        use futures::StreamExt;
+        // Watermark-driven emission: maintain the currently-open
+        // window's bucket key, push elements into it as they arrive,
+        // and flush the batch as soon as an event with a *later*
+        // window key crosses the boundary. On stream end, drain the
+        // final open window. This means low-volume streams emit
+        // promptly (the previous `chunks(1024)` implementation
+        // buffered up to 1024 elements before any window could be
+        // observed — a problem for low-rate sources like sensor data).
+        //
+        // Out-of-order events (ts older than the current window) are
+        // grouped with the current open window rather than dropped.
+        // CQELS-rs streams are documented as in-order; this is the
+        // conservative interpretation.
         let size_ms = self.size.as_millis() as i64;
-
-        // Collect elements and group them by window
-        let stream = stream.chunks(1024).flat_map(move |chunk| {
-            let mut windows: std::collections::BTreeMap<i64, Vec<T>> =
-                std::collections::BTreeMap::new();
-            for elem in chunk {
-                let ts = elem.timestamp();
-                let window_key = ts / size_ms;
-                windows.entry(window_key).or_default().push(elem);
-            }
-            futures::stream::iter(windows.into_iter().map(move |(key, elements)| {
-                let window_start = key * size_ms;
-                let window_end = window_start + size_ms;
-                WindowedBatch::new(elements, window_start, window_end, WindowType::TumblingTime)
-            }))
-        });
-        Box::pin(stream)
+        Box::pin(TumblingTimeWindowStream::new(stream, size_ms))
     }
 
     fn window_type(&self) -> WindowType {
         WindowType::TumblingTime
+    }
+}
+
+/// Event-driven tumbling time window stream — flushes the open
+/// window when a later-bucketed event arrives or the input ends.
+struct TumblingTimeWindowStream<T: Timestamped + Clone> {
+    inner: Pin<Box<dyn Stream<Item = T> + Send>>,
+    size_ms: i64,
+    /// (window_key, elements). `None` until the first element lands.
+    open_batch: Option<(i64, Vec<T>)>,
+    pending: std::collections::VecDeque<WindowedBatch<T>>,
+    inner_done: bool,
+}
+
+impl<T: Timestamped + Clone> TumblingTimeWindowStream<T> {
+    fn new(inner: Pin<Box<dyn Stream<Item = T> + Send>>, size_ms: i64) -> Self {
+        Self {
+            inner,
+            size_ms,
+            open_batch: None,
+            pending: std::collections::VecDeque::new(),
+            inner_done: false,
+        }
+    }
+
+    fn batch_from(&self, key: i64, elements: Vec<T>) -> WindowedBatch<T> {
+        let window_start = key * self.size_ms;
+        let window_end = window_start + self.size_ms;
+        WindowedBatch::new(elements, window_start, window_end, WindowType::TumblingTime)
+    }
+}
+
+// All fields are Unpin (Pin<Box<dyn _ + Send>>, primitives, Option,
+// VecDeque, bool), so the struct itself is Unpin — no projection
+// pin-tooling required.
+impl<T: Timestamped + Clone + Send> Unpin for TumblingTimeWindowStream<T> {}
+
+impl<T: Timestamped + Clone + Send + 'static> Stream for TumblingTimeWindowStream<T> {
+    type Item = WindowedBatch<T>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        loop {
+            // Drain ready batches first so callers see them before
+            // we touch the inner stream again.
+            if let Some(batch) = this.pending.pop_front() {
+                return Poll::Ready(Some(batch));
+            }
+            if this.inner_done {
+                if let Some((key, elements)) = this.open_batch.take() {
+                    return Poll::Ready(Some(this.batch_from(key, elements)));
+                }
+                return Poll::Ready(None);
+            }
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(elem)) => {
+                    let ts = elem.timestamp();
+                    let key = ts.div_euclid(this.size_ms);
+                    match this.open_batch.as_mut() {
+                        None => {
+                            this.open_batch = Some((key, vec![elem]));
+                        }
+                        Some((current_key, elements)) => {
+                            if key == *current_key {
+                                elements.push(elem);
+                            } else if key > *current_key {
+                                let prev_key = *current_key;
+                                let prev_elements = std::mem::take(elements);
+                                let batch = this.batch_from(prev_key, prev_elements);
+                                this.pending.push_back(batch);
+                                this.open_batch = Some((key, vec![elem]));
+                            } else {
+                                // Late event: keep with the current
+                                // open batch rather than drop.
+                                elements.push(elem);
+                            }
+                        }
+                    }
+                }
+                Poll::Ready(None) => {
+                    this.inner_done = true;
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
     }
 }
 
@@ -716,6 +801,47 @@ mod tests {
         assert_eq!(batches[1].elements.len(), 3);
         assert_eq!(batches[1].window_start, 3000);
         assert_eq!(batches[2].elements.len(), 1);
+    }
+
+    /// Low-volume regression: a handful of events should still emit
+    /// promptly. The previous `chunks(1024)`-based implementation
+    /// buffered up to 1024 elements before producing any batch,
+    /// which silently broke any RANGE-windowed CqelsQL query whose
+    /// source emitted fewer than 1024 events before the engine
+    /// stopped. With the watermark-driven impl, a single completed
+    /// stream of three elements yields a batch as soon as either a
+    /// later-window event arrives (a "watermark") or the input ends.
+    #[tokio::test]
+    async fn tumbling_window_emits_for_low_volume_stream_at_end() {
+        let elements = make_elements(&[1000, 1500, 2000]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = TumblingWindow::new(Duration::from_secs(10));
+        let batches: Vec<_> = window.apply(stream).collect().await;
+        assert_eq!(batches.len(), 1, "single window flushed on stream end");
+        assert_eq!(batches[0].elements.len(), 3);
+        assert_eq!(batches[0].window_start, 0);
+        assert_eq!(batches[0].window_end, 10_000);
+    }
+
+    #[tokio::test]
+    async fn tumbling_window_flushes_open_batch_when_watermark_advances() {
+        // Three events in window [0, 1000), then one event in [1000, 2000).
+        // The fourth event should flush the first batch immediately —
+        // we observe that by reading the first batch off the stream
+        // and asserting its content before the iterator finishes.
+        let elements = make_elements(&[100, 200, 300, 1500]);
+        let stream = Box::pin(futures::stream::iter(elements));
+        let window = TumblingWindow::new(Duration::from_secs(1));
+        let mut stream = window.apply(stream);
+        let first = stream.next().await.expect("first batch");
+        assert_eq!(first.window_start, 0);
+        assert_eq!(first.window_end, 1000);
+        assert_eq!(first.elements.len(), 3);
+        let second = stream.next().await.expect("second batch");
+        assert_eq!(second.window_start, 1000);
+        assert_eq!(second.window_end, 2000);
+        assert_eq!(second.elements.len(), 1);
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]

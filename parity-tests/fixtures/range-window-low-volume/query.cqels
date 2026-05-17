@@ -1,0 +1,5 @@
+SELECT ?sensor ?temp
+FROM STREAM sensors [RANGE 10s]
+WHERE {
+    STREAM sensors { ?sensor <http://ex.org/temp> ?temp . }
+}

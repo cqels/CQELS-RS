@@ -86,6 +86,40 @@ impl CqelsEngine {
         self.stream_senders.get(name)
     }
 
+    /// Closes a previously-created data stream by dropping the
+    /// engine's internal sender clone, then awaits the forwarding
+    /// task so any buffered events on the mpsc finish flowing
+    /// through to subscribers. The caller is expected to have
+    /// dropped their own `DataStream` handles first; with every
+    /// `Sender` dropped, the mpsc closes naturally, the forwarding
+    /// task's loop exits, and its broadcast `Sender` clone drops —
+    /// at which point all subscribers see end-of-stream and any
+    /// event-driven operators (in particular
+    /// `TumblingTimeWindowStream`) flush their final open batch.
+    ///
+    /// This is the "soft close" variant: never `abort()`s the
+    /// forwarding task. Use it when correctness of in-flight events
+    /// matters (parity tests, replay drains). For abrupt shutdown
+    /// use [`Self::stop`].
+    pub async fn close_stream(&mut self, name: &str) -> Result<(), CqelsError> {
+        // 1. Drop the engine's mpsc Sender clone. Combined with the
+        //    caller having dropped theirs, the mpsc starts closing.
+        self.stream_senders.remove(name);
+        // 2. Take the forwarding task's JoinHandle out of the engine
+        //    so we can await its natural completion. Removing the
+        //    StreamState also drops the engine's `broadcast::Sender`,
+        //    but the forwarding task still holds a clone — the
+        //    channel stays open until that clone drops too.
+        let handle = self.runtime.engine().take_forwarding_handle(name).await;
+        // 3. Wait for the forwarding task to drain the mpsc and
+        //    naturally exit. Aborts on the *engine side* would race
+        //    with the events still in the mpsc buffer.
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        Ok(())
+    }
+
     /// Registers a CQELS-QL query and delivers results to a listener.
     ///
     /// Returns the assigned query ID.

@@ -242,6 +242,21 @@ impl ReactiveStreamEngine {
         streams.get(name).map(|s| s.sender.subscribe())
     }
 
+    /// Soft-close counterpart to `unregister_stream`: removes the
+    /// stream's state but returns the forwarding `JoinHandle`
+    /// instead of aborting it, letting the caller await the task's
+    /// natural completion so any in-flight events finish flowing
+    /// through to subscribers. Used by
+    /// [`crate::CqelsEngine::close_stream`] for graceful drain.
+    pub async fn take_forwarding_handle(&self, name: &str) -> Option<tokio::task::JoinHandle<()>> {
+        let mut streams = self.streams.lock().await;
+        let handle = streams.remove(name).and_then(|s| s._handle);
+        drop(streams);
+        let mut pending = self.pending.lock().await;
+        pending.retain(|(n, _)| n != name);
+        handle
+    }
+
     /// Builds QueryInputs from all currently registered streams.
     pub async fn build_query_inputs(&self) -> QueryInputs {
         self.build_query_inputs_with_aliases(&[]).await
