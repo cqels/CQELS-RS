@@ -436,15 +436,46 @@ async fn run_all(root: &Path) -> u8 {
     worst
 }
 
+/// Runs a fixture and emits the captured bindings as JSONL to stdout,
+/// one binding per line, with no status messages or framing. Used by
+/// `cargo xtask parity diff` / `parity capture` to compare engine
+/// outputs against each other (or capture one engine's output as the
+/// fixture's `expected.jsonl`) without needing a hand-spec oracle.
+///
+/// Timestamps are omitted — the differential workflow targets binding
+/// content; if a future variant of this needs `_ts`, expose a
+/// `--with-ts` flag rather than changing the default.
+async fn dump_one(dir: &Path) -> u8 {
+    let workload = match load_workload(dir) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("[{}] load error: {e}", dir.display());
+            return EXIT_LOAD_ERROR;
+        }
+    };
+    match run_workload(&workload).await {
+        Ok(actual) => {
+            print!("{}", render(&actual, false));
+            EXIT_OK
+        }
+        Err(e) => {
+            eprintln!("engine error: {e}");
+            EXIT_ENGINE_ERROR
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exit = match args.as_slice() {
-        [single] if single != "--all" => run_one(Path::new(single)).await,
+        [flag, dir] if flag == "--dump" => dump_one(Path::new(dir)).await,
         [flag, root] if flag == "--all" => run_all(Path::new(root)).await,
+        [single] if single != "--all" && single != "--dump" => run_one(Path::new(single)).await,
         _ => {
             eprintln!("usage: cqels-parity-runner <fixture-dir>");
             eprintln!("       cqels-parity-runner --all <fixtures-root>");
+            eprintln!("       cqels-parity-runner --dump <fixture-dir>");
             EXIT_LOAD_ERROR
         }
     };

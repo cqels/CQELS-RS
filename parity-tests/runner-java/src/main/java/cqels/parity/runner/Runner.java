@@ -44,16 +44,55 @@ public final class Runner {
 
     public static void main(String[] args) {
         int code;
-        if (args.length == 1 && !"--all".equals(args[0])) {
-            code = runOne(Paths.get(args[0]));
+        if (args.length == 2 && "--dump".equals(args[0])) {
+            code = dumpOne(Paths.get(args[1]));
         } else if (args.length == 2 && "--all".equals(args[0])) {
             code = runAll(Paths.get(args[1]));
+        } else if (args.length == 1
+                && !"--all".equals(args[0])
+                && !"--dump".equals(args[0])) {
+            code = runOne(Paths.get(args[0]));
         } else {
             System.err.println("usage: cqels-parity-runner-java <fixture-dir>");
             System.err.println("       cqels-parity-runner-java --all <fixtures-root>");
+            System.err.println("       cqels-parity-runner-java --dump <fixture-dir>");
             code = EXIT_LOAD_ERROR;
         }
         System.exit(code);
+    }
+
+    /**
+     * Runs the fixture and emits the captured bindings as JSONL to
+     * stdout, one binding per line, with no status messages or
+     * framing. Used by `cargo xtask parity diff` / `parity capture`
+     * to compare engine outputs against each other (or capture one
+     * engine's output as the fixture's `expected.jsonl`) without
+     * needing a hand-spec oracle.
+     *
+     * <p>Timestamps are omitted to match the Rust runner's `--dump`
+     * default. The differential workflow targets binding content;
+     * if a caller needs `_ts`, expose a `--with-ts` flag rather
+     * than changing the default.
+     */
+    private static int dumpOne(Path dir) {
+        Fixture fixture;
+        try {
+            fixture = Fixture.load(dir);
+        } catch (IOException e) {
+            System.err.println("[" + dir + "] load error: " + e.getMessage());
+            return EXIT_LOAD_ERROR;
+        }
+        List<EngineDriver.CapturedBinding> captured;
+        try {
+            captured = new EngineDriver().run(fixture);
+        } catch (IOException | RuntimeException e) {
+            System.err.println("engine error: " + e);
+            return EXIT_ENGINE_ERROR;
+        }
+        for (EngineDriver.CapturedBinding b : captured) {
+            System.out.println(renderLine(b.bindings, null, false));
+        }
+        return EXIT_OK;
     }
 
     private static int runOne(Path dir) {

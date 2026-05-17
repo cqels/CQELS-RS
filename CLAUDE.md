@@ -59,6 +59,8 @@ Config: `.github/workflows/ci.yml`
 - `cargo xtask coverage` — code coverage with cargo-llvm-cov
 - `cargo xtask bench-observe` — benchmark observation run
 - `cargo xtask parity` — Rust + Java parity sweep across all fixtures, prints a side-by-side pass/fail table (`--rust-only` / `--java-only` to limit; Java side skips cleanly if `mvn` or cqels/claude aren't installed locally)
+- `cargo xtask parity diff <fixture-dir>` — runs both engines on the fixture's query+events and compares their captured bindings directly, bypassing `expected.jsonl`. Lets you answer "do the engines agree on this query?" without writing a hand-spec oracle.
+- `cargo xtask parity capture --engine <rust|java> <fixture-dir>` — runs the chosen engine and overwrites the fixture's `expected.jsonl` with its captured output; flips `ground_truth` in `metadata.toml` to `<engine>-captured`. Useful for pinning a snapshot you trust.
 
 ### MSRV Notes
 - Benchmarks excluded from MSRV check (criterion deps have high MSRV)

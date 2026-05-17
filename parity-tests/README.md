@@ -33,9 +33,11 @@ fixtures/<workload-name>/
 name = "simple-select-now"
 description = "Basic SELECT over a NOW window."
 
-# How the expected outputs were obtained. Either:
-#   "hand-spec"   — written by inspection of the query semantics
-#   "java-golden" — captured from cqels-java
+# How the expected outputs were obtained. One of:
+#   "hand-spec"      — written by inspection of the query semantics
+#   "rust-captured"  — captured from cqels-rs via `cargo xtask parity capture --engine rust`
+#   "java-captured"  — captured from cqels-java via `cargo xtask parity capture --engine java`
+#   "java-golden"    — historical hand-imported cqels-java reference
 ground_truth = "hand-spec"
 
 # When `ground_truth = "java-golden"`, also include:
@@ -102,6 +104,41 @@ cargo xtask parity              # both runners, side-by-side pass/fail table
 cargo xtask parity --rust-only  # only the Rust runner
 cargo xtask parity --java-only  # only the Java runner
 ```
+
+## Verifying parity on a new query — without writing an oracle
+
+The sweep above compares each runner's output against a hand-written
+`expected.jsonl`. For a new query, writing that file is the hard part.
+Two helpers shortcut the workflow:
+
+```bash
+# "Do the engines agree on this fixture's query+events?"
+# Runs both engines, diffs their captured bindings against each other,
+# ignores expected.jsonl entirely. Exit 0 = agreement, exit nonzero +
+# unified diff = divergence.
+cargo xtask parity diff parity-tests/fixtures/<name>
+
+# "Capture engine X's output as the fixture's expected.jsonl."
+# Useful after `parity diff` shows agreement and you want to pin the
+# snapshot for future regression-gating. Flips ground_truth in
+# metadata.toml to `<engine>-captured`.
+cargo xtask parity capture --engine rust parity-tests/fixtures/<name>
+cargo xtask parity capture --engine java parity-tests/fixtures/<name>
+```
+
+The intended workflow for a new query:
+
+1. Create `parity-tests/fixtures/<name>/` with `metadata.toml`,
+   `query.cqels`, `streams.jsonl` (no `expected.jsonl` needed yet).
+2. `cargo xtask parity diff parity-tests/fixtures/<name>` — see if
+   the engines agree.
+3. If they agree: `cargo xtask parity capture --engine rust …` to
+   freeze a `rust-captured` golden, then `cargo xtask parity` to
+   confirm both runners pass against the new fixture.
+4. If they disagree: investigate the gap; either rewrite the query,
+   capture one engine's output as the ground-truth with a description
+   of why that engine is the oracle, or document the divergence and
+   leave it in the known-failing set.
 
 `cargo xtask parity` discovers every fixture under `fixtures/`, builds
 both runners (release mode for Rust, `mvn package` for Java), runs

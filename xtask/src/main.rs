@@ -50,7 +50,9 @@ fn print_usage() {
   cargo xtask coverage
   cargo xtask bench-observe
   cargo xtask bench-save-baseline
-  cargo xtask parity [--rust-only|--java-only]"
+  cargo xtask parity [--rust-only|--java-only]
+  cargo xtask parity diff <fixture-dir>
+  cargo xtask parity capture --engine <rust|java> <fixture-dir>"
     );
 }
 
@@ -747,6 +749,23 @@ enum Side {
 }
 
 fn run_parity_sweep(mut args: VecDeque<String>) -> Result<()> {
+    // Dispatch on subcommand before falling through to the sweep.
+    // The legacy `--rust-only` / `--java-only` flags are NOT
+    // subcommands, so we only intercept long-form names here.
+    if let Some(first) = args.front() {
+        match first.as_str() {
+            "diff" => {
+                args.pop_front();
+                return run_parity_diff(args);
+            }
+            "capture" => {
+                args.pop_front();
+                return run_parity_capture(args);
+            }
+            _ => {}
+        }
+    }
+
     let mut side = Side::Both;
     while let Some(arg) = args.pop_front() {
         match arg.as_str() {
@@ -1041,4 +1060,309 @@ fn print_parity_summary(
     println!(
         "  Status legend: ok=match, FAIL=binding mismatch, ERR=engine error, LOAD=fixture parse error, skip=runner unavailable"
     );
+}
+
+// ─── parity diff / parity capture ────────────────────────────────────
+//
+// Two follow-on workflows on top of `cargo xtask parity`:
+//
+// - `diff <fixture-dir>`    — run both engines, compare their captured
+//   bindings directly. Bypasses `expected.jsonl` entirely. Lets you
+//   answer "do the two engines agree on this query?" without writing
+//   a hand-spec oracle.
+//
+// - `capture --engine <rust|java> <fixture-dir>` — run the chosen
+//   engine and write its captured bindings as the fixture's
+//   `expected.jsonl`. Flips `ground_truth` in `metadata.toml` to
+//   `<engine>-captured`. Lets you take a snapshot you trust and pin it
+//   for future regression-gating.
+//
+// Both rely on a `--dump` mode added to each runner: emit captured
+// bindings as JSONL on stdout, nothing else. Status / "ok" / "FAIL"
+// messages and any engine warnings still go to stderr, so the runner
+// stdout is a clean machine-readable artifact.
+
+fn run_parity_diff(mut args: VecDeque<String>) -> Result<()> {
+    let dir = args
+        .pop_front()
+        .context("missing <fixture-dir> argument for `cargo xtask parity diff`")?;
+    if let Some(extra) = args.pop_front() {
+        bail!("unexpected extra argument: {extra}");
+    }
+    let dir_path = PathBuf::from(&dir);
+    if !dir_path.is_dir() {
+        bail!("not a fixture directory: {}", dir_path.display());
+    }
+
+    println!("── building runners ──");
+    let rust_runner = ensure_rust_runner_built()?;
+    let java_jar = ensure_java_runner_built();
+
+    println!();
+    println!("── Rust engine ──");
+    let rust_out = invoke_rust_dump(&rust_runner, &dir_path)?;
+    print!("{rust_out}");
+    if !rust_out.ends_with('\n') {
+        println!();
+    }
+
+    let java_out = match java_jar {
+        Ok(jar) => {
+            println!();
+            println!("── Java engine ──");
+            let out = invoke_java_dump(&jar, &dir_path)?;
+            print!("{out}");
+            if !out.ends_with('\n') {
+                println!();
+            }
+            Some(out)
+        }
+        Err(reason) => {
+            println!();
+            println!("── Java engine ──");
+            println!("(skipped: {reason})");
+            None
+        }
+    };
+
+    println!();
+    println!("── Verdict ──");
+    match java_out {
+        Some(java_out) if java_out == rust_out => {
+            let n = rust_out.lines().count();
+            println!(
+                "✅ Both engines produced identical output ({n} binding{})",
+                if n == 1 { "" } else { "s" }
+            );
+            Ok(())
+        }
+        Some(java_out) => {
+            println!("❌ Outputs differ");
+            print_line_diff(&rust_out, &java_out);
+            bail!("engines disagree on {}", dir_path.display());
+        }
+        None => {
+            println!(
+                "⚠ Java runner unavailable — only Rust output captured. \
+                Cannot answer the differential question with one engine."
+            );
+            Ok(())
+        }
+    }
+}
+
+fn run_parity_capture(mut args: VecDeque<String>) -> Result<()> {
+    let mut engine: Option<String> = None;
+    let mut dir: Option<String> = None;
+    while let Some(arg) = args.pop_front() {
+        match arg.as_str() {
+            "--engine" => {
+                engine = Some(
+                    args.pop_front()
+                        .context("expected `rust` or `java` after `--engine`")?,
+                );
+            }
+            other if !other.starts_with("--") => {
+                if dir.is_some() {
+                    bail!("unexpected extra argument: {other}");
+                }
+                dir = Some(other.to_string());
+            }
+            other => bail!("unknown flag for `cargo xtask parity capture`: {other}"),
+        }
+    }
+    let engine = engine.context("missing required flag `--engine <rust|java>`")?;
+    let dir = dir.context("missing <fixture-dir> argument")?;
+    let dir_path = PathBuf::from(&dir);
+    if !dir_path.is_dir() {
+        bail!("not a fixture directory: {}", dir_path.display());
+    }
+
+    let dump = match engine.as_str() {
+        "rust" => {
+            let runner = ensure_rust_runner_built()?;
+            invoke_rust_dump(&runner, &dir_path)?
+        }
+        "java" => {
+            let jar = ensure_java_runner_built()
+                .map_err(|reason| anyhow!("Java runner unavailable: {reason}"))?;
+            invoke_java_dump(&jar, &dir_path)?
+        }
+        other => bail!("unknown engine: `{other}` (expected `rust` or `java`)"),
+    };
+
+    let expected_path = dir_path.join("expected.jsonl");
+    fs::write(&expected_path, &dump)
+        .with_context(|| format!("writing {}", expected_path.display()))?;
+
+    let metadata_path = dir_path.join("metadata.toml");
+    let new_ground_truth = format!("{engine}-captured");
+    update_ground_truth(&metadata_path, &new_ground_truth)?;
+
+    let n = dump.lines().count();
+    println!(
+        "Captured {n} binding{} from the {engine} engine into {}",
+        if n == 1 { "" } else { "s" },
+        expected_path.display()
+    );
+    println!(
+        "Updated `ground_truth` to `\"{new_ground_truth}\"` in {}",
+        metadata_path.display()
+    );
+    Ok(())
+}
+
+/// Builds `parity-tests/runner-rust` in release and returns the path
+/// to the produced binary. Cargo is idempotent — re-running when
+/// nothing changed is fast.
+fn ensure_rust_runner_built() -> Result<PathBuf> {
+    println!("  cargo build --release -p cqels-parity-runner ...");
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--manifest-path",
+            "parity-tests/runner-rust/Cargo.toml",
+        ])
+        .status()
+        .context("invoking cargo build for runner-rust")?;
+    if !status.success() {
+        bail!("runner-rust build failed");
+    }
+    let path = PathBuf::from("parity-tests/runner-rust/target/release/cqels-parity-runner");
+    if !path.exists() {
+        bail!("expected runner binary at {}", path.display());
+    }
+    Ok(path)
+}
+
+/// Builds `parity-tests/runner-java` and returns the path to the
+/// jar-with-dependencies. On any failure (mvn missing, cqels/claude
+/// not installed locally, build error) returns Err with a short
+/// human-readable reason so the caller can decide to skip the Java
+/// side rather than abort.
+fn ensure_java_runner_built() -> std::result::Result<PathBuf, String> {
+    if !command_exists("mvn") {
+        return Err("mvn not found on PATH".to_string());
+    }
+    println!("  mvn -q -DskipTests package (runner-java) ...");
+    let status = Command::new("mvn")
+        .args(["-q", "-B", "-DskipTests", "package"])
+        .current_dir("parity-tests/runner-java")
+        .status()
+        .map_err(|e| format!("invoking mvn: {e}"))?;
+    if !status.success() {
+        return Err("mvn package failed (cqels/claude likely not installed locally)".to_string());
+    }
+    find_runner_jar().map_err(|e| format!("{e:#}"))
+}
+
+fn invoke_rust_dump(runner: &std::path::Path, fixture_dir: &std::path::Path) -> Result<String> {
+    let output = Command::new(runner)
+        .args(["--dump", &fixture_dir.to_string_lossy()])
+        .output()
+        .with_context(|| format!("running Rust runner --dump {}", fixture_dir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Rust runner exited {} on --dump {}\nstderr:\n{stderr}",
+            output.status.code().unwrap_or(-1),
+            fixture_dir.display()
+        );
+    }
+    String::from_utf8(output.stdout).context("Rust runner emitted non-UTF-8 dump output")
+}
+
+fn invoke_java_dump(jar: &std::path::Path, fixture_dir: &std::path::Path) -> Result<String> {
+    // Use an absolute path so the runner sees the fixture regardless
+    // of the working directory we hand it. ensure_java_runner_built()
+    // already canonicalized the jar path.
+    let abs_fixture = fixture_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", fixture_dir.display()))?;
+    let output = Command::new("java")
+        .args([
+            // Match the JVM flags `run_one_fixture_java` uses so the
+            // dump invocation is also free of slf4j INFO chatter — the
+            // dump path writes captured bindings to stdout but engine
+            // warnings still go to stderr, and we don't want to
+            // re-introduce floor-level noise that obscures real signal.
+            "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn",
+            "-Dorg.slf4j.simpleLogger.showDateTime=false",
+            "-Dorg.slf4j.simpleLogger.showThreadName=false",
+            "-Dorg.slf4j.simpleLogger.showShortLogName=true",
+            "-jar",
+            jar.to_str().unwrap(),
+            "--dump",
+            abs_fixture.to_str().unwrap(),
+        ])
+        .output()
+        .with_context(|| format!("running Java runner --dump {}", fixture_dir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Java runner exited {} on --dump {}\nstderr:\n{stderr}",
+            output.status.code().unwrap_or(-1),
+            fixture_dir.display()
+        );
+    }
+    String::from_utf8(output.stdout).context("Java runner emitted non-UTF-8 dump output")
+}
+
+/// Order-sensitive line-by-line diff. Mirrors the output style the
+/// per-runner FAIL diffs use, so a user familiar with `cargo xtask
+/// parity` output recognises the format here. Order-sensitive is the
+/// right call: streaming-binding order is part of the semantics.
+fn print_line_diff(rust: &str, java: &str) {
+    let rust_lines: Vec<&str> = rust.lines().collect();
+    let java_lines: Vec<&str> = java.lines().collect();
+    let n = rust_lines.len().max(java_lines.len());
+    println!("  (- Rust, + Java)");
+    for i in 0..n {
+        match (rust_lines.get(i), java_lines.get(i)) {
+            (Some(r), Some(j)) if r == j => println!("    {r}"),
+            (Some(r), Some(j)) => {
+                println!("  - {r}");
+                println!("  + {j}");
+            }
+            (Some(r), None) => println!("  - {r}"),
+            (None, Some(j)) => println!("  + {j}"),
+            (None, None) => {}
+        }
+    }
+}
+
+/// Replaces the `ground_truth = "..."` line in a TOML file with the
+/// supplied value. If the line is missing, appends one. Uses
+/// line-oriented string surgery rather than a TOML parser so the
+/// surrounding formatting / multi-line strings / comments are
+/// preserved untouched.
+fn update_ground_truth(path: &std::path::Path, new_value: &str) -> Result<()> {
+    let original =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut found = false;
+    let mut out = String::with_capacity(original.len() + new_value.len());
+    for line in original.lines() {
+        // Match `ground_truth = "..."` (optionally indented). The
+        // fixtures don't use indented keys, but be tolerant.
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("ground_truth") && trimmed.contains('=') {
+            out.push_str(&format!("ground_truth = \"{new_value}\"\n"));
+            found = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !found {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("ground_truth = \"{new_value}\"\n"));
+    }
+    // Preserve trailing-newline behavior: if the original ended without
+    // one, our writer adds one anyway — `fs::write` of a string that
+    // ends in '\n' is the conventional shape for hand-edited TOML.
+    fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
