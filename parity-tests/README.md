@@ -133,7 +133,28 @@ cargo run --release -- --all ../fixtures
 
 ## Java runner
 
-Not yet implemented. The format is deliberately language-neutral; a
-Maven module under `runner-java/` consuming the same fixtures is
-welcome. Open issue tracker entry once a JVM-side maintainer can
-adopt it.
+A Maven module under [`runner-java/`](./runner-java/) drives the same
+fixtures through a live **cqels-java** engine — specifically the engine
+in [`cqels/claude`](https://github.com/cqels/claude), the same upstream
+this Rust port has been tracking from the start. Exit codes match the
+Rust runner so CI can treat both interchangeably. cqels/claude is a
+private repo + not on Maven Central — clone it (with repo access) and
+`mvn install -DskipTests` first, then:
+
+```bash
+cd parity-tests/runner-java
+mvn -q -DskipTests package
+java -jar target/cqels-parity-runner-java-0.1.0-SNAPSHOT-jar-with-dependencies.jar \
+     --all ../fixtures
+```
+
+Internal cqels-java forks with different Maven coordinates can override
+them on the command line (`-Dcqels.dependency.groupId=…`,
+`-Dcqels.dependency.artifactId=…`, `-Dcqels.dependency.version=…`).
+See [`runner-java/README.md`](./runner-java/README.md) for the full
+integration-verification checklist (package names, listener APIs,
+stream identifier scheme).
+
+A JMH benchmark uber-jar (`target/parity-bench.jar`) drives the same
+fixtures for side-by-side comparison with the Rust criterion bench
+under `cqels-benchmarks::parity_fixtures`.
