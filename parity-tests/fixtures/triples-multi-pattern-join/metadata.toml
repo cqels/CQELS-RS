@@ -1,0 +1,11 @@
+name = "triples-multi-pattern-join"
+description = """
+Two triple patterns in one STREAM block that share the variable ?s.
+Each window-batch must produce bindings only when *both* patterns
+match — exercises the batch-level matching loop's "require all
+patterns to contribute" guard. Uses a TRIPLES 4 window so each
+batch contains four events: two ?temp readings + two ?room
+labellings that all share the same subject IRIs, producing a
+4-way Cartesian within the batch.
+"""
+ground_truth = "hand-spec"

@@ -1,0 +1,8 @@
+SELECT ?s ?temp ?room
+FROM STREAM sensors [TRIPLES 4]
+WHERE {
+    STREAM sensors {
+        ?s <http://ex.org/temp> ?temp .
+        ?s <http://ex.org/in_room> ?room .
+    }
+}

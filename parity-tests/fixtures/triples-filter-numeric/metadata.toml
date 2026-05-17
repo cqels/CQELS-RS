@@ -1,0 +1,9 @@
+name = "triples-filter-numeric"
+description = """
+SELECT with a FILTER(?v > 24) numeric comparison. Six readings
+flow through a TRIPLES 3 window, producing two batches; only
+readings with `?temp > 24` should survive the filter. Exercises
+the expression evaluator, FILTER hoisting, and numeric literal
+coercion (string-typed RDF literal → numeric via the parser).
+"""
+ground_truth = "hand-spec"

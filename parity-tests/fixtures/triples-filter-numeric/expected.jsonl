@@ -1,0 +1,3 @@
+{"sensor": "http://ex.org/s3", "temp": "25"}
+{"sensor": "http://ex.org/s5", "temp": "26"}
+{"sensor": "http://ex.org/s6", "temp": "28"}

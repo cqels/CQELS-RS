@@ -1,0 +1,4 @@
+{"stream": "events", "ts": 1000, "s": "http://ex.org/alert1", "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "o": "http://ex.org/Alert"}
+{"stream": "events", "ts": 2000, "s": "http://ex.org/alert2", "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "o": "http://ex.org/Alert"}
+{"stream": "events", "ts": 3000, "s": "http://ex.org/alert3", "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "o": "http://ex.org/Alert"}
+{"stream": "events", "ts": 4000, "s": "http://ex.org/alert4", "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "o": "http://ex.org/Alert"}

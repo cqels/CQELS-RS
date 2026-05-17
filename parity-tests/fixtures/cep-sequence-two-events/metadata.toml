@@ -1,0 +1,22 @@
+name = "cep-sequence-two-events"
+description = """
+CEP sequence pattern via FILTER(SEQ(?e1; ?e2)) over a TRIPLES 4 window.
+
+**Documents current Rust behavior**: the standard
+`register_cqelsql_query` path parses the SEQ constraint and hoists
+it into `CqelsQueryDefinition.seq_constraint`, but execution
+through `CompiledCqelsQuery::execute` does not yet enforce the
+ordering — it emits the full Cartesian product of the two
+underlying triple patterns (4 × 4 = 16 bindings). True SEQ
+semantics live on a separate engine API
+(`CqelsRuntime::register_stream_cep_pattern` → `NfaPatternProcessor`)
+which produces `PatternMatch` values, not `BindingSet`s, and isn't
+exercised by the harness yet.
+
+When Java is wired into the harness, comparing its output here
+tells us whether Java's main query path enforces SEQ. If it does,
+this fixture becomes a directive to wire the Rust standard path
+through the CEP processor for SEQ-bearing queries; if it doesn't,
+parity already holds.
+"""
+ground_truth = "hand-spec"

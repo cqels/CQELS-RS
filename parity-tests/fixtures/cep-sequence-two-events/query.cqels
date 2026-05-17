@@ -1,0 +1,9 @@
+SELECT ?e1 ?e2
+FROM STREAM events [TRIPLES 4]
+WHERE {
+    STREAM events {
+        ?e1 a <http://ex.org/Alert> .
+        ?e2 a <http://ex.org/Alert> .
+    }
+    FILTER(SEQ(?e1; ?e2))
+}
