@@ -128,6 +128,25 @@ Requests`, not `FROM STREAM <iri>`), matching the Rust runner's
 convention; the runner passes the fixture's `stream` field through
 verbatim with no rewriting.
 
+## CI
+
+A nightly job in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
+(`nightly-parity-java`) installs cqels/claude into a fresh Maven cache,
+builds this module, and runs the matched fixtures as a regression gate
+plus the full `--all` sweep as an informational artifact.
+
+The job needs a GitHub repository secret named **`CQELS_CLAUDE_PAT`** —
+a personal-access token with `repo:read` on `cqels/claude` — to clone
+the private engine. If the secret is missing, the job exits 0 early
+with a workflow-summary notice; this keeps PR runs green for forks
+and contributors who don't have access.
+
+The set of fixtures enforced by the regression gate lives in the
+`parity_java_known_passing` env list at the top of the job. When you
+reconcile a delta (flip a fixture to `java-golden`, or fix the
+underlying engine bug), add its name to that list so CI starts
+catching regressions on it.
+
 ## What's not (yet) covered
 
 - **CEP sequence enforcement.** The `cep-sequence-two-events` fixture
