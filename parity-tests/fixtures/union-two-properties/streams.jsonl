@@ -1,0 +1,4 @@
+{"stream": "facts", "ts": 1000, "s": "http://ex.org/a1", "p": "http://ex.org/name",  "o": "Alice"}
+{"stream": "facts", "ts": 1100, "s": "http://ex.org/a1", "p": "http://ex.org/alias", "o": "Ally"}
+{"stream": "facts", "ts": 1200, "s": "http://ex.org/b1", "p": "http://ex.org/name",  "o": "Bob"}
+{"stream": "facts", "ts": 1300, "s": "http://ex.org/c1", "p": "http://ex.org/alias", "o": "C-dawg"}

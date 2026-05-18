@@ -1,0 +1,30 @@
+name = "optional-extra-property"
+description = """
+SPARQL 1.1 OPTIONAL inside a STREAM block. Each sensor reading
+arrives with a required `?temp`; an optional second triple per
+sensor carries `?room`. SPARQL-correct expected: one binding per
+distinct ?sensor, with ?room present iff the OPTIONAL match
+succeeded.
+
+**Known parity gap on both engines** — discovered via
+`cargo xtask parity diff`:
+
+- **cqels-rs:** parser rejects OPTIONAL inside a STREAM block
+  (`Parse error: expected subject` at the OPTIONAL keyword).
+  No silent wrong answer — the registration call fails. Limitation
+  in the CqelsQL grammar / parser.
+- **cqels-java:** parser logs `extraneous input 'OPTIONAL'`
+  warning and silently drops the OPTIONAL clause. Then emits 5
+  rows (one per event), with `"room":""` on every row regardless
+  of whether the OPTIONAL match succeeded. Same silent-wrong-answer
+  pattern as the multi-pattern-join gap recorded in
+  cqels/claude#83 — execution proceeds against a parse tree that
+  doesn't match the source.
+
+Fixture stays in the known-failing-on-both set so the gap is
+visible. Reconciling requires grammar work on cqels-rs and
+either a real OPTIONAL implementation or a hard-error on
+cqels-java.
+"""
+ground_truth = "hand-spec"
+drain_timeout_ms = 500

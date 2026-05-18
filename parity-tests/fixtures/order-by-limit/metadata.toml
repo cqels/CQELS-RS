@@ -1,0 +1,29 @@
+name = "order-by-limit"
+description = """
+SELECT … ORDER BY DESC(?temp) LIMIT 2 over a small TRIPLES
+window. SPARQL-correct expected: the two largest ?temp values,
+in descending order.
+
+**Known parity gap on both engines** — discovered via
+`cargo xtask parity diff`:
+
+- **cqels-rs:** parser rejects `DESC(?temp)` — `Parse error:
+  expected variable` at `DESC`. The CqelsQL grammar accepts
+  `ORDER BY ?var` but not the SPARQL 1.1 `ORDER BY DESC(?var)`
+  form. Limitation in the parser.
+- **cqels-java:** parser logs `mismatched input 'DESC'` and
+  `mismatched input '('` warnings, then **crashes** during query
+  registration with:
+    `engine error: java.lang.StringIndexOutOfBoundsException:
+     Range [1, 0) out of bounds for length 0`
+  Worth filing as a separate cqels/claude issue — an
+  uncaught exception during query compilation is a hard
+  reliability bug, distinct from the "silent wrong answer"
+  pattern we've seen elsewhere.
+
+Fixture stays in the known-failing-on-both set. cqels-rs
+reconciliation: extend the grammar. cqels-java reconciliation:
+fix the crash + add real ORDER BY DESC support.
+"""
+ground_truth = "hand-spec"
+drain_timeout_ms = 500

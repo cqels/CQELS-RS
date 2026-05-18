@@ -122,8 +122,17 @@ fn load_workload(dir: &Path) -> Result<Workload, LoadError> {
     }
 
     let expected_path = dir.join("expected.jsonl");
-    let expected_str =
-        fs::read_to_string(&expected_path).map_err(|e| LoadError::Io(e, expected_path.clone()))?;
+    // `expected.jsonl` is optional — a freshly-created fixture used by
+    // `cargo xtask parity diff` (which compares engine outputs against
+    // each other rather than against a hand-spec oracle) hasn't had
+    // its expected file written yet. Missing → no expected lines; the
+    // `--dump` path simply emits captured bindings. Other I/O errors
+    // (permission denied, etc.) still propagate.
+    let expected_str = match fs::read_to_string(&expected_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(LoadError::Io(e, expected_path.clone())),
+    };
     let mut expected = Vec::new();
     for (i, line) in expected_str.lines().enumerate() {
         let line = line.trim();

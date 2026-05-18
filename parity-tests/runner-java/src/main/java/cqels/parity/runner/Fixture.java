@@ -89,6 +89,13 @@ public final class Fixture {
 
     private static List<ExpectedBinding> parseExpected(Path path) throws IOException {
         List<ExpectedBinding> expected = new ArrayList<>();
+        // `expected.jsonl` is optional — a freshly-created fixture used by
+        // `cargo xtask parity diff` (which compares engine outputs against
+        // each other rather than against a hand-spec oracle) hasn't had
+        // its expected file written yet. Missing → no expected lines.
+        if (!Files.exists(path)) {
+            return expected;
+        }
         for (String line : Files.readAllLines(path)) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("#")) {
