@@ -11,14 +11,13 @@ row order is non-deterministic.** Discovered via
 - **cqels-rs:** parser accepts the query and execution emits the
   two correct rows (`s1 → 3`, `s2 → 2`). However, repeated runs
   show the row order alternates: roughly 5/8 runs start with s1,
-  3/8 start with s2. The aggregate pipeline appears to iterate
-  a `HashMap` for emission, and Rust's default `HashMap` uses a
-  randomized hash seed per process → non-deterministic iteration.
-  Order-sensitive parity comparison therefore **flakes** on this
-  fixture: half the time it matches the hand-spec expected
-  output, half the time it doesn't. Worth a follow-up cqels-rs
-  issue: aggregate emission should be deterministic (e.g. sort
-  by group key before flushing).
+  3/8 start with s2. Root cause is in
+  `cqels-core/src/compiler/pipeline.rs::apply_group_by_aggregates`
+  — uses a `HashMap` (randomized hash seed) to group, then
+  iterates it. Order-sensitive parity comparison therefore
+  **flakes** on this fixture. Filed against cqels-rs as
+  **HiveIntel/cqels-rs#70** with a one-line fix suggestion
+  (swap to `BTreeMap`).
 - **cqels-java:** ✅ correct and deterministic. Emits the 2
   expected rows in `(s1, s2)` order every run.
 

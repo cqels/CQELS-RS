@@ -16,10 +16,9 @@ in descending order.
   registration with:
     `engine error: java.lang.StringIndexOutOfBoundsException:
      Range [1, 0) out of bounds for length 0`
-  Worth filing as a separate cqels/claude issue — an
-  uncaught exception during query compilation is a hard
-  reliability bug, distinct from the "silent wrong answer"
-  pattern we've seen elsewhere.
+  Filed upstream as **cqels/claude#86**. Distinct from the
+  silent-wrong-answer pattern in cqels/claude#83 — this is an
+  uncaught exception out of the parser's error-recovery path.
 
 Fixture stays in the known-failing-on-both set. cqels-rs
 reconciliation: extend the grammar. cqels-java reconciliation:
