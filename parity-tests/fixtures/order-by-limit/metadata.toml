@@ -11,18 +11,22 @@ in descending order.
   expected variable` at `DESC`. The CqelsQL grammar accepts
   `ORDER BY ?var` but not the SPARQL 1.1 `ORDER BY DESC(?var)`
   form. Limitation in the parser.
-- **cqels-java:** parser logs `mismatched input 'DESC'` and
-  `mismatched input '('` warnings, then **crashes** during query
-  registration with:
-    `engine error: java.lang.StringIndexOutOfBoundsException:
-     Range [1, 0) out of bounds for length 0`
-  Filed upstream as **cqels/claude#86**. Distinct from the
-  silent-wrong-answer pattern in cqels/claude#83 — this is an
-  uncaught exception out of the parser's error-recovery path.
+- **cqels-java:** the crash from `cqels/claude#86` is gone on the
+  current `cqels-claudecode` install — the fixture now produces
+  exactly the expected 2 rows (s2/27, s4/25). The fix appears to
+  have landed via an unrelated TopKOperator wiring commit
+  (`e56aa29 feat(core): wire TopKOperator into ORDER BY ... LIMIT
+  compilation (#60) (#79)`) which extended compilation for
+  ORDER BY...LIMIT and incidentally also unblocked DESC. The
+  upstream tracker still shows #86 OPEN as of capture; the
+  symptom is fixed even if the issue isn't formally closed.
 
-Fixture stays in the known-failing-on-both set. cqels-rs
-reconciliation: extend the grammar. cqels-java reconciliation:
-fix the crash + add real ORDER BY DESC support.
+cqels-rs side still needs grammar work to accept the
+`DESC(?var)` form — the parser limitation isn't resolved.
+
+After the cqels-java fix this fixture moves into the
+`parity_java_known_passing` set on the CI gate (Java column
+becomes a regression target).
 """
 ground_truth = "hand-spec"
 drain_timeout_ms = 500

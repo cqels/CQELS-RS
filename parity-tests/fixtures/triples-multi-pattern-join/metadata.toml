@@ -5,7 +5,49 @@ Each window-batch must produce bindings only when *both* patterns
 match — exercises the batch-level matching loop's "require all
 patterns to contribute" guard. Uses a TRIPLES 4 window so each
 batch contains four events: two ?temp readings + two ?room
-labellings that all share the same subject IRIs, producing a
-4-way Cartesian within the batch.
+labellings that all share the same subject IRIs.
+
+**History on cqels-java:**
+
+1. Pre-#83: cqels-java's `executeStreamOnly` path silently emitted
+   4 partial rows (one per arriving triple, no cross-element
+   join). Filed as `cqels/claude#83`.
+2. cqels/claude#83 landed in commit `421f5ad fix(core): route
+   multi-pattern stream BGPs through windowed hash join`. The fix
+   ships a regression test that exactly mirrors this fixture and
+   asserts correctness via a `Set<Map>` dedupe (2 distinct joined
+   rows expected), explicitly acknowledging that
+   `executeWindowedHashJoin` emits cumulatively under RSTREAM
+   semantics — same as `testIndexedJoinMixedDuplicateAndUniquePredicate`
+   which expects 9 raw rows for a similar shape.
+
+**Why this fixture still shows FAIL on the Java column:**
+
+Java's post-#83 raw output for the four events is:
+  {kitchen, s1, 21}    ← e2 arrival completes the s1 join
+  {kitchen, s1, 21}    ← e3 arrival re-evaluates window, re-emits s1
+  {kitchen, s1, 21}    ← e4 arrival re-evaluates window, re-emits s1
+  {lounge,  s2, 22}    ← e4 arrival completes the s2 join
+
+4 raw rows, deduping to 2 distinct rows. cqels-rs emits 2 rows
+once each (single-emission semantics). The fixture's
+`expected.jsonl` encodes cqels-rs's single-emission output, not
+cqels-java's RSTREAM cumulative emission. Order-sensitive
+textual comparison therefore diffs.
+
+This is **the same engine-semantic divergence pattern as
+`self-join-rides`** — not a bug on either side. The fixture
+stays anchored to cqels-rs's behavior (matches by content the
+2 distinct logical join rows that any SPARQL semantics would
+require), and Java's FAIL on the parity column is informational
+rather than indicating a regression.
+
+To make this fixture pass on Java too, options are: (a) flip the
+fixture to `java-captured` ground truth via
+`cargo xtask parity capture --engine java` (then it fails on
+Rust), (b) split into two fixtures (one per semantic), or (c)
+add a comparison mode that dedupes by content before diffing.
+For now (c) is unwired and (a)/(b) trade one column for the
+other; documenting the divergence is the cheapest correct move.
 """
 ground_truth = "hand-spec"

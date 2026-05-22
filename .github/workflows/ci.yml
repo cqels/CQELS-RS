@@ -265,6 +265,8 @@ jobs:
         range-window-low-volume
         triples-filter-numeric
         triples-window-batch
+        order-by-limit
+        count-aggregate
     steps:
       - uses: actions/checkout@v4
 
