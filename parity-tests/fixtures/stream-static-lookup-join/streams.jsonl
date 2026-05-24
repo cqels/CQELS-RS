@@ -1,0 +1,4 @@
+{"stream": "readings", "ts": 1000, "s": "http://ex.org/s1", "p": "http://ex.org/temp", "o": "21"}
+{"stream": "readings", "ts": 1100, "s": "http://ex.org/s2", "p": "http://ex.org/temp", "o": "22"}
+{"stream": "readings", "ts": 1200, "s": "http://ex.org/s3", "p": "http://ex.org/temp", "o": "23"}
+{"stream": "readings", "ts": 1300, "s": "http://ex.org/s4", "p": "http://ex.org/temp", "o": "24"}

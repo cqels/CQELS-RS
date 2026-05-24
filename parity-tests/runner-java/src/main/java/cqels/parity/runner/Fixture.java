@@ -25,6 +25,7 @@ import java.util.Map;
  *   query.cqels        → {@link #query}
  *   streams.jsonl      → list of {@link Event}, one per line
  *   expected.jsonl     → list of {@link ExpectedBinding}, one per line
+ *   static.trig        → optional static-graph data (TriG format)
  * </pre>
  */
 public final class Fixture {
@@ -32,13 +33,22 @@ public final class Fixture {
     public final String query;
     public final List<Event> events;
     public final List<ExpectedBinding> expected;
+    /**
+     * Raw `static.trig` contents if the fixture ships static-graph
+     * data. {@link EngineDriver} parses + seeds it into the engine's
+     * RDF4J Repository before query registration. {@code null} when
+     * the fixture has no static.trig — preserves the existing
+     * stream-only behavior unchanged.
+     */
+    public final String staticTrig;
 
     private Fixture(Metadata metadata, String query, List<Event> events,
-                    List<ExpectedBinding> expected) {
+                    List<ExpectedBinding> expected, String staticTrig) {
         this.metadata = metadata;
         this.query = query;
         this.events = events;
         this.expected = expected;
+        this.staticTrig = staticTrig;
     }
 
     public static Fixture load(Path dir) throws IOException {
@@ -46,7 +56,11 @@ public final class Fixture {
         String query = new String(Files.readAllBytes(dir.resolve("query.cqels")));
         List<Event> events = parseEvents(dir.resolve("streams.jsonl"));
         List<ExpectedBinding> expected = parseExpected(dir.resolve("expected.jsonl"));
-        return new Fixture(metadata, query, events, expected);
+        Path staticPath = dir.resolve("static.trig");
+        String staticTrig = Files.exists(staticPath)
+                ? new String(Files.readAllBytes(staticPath))
+                : null;
+        return new Fixture(metadata, query, events, expected, staticTrig);
     }
 
     private static Metadata parseMetadata(Path path) throws IOException {

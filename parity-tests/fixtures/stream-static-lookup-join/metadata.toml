@@ -1,0 +1,63 @@
+name = "stream-static-lookup-join"
+description = """
+Multi-pattern BGP where one pattern is in a STREAM block and the
+other matches against a static graph declared via `FROM <iri>`.
+Exercises the **stream+static** counterpart to the multi-pattern
+STREAM-block bug fixed in cqels/claude#83 — that path goes through
+`executeWithLookupJoin` (not `executeWindowedHashJoin`) and was
+filed separately as cqels/claude#85.
+
+**Shape:**
+
+```sparql
+SELECT ?sensor ?temp ?location
+FROM STREAM readings [TRIPLES 4]
+FROM <http://ex.org/static/sensors>
+WHERE {
+  STREAM readings { ?sensor <http://ex.org/temp> ?temp . }
+  ?sensor <http://ex.org/location> ?location .
+}
+```
+
+The static graph carries `?sensor → ?location` mappings for three
+sensors (s1=kitchen, s2=lounge, s3=garage). Stream events arrive
+for four sensors. Expected behavior: only s1/s2/s3 produce
+joined output; s4 has no static location, so its event is
+filtered out of the result set.
+
+**Status on the Java side:** cqels/claude#85 was fixed in commit
+`2ff2129` "fix(core): compose windowed-hash-join + static lookup
+for multi-pattern stream BGPs (#85)" plus follow-up `214390c`
+"preserve join key + defer BIND/FILTER for composed
+stream+static path" (Codex P1×2 review). The captured
+`expected.jsonl` came from a Java run against `2ff2129`.
+
+**Status on the Rust side: gap found.** Running this fixture
+through `cqels-rs` emits **zero** rows. The cqels-rs parser
+correctly extracts the `FROM <http://ex.org/static/sensors>`
+clause into `CqelsQueryDefinition.static_graphs`, but the
+compiler in `cqels-core/src/compiler/compiled.rs` never reads
+that field at query time:
+
+- Unscoped WHERE patterns (the `?sensor <ex:location> ?location`
+  triple here) are queried via `store.query_pattern(...)` against
+  the *default* graph (compiled.rs:351).
+- Named-graph patterns inside `GRAPH <iri> { ... }` blocks go
+  through `store.query_named_graph_pattern(...)` (compiled.rs:360).
+- **No code path merges `FROM <iri>` graph contents into the
+  default for evaluation** (the standard SPARQL FROM semantic).
+
+The runner correctly loads the TriG data into the named graph
+`<http://ex.org/static/sensors>` (mirrors how cqels-java's
+Repository stores it). cqels-java's compiler then merges that
+graph into the default graph at query evaluation; cqels-rs's
+doesn't, so the unscoped static pattern queries an empty default
+graph → no matches → no joined rows.
+
+Worth filing as a cqels-rs issue: `FROM <iri>` parsed but not
+enforced — the parser already extracts `static_graphs`, the
+compiler just needs to query those graphs via
+`query_named_graph_pattern` (or merge them into the default
+graph view) for the unscoped WHERE patterns.
+"""
+ground_truth = "java-captured"

@@ -4,10 +4,21 @@ import org.cqels.engine.CQELSEngine;
 import org.cqels.engine.DataStream;
 import org.cqels.engine.QueryResultListener;
 import org.eclipse.rdf4j.model.IRI;
+import org.eclipse.rdf4j.model.Model;
+import org.eclipse.rdf4j.model.Resource;
 import org.eclipse.rdf4j.model.Statement;
 import org.eclipse.rdf4j.model.Value;
 import org.eclipse.rdf4j.model.ValueFactory;
 import org.eclipse.rdf4j.model.impl.SimpleValueFactory;
+import org.eclipse.rdf4j.repository.Repository;
+import org.eclipse.rdf4j.repository.RepositoryConnection;
+import org.eclipse.rdf4j.rio.RDFFormat;
+import org.eclipse.rdf4j.rio.RDFParseException;
+import org.eclipse.rdf4j.rio.Rio;
+import org.eclipse.rdf4j.rio.UnsupportedRDFormatException;
+
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -70,6 +81,16 @@ public final class EngineDriver {
                 .id("cqels-parity-" + System.nanoTime())
                 .withMemoryStore()
                 .build()) {
+
+            // Seed static-graph data BEFORE registering the query —
+            // cqels-java's compiler captures repository references at
+            // registration time, and the query's first evaluation
+            // walks the FROM <iri> patterns once. Loading after the
+            // first batch arrives risks the static patterns seeing
+            // an empty repository.
+            if (fixture.staticTrig != null) {
+                loadStaticTrig(engine.getRepository(), fixture.staticTrig);
+            }
 
             // Pre-create every stream referenced by the workload's
             // events. cqels-java identifies streams by bare name, so
@@ -138,6 +159,48 @@ public final class EngineDriver {
             engine.stop();
         }
         return new ArrayList<>(captured);
+    }
+
+    /**
+     * Parse a fixture's `static.trig` and seed it into the engine's
+     * RDF4J Repository. Triples in the default graph get a
+     * {@code null} context; triples tagged with a named graph
+     * preserve their graph context so {@code FROM <iri>} /
+     * {@code GRAPH <iri> { ... }} patterns in the CQELS-QL query
+     * resolve against the right partition.
+     *
+     * <p>Throws {@link IOException} if the TriG can't be parsed —
+     * surfaces as the runner's {@code engine error} exit code
+     * (2), distinguishable from a binding mismatch (1).
+     */
+    static void loadStaticTrig(Repository repository, String trig) throws IOException {
+        if (repository == null) {
+            // Defensive: `withMemoryStore()` should always produce a
+            // non-null repository, but engines built via
+            // `builder().repository(null)` would land here.
+            throw new IOException("static.trig present but engine has no repository configured");
+        }
+        Model model;
+        try {
+            model = Rio.parse(
+                    new ByteArrayInputStream(trig.getBytes(StandardCharsets.UTF_8)),
+                    "",
+                    RDFFormat.TRIG);
+        } catch (RDFParseException | UnsupportedRDFormatException e) {
+            throw new IOException("static.trig parse error: " + e.getMessage(), e);
+        }
+        try (RepositoryConnection conn = repository.getConnection()) {
+            conn.begin();
+            for (Statement st : model) {
+                Resource ctx = st.getContext();
+                if (ctx == null) {
+                    conn.add(st);
+                } else {
+                    conn.add(st, ctx);
+                }
+            }
+            conn.commit();
+        }
     }
 
     /**

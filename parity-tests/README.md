@@ -24,7 +24,8 @@ fixtures/<workload-name>/
 ├── metadata.toml      # workload description + ground-truth source
 ├── query.cqels        # the CqelsQL query (1 query per workload)
 ├── streams.jsonl      # input events, one JSON object per line
-└── expected.jsonl     # expected output bindings, one per line
+├── expected.jsonl     # expected output bindings, one per line
+└── static.trig        # optional: static-graph data (TriG format)
 ```
 
 ### `metadata.toml`
@@ -96,6 +97,32 @@ The runner strips both at compare time.
 If `_ts` is omitted in an expected line, the timestamp on the
 produced binding is **not** checked — only the variable bindings
 need to match.
+
+### `static.trig` (optional)
+
+Static-graph data for fixtures whose query references a `FROM <iri>`
+(or `FROM NAMED <iri>`) clause. Standard
+[TriG](https://www.w3.org/TR/trig/) format, so triples can be
+distributed across named graphs:
+
+```turtle
+<http://ex.org/static/sensors> {
+  <http://ex.org/s1> <http://ex.org/location> "kitchen" .
+  <http://ex.org/s2> <http://ex.org/location> "lounge" .
+}
+
+# Default-graph triples go outside any { ... } block:
+# <http://ex.org/global> <http://ex.org/version> "1" .
+```
+
+If `static.trig` is present, both runners parse it and seed it
+into the engine's RDF store *before* the query is registered.
+The Rust runner uses `cqels-engine::CqelsEngine::store()` →
+`RdfStore::load_named_graph` / `load_statements`. The Java
+runner uses `CQELSEngine.getRepository()` → RDF4J `Rio.parse` +
+`RepositoryConnection.add(stmt, context)`. If the file is
+absent the runners behave as before — pure stream input, no
+static-graph queries.
 
 ## One command for the whole sweep
 

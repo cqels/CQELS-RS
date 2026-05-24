@@ -267,6 +267,7 @@ jobs:
         triples-window-batch
         order-by-limit
         count-aggregate
+        stream-static-lookup-join
     steps:
       - uses: actions/checkout@v4
 
