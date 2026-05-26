@@ -1,0 +1,32 @@
+name = "order-by-limit"
+description = """
+SELECT … ORDER BY DESC(?temp) LIMIT 2 over a small TRIPLES
+window. SPARQL-correct expected: the two largest ?temp values,
+in descending order.
+
+**Known parity gap on both engines** — discovered via
+`cargo xtask parity diff`:
+
+- **cqels-rs:** parser rejects `DESC(?temp)` — `Parse error:
+  expected variable` at `DESC`. The CqelsQL grammar accepts
+  `ORDER BY ?var` but not the SPARQL 1.1 `ORDER BY DESC(?var)`
+  form. Limitation in the parser.
+- **cqels-java:** the crash from `cqels/claude#86` is gone on the
+  current `cqels-claudecode` install — the fixture now produces
+  exactly the expected 2 rows (s2/27, s4/25). The fix appears to
+  have landed via an unrelated TopKOperator wiring commit
+  (`e56aa29 feat(core): wire TopKOperator into ORDER BY ... LIMIT
+  compilation (#60) (#79)`) which extended compilation for
+  ORDER BY...LIMIT and incidentally also unblocked DESC. The
+  upstream tracker still shows #86 OPEN as of capture; the
+  symptom is fixed even if the issue isn't formally closed.
+
+cqels-rs side still needs grammar work to accept the
+`DESC(?var)` form — the parser limitation isn't resolved.
+
+After the cqels-java fix this fixture moves into the
+`parity_java_known_passing` set on the CI gate (Java column
+becomes a regression target).
+"""
+ground_truth = "hand-spec"
+drain_timeout_ms = 500

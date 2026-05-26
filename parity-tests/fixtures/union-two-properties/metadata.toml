@@ -1,0 +1,26 @@
+name = "union-two-properties"
+description = """
+SPARQL 1.1 UNION of two alternative property paths inside a
+STREAM block. SPARQL-correct expected: one row per matching
+triple, with ?label bound to whichever predicate fired.
+
+**Known parity gap on both engines** — discovered via
+`cargo xtask parity diff`:
+
+- **cqels-rs:** parser rejects the inner `{ ... }` groups
+  (`Parse error: expected subject` at the opening `{`). UNION
+  inside a STREAM block isn't supported by the CqelsQL grammar.
+- **cqels-java:** parser logs `extraneous input '{'` /
+  `extraneous input 'UNION'` warnings and silently drops the
+  UNION. Emits 4 rows where each event maps to either
+  `{subject, label}` (if matched the name predicate) or just
+  `{subject}` (if matched the alias predicate — `?label` is
+  unbound because the second arm was discarded). Same silent
+  wrong-answer pattern as cqels/claude#83.
+
+Fixture stays in the known-failing-on-both set. Reconciling
+requires grammar work on cqels-rs and a real UNION implementation
+on cqels-java (or a hard-error on parse).
+"""
+ground_truth = "hand-spec"
+drain_timeout_ms = 500

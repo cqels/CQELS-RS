@@ -31,7 +31,7 @@
 //! Each function operates on `Pin<Box<dyn Stream<Item = BindingSet> + Send>>`
 //! and returns the same type, allowing composable pipeline construction.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
@@ -1030,8 +1030,27 @@ pub fn apply_group_by_aggregates(
         return vec![];
     }
 
-    // Group elements by group-by variables
-    let mut groups: HashMap<Vec<String>, Vec<BindingSet>> = HashMap::new();
+    // Group elements by group-by variables.
+    //
+    // `BTreeMap`, not `HashMap`: rust's default `HashMap` randomizes
+    // its hash seed per process, so iterating the map below produces
+    // a different group order across runs. That was the root cause
+    // of HiveIntel/cqels-rs#70 — the `count-aggregate` parity fixture
+    // would flip between match and mismatch on consecutive runs of
+    // the same input. `BTreeMap` iterates in sorted-key order which
+    // is deterministic. The key type is `Vec<String>` which already
+    // implements `Ord`, so this is a drop-in. SPARQL 1.1 §17.4
+    // doesn't promise group order absent ORDER BY, but reproducibility
+    // across runs of the same query+data is a reasonable expectation
+    // — especially when the caller pipes the output into anything
+    // order-sensitive like `head -N` or a regression diff.
+    //
+    // `BTreeMap` is `O(log N)` vs `HashMap`'s amortized `O(1)`, but
+    // for the cardinalities a streaming-window aggregate sees (group
+    // counts in the hundreds at most before window eviction), the
+    // constant-factor cost is negligible compared to the determinism
+    // guarantee.
+    let mut groups: BTreeMap<Vec<String>, Vec<BindingSet>> = BTreeMap::new();
 
     for bs in &elements {
         let key: Vec<String> = group_by
@@ -1744,6 +1763,100 @@ mod tests {
                 _ => panic!("unexpected city"),
             }
         }
+    }
+
+    /// Regression for HiveIntel/cqels-rs#70 — non-deterministic group
+    /// order. The previous implementation used `HashMap<Vec<String>,
+    /// _>` whose randomized hash seed produced different group orders
+    /// across runs even of identical input. The fix is `BTreeMap`,
+    /// which iterates in sorted-key order. This test runs the
+    /// function 100 times on identical input and asserts every run
+    /// produces byte-identical output ordering — would have failed
+    /// reliably on the pre-fix `HashMap` implementation.
+    #[test]
+    fn group_by_aggregates_emit_in_deterministic_order() {
+        let evaluator = ExpressionEvaluator::new();
+        // Two distinct sensor groups so HashMap's bucket layout has
+        // something to scramble. Reproduces the count-aggregate
+        // parity fixture's data shape (3 readings for s1, 2 for s2).
+        let make_elements = || {
+            vec![
+                {
+                    let mut bs = BindingSet::new(1000);
+                    bs.insert("sensor", Value::String("s1".into()));
+                    bs.insert("temp", Value::Integer(21));
+                    bs
+                },
+                {
+                    let mut bs = BindingSet::new(1100);
+                    bs.insert("sensor", Value::String("s2".into()));
+                    bs.insert("temp", Value::Integer(22));
+                    bs
+                },
+                {
+                    let mut bs = BindingSet::new(1200);
+                    bs.insert("sensor", Value::String("s1".into()));
+                    bs.insert("temp", Value::Integer(23));
+                    bs
+                },
+                {
+                    let mut bs = BindingSet::new(1300);
+                    bs.insert("sensor", Value::String("s1".into()));
+                    bs.insert("temp", Value::Integer(24));
+                    bs
+                },
+                {
+                    let mut bs = BindingSet::new(1400);
+                    bs.insert("sensor", Value::String("s2".into()));
+                    bs.insert("temp", Value::Integer(25));
+                    bs
+                },
+            ]
+        };
+
+        let group_by = vec!["sensor".to_string()];
+        let aggregates = vec![PipelineAggregateSpec {
+            function: AggregateExprFunction::Count,
+            argument: Expression::Variable("temp".to_string()),
+            alias: "n".to_string(),
+            distinct: false,
+            separator: None,
+        }];
+
+        let first = apply_group_by_aggregates(make_elements(), &group_by, &aggregates, &evaluator);
+
+        // 100 iterations: every run must produce byte-identical
+        // output. On the old HashMap implementation, this test would
+        // typically fail within the first ~5 iterations.
+        for i in 0..100 {
+            let next =
+                apply_group_by_aggregates(make_elements(), &group_by, &aggregates, &evaluator);
+            assert_eq!(
+                first.len(),
+                next.len(),
+                "iteration {i}: group count drifted"
+            );
+            for (a, b) in first.iter().zip(next.iter()) {
+                assert_eq!(
+                    a.get("sensor"),
+                    b.get("sensor"),
+                    "iteration {i}: emission order drifted on sensor"
+                );
+                assert_eq!(
+                    a.get("n"),
+                    b.get("n"),
+                    "iteration {i}: count drifted alongside drift"
+                );
+            }
+        }
+
+        // Spot-check the actual values too — alphabetical sort by
+        // group key means s1 comes before s2.
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].get("sensor").unwrap().as_string().unwrap(), "s1");
+        assert_eq!(first[0].get("n").unwrap(), &Value::Integer(3));
+        assert_eq!(first[1].get("sensor").unwrap().as_string().unwrap(), "s2");
+        assert_eq!(first[1].get("n").unwrap(), &Value::Integer(2));
     }
 
     #[test]

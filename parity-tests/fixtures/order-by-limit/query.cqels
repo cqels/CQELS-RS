@@ -1,0 +1,7 @@
+SELECT ?sensor ?temp
+FROM STREAM sensors [TRIPLES 5]
+WHERE {
+    STREAM sensors { ?sensor <http://ex.org/temp> ?temp . }
+}
+ORDER BY DESC(?temp)
+LIMIT 2

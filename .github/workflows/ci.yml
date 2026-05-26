@@ -232,3 +232,104 @@ jobs:
           path: |
             target/criterion
             target/xtask/bench-observe
+
+  # ─── Cross-language parity (nightly) ────────────────────────────────
+  #
+  # Runs the Java parity runner under `parity-tests/runner-java/`
+  # against the same fixtures the Rust runner consumes, so a
+  # regression on either side surfaces before main moves on.
+  #
+  # cqels-java lives in the private repo `cqels/claude` (not on Maven
+  # Central), so the job needs a PAT with `repo:read` on that repo
+  # exposed as the secret `CQELS_CLAUDE_PAT`. If the secret is unset,
+  # the job exits 0 early and prints a notice — that keeps the
+  # workflow green for forks / contributors who don't have access to
+  # cqels/claude, which is intentional.
+  #
+  # Today's 7 fixtures split into:
+  #   • 4 known-passing on cqels-java   → enforced (any regression fails the job)
+  #   • 3 known-failing on cqels-java   → run informationally, never fail the job
+  # The "informational" set is uploaded as a log artifact for visibility.
+  # When a delta is reconciled (fixture flipped to java-golden, or the
+  # underlying engine bug fixed), move its name from `parity_java_known_failing`
+  # to `parity_java_known_passing` here.
+  nightly-parity-java:
+    name: Parity Java Runner
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      # Keep these two lists in sync with the matrix in
+      # `parity-tests/runner-java/README.md`.
+      parity_java_known_passing: >-
+        simple-select-now
+        range-window-low-volume
+        triples-filter-numeric
+        triples-window-batch
+        order-by-limit
+        count-aggregate
+        stream-static-lookup-join
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check CQELS_CLAUDE_PAT secret
+        id: secret_check
+        env:
+          PAT: ${{ secrets.CQELS_CLAUDE_PAT }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Parity Java skipped::CQELS_CLAUDE_PAT not set; provision a repo-read PAT on cqels/claude to enable this job."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        if: steps.secret_check.outputs.skip != 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Clone + install cqels/claude into local Maven repo
+        if: steps.secret_check.outputs.skip != 'true'
+        env:
+          PAT: ${{ secrets.CQELS_CLAUDE_PAT }}
+        run: |
+          set -euo pipefail
+          git clone --depth=1 "https://x-access-token:${PAT}@github.com/cqels/claude.git" "${RUNNER_TEMP}/cqels-claude"
+          ( cd "${RUNNER_TEMP}/cqels-claude" && mvn -q -B -DskipTests install )
+
+      - name: Build runner-java + JMH uber-jar
+        if: steps.secret_check.outputs.skip != 'true'
+        working-directory: parity-tests/runner-java
+        run: mvn -q -B -DskipTests package
+
+      - name: Run known-passing fixtures (regression gate)
+        if: steps.secret_check.outputs.skip != 'true'
+        working-directory: parity-tests/runner-java
+        run: |
+          set -euo pipefail
+          JAR=$(ls target/cqels-parity-runner-java-*-jar-with-dependencies.jar)
+          for f in $parity_java_known_passing; do
+            echo "::group::$f"
+            java -jar "$JAR" "../fixtures/$f"
+            echo "::endgroup::"
+          done
+
+      - name: Run all fixtures (informational, never fails the job)
+        if: steps.secret_check.outputs.skip != 'true'
+        working-directory: parity-tests/runner-java
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          JAR=$(ls target/cqels-parity-runner-java-*-jar-with-dependencies.jar)
+          java -jar "$JAR" --all ../fixtures 2>&1 | tee parity-java-full.log
+          # Always exit 0 — known-failing fixtures are tracked here for
+          # visibility, not as a regression gate.
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: steps.secret_check.outputs.skip != 'true'
+        with:
+          name: parity-java-log
+          path: parity-tests/runner-java/parity-java-full.log

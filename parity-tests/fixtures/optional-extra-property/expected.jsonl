@@ -1,0 +1,3 @@
+{"sensor": "http://ex.org/s1", "temp": "21", "room": "http://ex.org/kitchen"}
+{"sensor": "http://ex.org/s2", "temp": "22"}
+{"sensor": "http://ex.org/s3", "temp": "23", "room": "http://ex.org/lounge"}

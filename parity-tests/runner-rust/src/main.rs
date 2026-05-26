@@ -95,6 +95,11 @@ struct Workload {
     query: String,
     events: Vec<Event>,
     expected: Vec<ExpectedBinding>,
+    /// Raw `static.trig` contents if the fixture ships static-graph
+    /// data. Parsed and loaded into the engine's RDF store before the
+    /// query is registered. `None` if the fixture has no `static.trig`
+    /// — the existing stream-only behavior.
+    static_trig: Option<String>,
 }
 
 fn load_workload(dir: &Path) -> Result<Workload, LoadError> {
@@ -122,8 +127,17 @@ fn load_workload(dir: &Path) -> Result<Workload, LoadError> {
     }
 
     let expected_path = dir.join("expected.jsonl");
-    let expected_str =
-        fs::read_to_string(&expected_path).map_err(|e| LoadError::Io(e, expected_path.clone()))?;
+    // `expected.jsonl` is optional — a freshly-created fixture used by
+    // `cargo xtask parity diff` (which compares engine outputs against
+    // each other rather than against a hand-spec oracle) hasn't had
+    // its expected file written yet. Missing → no expected lines; the
+    // `--dump` path simply emits captured bindings. Other I/O errors
+    // (permission denied, etc.) still propagate.
+    let expected_str = match fs::read_to_string(&expected_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(LoadError::Io(e, expected_path.clone())),
+    };
     let mut expected = Vec::new();
     for (i, line) in expected_str.lines().enumerate() {
         let line = line.trim();
@@ -147,11 +161,22 @@ fn load_workload(dir: &Path) -> Result<Workload, LoadError> {
         expected.push(binding);
     }
 
+    // Optional static-graph data. Same not-found-is-fine handling as
+    // `expected.jsonl`: a fixture that doesn't need static data simply
+    // omits the file, and the runner behaves as before.
+    let static_path = dir.join("static.trig");
+    let static_trig = match fs::read_to_string(&static_path) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(LoadError::Io(e, static_path)),
+    };
+
     Ok(Workload {
         metadata,
         query,
         events,
         expected,
+        static_trig,
     })
 }
 
@@ -217,10 +242,83 @@ fn value_display(v: &Value) -> String {
     }
 }
 
+/// Parses the fixture's `static.trig` and seeds the engine's RDF
+/// store. Triples in the default graph go through
+/// `load_statements`; triples tagged with a named graph go through
+/// `load_named_graph(uri, ...)`. Call BEFORE
+/// `register_cqelsql_query` so the compiled query's
+/// static-pattern resolution sees the data.
+///
+/// `#[allow(deprecated)]` because oxigraph 0.4 marks
+/// `DatasetParser` deprecated in favor of `oxrdfio::RdfParser`, but
+/// `oxrdfio` lives in a different crate we don't already depend on;
+/// dragging it in for a one-file consumer isn't worth it.
+#[allow(deprecated)]
+fn load_static_data(
+    engine: &cqels_engine::CqelsEngine,
+    trig: &str,
+) -> Result<(), String> {
+    use cqels_model::Statement as CqelsStatement;
+    use oxigraph::io::{DatasetFormat, DatasetParser};
+    use std::collections::HashMap;
+
+    let parser = DatasetParser::from_format(DatasetFormat::TriG);
+
+    let mut by_graph: HashMap<Option<String>, Vec<CqelsStatement>> = HashMap::new();
+    for quad in parser.read_quads(trig.as_bytes()) {
+        let quad = quad.map_err(|e| format!("static.trig parse error: {e}"))?;
+        // GraphName::DefaultGraph → None; named or blank graph → the
+        // graph IRI string. Blank-node graphs are passed through as
+        // their `.to_string()` form; the cqels-rs store will treat
+        // them as opaque IRIs, matching what RDF4J does on the Java
+        // side.
+        let graph_key = match &quad.graph_name {
+            oxrdf::GraphName::DefaultGraph => None,
+            other => Some(other.to_string()),
+        };
+        let stmt: CqelsStatement = quad.into();
+        by_graph.entry(graph_key).or_default().push(stmt);
+    }
+
+    let store = engine.store();
+    for (graph, stmts) in by_graph {
+        match graph {
+            None => store
+                .load_statements(&stmts)
+                .map_err(|e| format!("load_statements: {e}"))?,
+            Some(iri) => {
+                // `DatasetParser` produces `GraphName::NamedNode(NamedNode)`
+                // for `<iri>` graph contexts and the `to_string()` form
+                // wraps the IRI in `<...>`. Strip the brackets so the
+                // store sees the plain IRI string that
+                // `query_named_graph_pattern` expects.
+                let plain = iri
+                    .strip_prefix('<')
+                    .and_then(|s| s.strip_suffix('>'))
+                    .unwrap_or(&iri)
+                    .to_string();
+                store
+                    .load_named_graph(&plain, &stmts)
+                    .map_err(|e| format!("load_named_graph({plain}): {e}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_workload(workload: &Workload) -> Result<Vec<(BTreeMap<String, String>, i64)>, String> {
     let mut engine = CqelsEngine::builder()
         .build()
         .map_err(|e| format!("build engine: {e}"))?;
+
+    // Seed static-graph data BEFORE registering the query — the
+    // compiled query captures an `Arc` of the store at registration
+    // time, and the first execute() walks the static patterns once
+    // up front. Loading after registration risks the patterns
+    // seeing an empty store for the first batch.
+    if let Some(trig) = &workload.static_trig {
+        load_static_data(&engine, trig)?;
+    }
 
     // Pre-create every stream referenced by the workload's events.
     let mut stream_names: Vec<String> = workload
@@ -293,12 +391,32 @@ async fn run_workload(workload: &Workload) -> Result<Vec<(BTreeMap<String, Strin
     // Drain. Bindings flow through tokio tasks, so wait a bounded
     // amount of time for the last one to land. The metadata can
     // override the default (1s) for slow tumbling-window workloads.
+    //
+    // Two distinct exit conditions:
+    //
+    // 1. **Known target reached.** When `expected.jsonl` exists and is
+    //    non-empty, `target > 0` and the loop short-circuits as soon
+    //    as we've collected enough bindings. This keeps the regular
+    //    `cargo xtask parity` sweep fast.
+    //
+    // 2. **Unknown target — wait the full timeout.** When
+    //    `expected.jsonl` is absent (`cargo xtask parity diff` /
+    //    `parity capture` on a freshly-authored fixture) or empty
+    //    (workload genuinely expects zero bindings), `target == 0`.
+    //    The old code wrote `if count >= target { break }` here,
+    //    which short-circuits on `0 >= 0` BEFORE any async result
+    //    has had time to land — so `--dump` / `parity capture`
+    //    captured nothing on fresh fixtures (codex P1 finding on PR
+    //    HiveIntel/cqels-rs#71). Guarding the early exit with
+    //    `target > 0` lets the deadline path drive termination
+    //    instead, giving async results the full `drain_ms` to flow
+    //    through.
     let drain_ms = workload.metadata.drain_timeout_ms.unwrap_or(1000);
     let drain_until = std::time::Instant::now() + Duration::from_millis(drain_ms);
     let target = workload.expected.len();
     loop {
         let count = captured.lock().unwrap().len();
-        if count >= target {
+        if target > 0 && count >= target {
             break;
         }
         if std::time::Instant::now() >= drain_until {
@@ -436,15 +554,46 @@ async fn run_all(root: &Path) -> u8 {
     worst
 }
 
+/// Runs a fixture and emits the captured bindings as JSONL to stdout,
+/// one binding per line, with no status messages or framing. Used by
+/// `cargo xtask parity diff` / `parity capture` to compare engine
+/// outputs against each other (or capture one engine's output as the
+/// fixture's `expected.jsonl`) without needing a hand-spec oracle.
+///
+/// Timestamps are omitted — the differential workflow targets binding
+/// content; if a future variant of this needs `_ts`, expose a
+/// `--with-ts` flag rather than changing the default.
+async fn dump_one(dir: &Path) -> u8 {
+    let workload = match load_workload(dir) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("[{}] load error: {e}", dir.display());
+            return EXIT_LOAD_ERROR;
+        }
+    };
+    match run_workload(&workload).await {
+        Ok(actual) => {
+            print!("{}", render(&actual, false));
+            EXIT_OK
+        }
+        Err(e) => {
+            eprintln!("engine error: {e}");
+            EXIT_ENGINE_ERROR
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exit = match args.as_slice() {
-        [single] if single != "--all" => run_one(Path::new(single)).await,
+        [flag, dir] if flag == "--dump" => dump_one(Path::new(dir)).await,
         [flag, root] if flag == "--all" => run_all(Path::new(root)).await,
+        [single] if single != "--all" && single != "--dump" => run_one(Path::new(single)).await,
         _ => {
             eprintln!("usage: cqels-parity-runner <fixture-dir>");
             eprintln!("       cqels-parity-runner --all <fixtures-root>");
+            eprintln!("       cqels-parity-runner --dump <fixture-dir>");
             EXIT_LOAD_ERROR
         }
     };

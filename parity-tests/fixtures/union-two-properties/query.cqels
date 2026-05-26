@@ -1,0 +1,9 @@
+SELECT ?subject ?label
+FROM STREAM facts [TRIPLES 4]
+WHERE {
+    STREAM facts {
+        { ?subject <http://ex.org/name>  ?label . }
+        UNION
+        { ?subject <http://ex.org/alias> ?label . }
+    }
+}

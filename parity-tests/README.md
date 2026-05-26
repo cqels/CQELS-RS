@@ -24,7 +24,8 @@ fixtures/<workload-name>/
 ├── metadata.toml      # workload description + ground-truth source
 ├── query.cqels        # the CqelsQL query (1 query per workload)
 ├── streams.jsonl      # input events, one JSON object per line
-└── expected.jsonl     # expected output bindings, one per line
+├── expected.jsonl     # expected output bindings, one per line
+└── static.trig        # optional: static-graph data (TriG format)
 ```
 
 ### `metadata.toml`
@@ -33,9 +34,11 @@ fixtures/<workload-name>/
 name = "simple-select-now"
 description = "Basic SELECT over a NOW window."
 
-# How the expected outputs were obtained. Either:
-#   "hand-spec"   — written by inspection of the query semantics
-#   "java-golden" — captured from cqels-java
+# How the expected outputs were obtained. One of:
+#   "hand-spec"      — written by inspection of the query semantics
+#   "rust-captured"  — captured from cqels-rs via `cargo xtask parity capture --engine rust`
+#   "java-captured"  — captured from cqels-java via `cargo xtask parity capture --engine java`
+#   "java-golden"    — historical hand-imported cqels-java reference
 ground_truth = "hand-spec"
 
 # When `ground_truth = "java-golden"`, also include:
@@ -95,6 +98,97 @@ If `_ts` is omitted in an expected line, the timestamp on the
 produced binding is **not** checked — only the variable bindings
 need to match.
 
+### `static.trig` (optional)
+
+Static-graph data for fixtures whose query references a `FROM <iri>`
+(or `FROM NAMED <iri>`) clause. Standard
+[TriG](https://www.w3.org/TR/trig/) format, so triples can be
+distributed across named graphs:
+
+```turtle
+<http://ex.org/static/sensors> {
+  <http://ex.org/s1> <http://ex.org/location> "kitchen" .
+  <http://ex.org/s2> <http://ex.org/location> "lounge" .
+}
+
+# Default-graph triples go outside any { ... } block:
+# <http://ex.org/global> <http://ex.org/version> "1" .
+```
+
+If `static.trig` is present, both runners parse it and seed it
+into the engine's RDF store *before* the query is registered.
+The Rust runner uses `cqels-engine::CqelsEngine::store()` →
+`RdfStore::load_named_graph` / `load_statements`. The Java
+runner uses `CQELSEngine.getRepository()` → RDF4J `Rio.parse` +
+`RepositoryConnection.add(stmt, context)`. If the file is
+absent the runners behave as before — pure stream input, no
+static-graph queries.
+
+## One command for the whole sweep
+
+```bash
+cargo xtask parity              # both runners, side-by-side pass/fail table
+cargo xtask parity --rust-only  # only the Rust runner
+cargo xtask parity --java-only  # only the Java runner
+```
+
+## Verifying parity on a new query — without writing an oracle
+
+The sweep above compares each runner's output against a hand-written
+`expected.jsonl`. For a new query, writing that file is the hard part.
+Two helpers shortcut the workflow:
+
+```bash
+# "Do the engines agree on this fixture's query+events?"
+# Runs both engines, diffs their captured bindings against each other,
+# ignores expected.jsonl entirely. Exit 0 = agreement, exit nonzero +
+# unified diff = divergence.
+cargo xtask parity diff parity-tests/fixtures/<name>
+
+# "Capture engine X's output as the fixture's expected.jsonl."
+# Useful after `parity diff` shows agreement and you want to pin the
+# snapshot for future regression-gating. Flips ground_truth in
+# metadata.toml to `<engine>-captured`.
+cargo xtask parity capture --engine rust parity-tests/fixtures/<name>
+cargo xtask parity capture --engine java parity-tests/fixtures/<name>
+```
+
+The intended workflow for a new query:
+
+1. Create `parity-tests/fixtures/<name>/` with `metadata.toml`,
+   `query.cqels`, `streams.jsonl` (no `expected.jsonl` needed yet).
+2. `cargo xtask parity diff parity-tests/fixtures/<name>` — see if
+   the engines agree.
+3. If they agree: `cargo xtask parity capture --engine rust …` to
+   freeze a `rust-captured` golden, then `cargo xtask parity` to
+   confirm both runners pass against the new fixture.
+4. If they disagree: investigate the gap; either rewrite the query,
+   capture one engine's output as the ground-truth with a description
+   of why that engine is the oracle, or document the divergence and
+   leave it in the known-failing set.
+
+`cargo xtask parity` discovers every fixture under `fixtures/`, builds
+both runners (release mode for Rust, `mvn package` for Java), runs
+each fixture through both, and prints a compact table at the end:
+
+```
+Parity sweep — cqels-rs vs cqels-java
+
+  Fixture                    | Rust | Java
+  -------------------------- | ---- | ----
+  cep-sequence-two-events    | ok   | FAIL
+  range-window-low-volume    | ok   | ok
+  ...
+  -------------------------- | ---- | ----
+  TOTAL                      | 7/7  | 4/7
+```
+
+Per-runner output is captured into `target/xtask/parity/parity-rust.log`
+and `target/xtask/parity/parity-java.log` for drilling into failures.
+The Java column reports `skip` if `mvn` or cqels/claude aren't
+installed locally — useful for forks that don't have access to the
+private cqels/claude repo.
+
 ## Running the Rust runner
 
 ```bash
@@ -133,7 +227,28 @@ cargo run --release -- --all ../fixtures
 
 ## Java runner
 
-Not yet implemented. The format is deliberately language-neutral; a
-Maven module under `runner-java/` consuming the same fixtures is
-welcome. Open issue tracker entry once a JVM-side maintainer can
-adopt it.
+A Maven module under [`runner-java/`](./runner-java/) drives the same
+fixtures through a live **cqels-java** engine — specifically the engine
+in [`cqels/claude`](https://github.com/cqels/claude), the same upstream
+this Rust port has been tracking from the start. Exit codes match the
+Rust runner so CI can treat both interchangeably. cqels/claude is a
+private repo + not on Maven Central — clone it (with repo access) and
+`mvn install -DskipTests` first, then:
+
+```bash
+cd parity-tests/runner-java
+mvn -q -DskipTests package
+java -jar target/cqels-parity-runner-java-0.1.0-SNAPSHOT-jar-with-dependencies.jar \
+     --all ../fixtures
+```
+
+Internal cqels-java forks with different Maven coordinates can override
+them on the command line (`-Dcqels.dependency.groupId=…`,
+`-Dcqels.dependency.artifactId=…`, `-Dcqels.dependency.version=…`).
+See [`runner-java/README.md`](./runner-java/README.md) for the full
+integration-verification checklist (package names, listener APIs,
+stream identifier scheme).
+
+A JMH benchmark uber-jar (`target/parity-bench.jar`) drives the same
+fixtures for side-by-side comparison with the Rust criterion bench
+under `cqels-benchmarks::parity_fixtures`.

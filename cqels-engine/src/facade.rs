@@ -60,6 +60,27 @@ impl CqelsEngine {
         &self.id
     }
 
+    /// Returns a reference to the engine's RDF store.
+    ///
+    /// The store backs `STATIC { ... }` and `GRAPH <iri> { ... }` patterns
+    /// in registered queries. Use the returned
+    /// [`cqels_core::store::RdfStore`] trait methods to load static data:
+    ///
+    /// ```ignore
+    /// engine.store().load_statements(&triples)?;
+    /// engine.store().load_named_graph("http://ex/g", &triples)?;
+    /// ```
+    ///
+    /// Load before [`register_cqelsql_query`](Self::register_cqelsql_query)
+    /// (or any other registration method) so the compiled query's
+    /// static-pattern resolution sees the data. The store is shared via
+    /// `Arc` — clones reference the same underlying graph, so loading
+    /// later is safe but the query's *first* execution captures whatever
+    /// is present at that point.
+    pub fn store(&self) -> &std::sync::Arc<dyn cqels_core::store::RdfStore> {
+        self.runtime.store()
+    }
+
     /// Creates a named data stream and registers it with the engine.
     ///
     /// Returns a [`DataStream`] that can be used to push elements.
