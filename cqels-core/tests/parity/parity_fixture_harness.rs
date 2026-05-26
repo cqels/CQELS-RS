@@ -281,10 +281,12 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
                     "solutions_multiset" => {
                         pending.extend(op.drain_solutions());
                         let expected = parse_solutions_array(step, "solutions")?;
-                        if let Some(declared) = step.get("expected_vars").and_then(Value::as_array)
-                        {
-                            warn_unused_expected_vars(declared, &expected);
-                        }
+                        // expected_vars is currently informational only.
+                        // The earlier warn_unused_expected_vars check
+                        // false-positived on legitimate M5 (UNBOUND) fixtures
+                        // where a variable IS in expected_vars but never bound
+                        // in any output solution by design. Reported by the
+                        // Rust adapter session 2026-05-26.
                         compare_solution_multisets(&expected, &pending)?;
                         pending.clear();
                     }
@@ -559,24 +561,4 @@ fn compare_solution_multisets(
     Err(ParityMismatch(format!(
         "solution multiset mismatch:\n{diff}"
     )))
-}
-
-#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
-fn warn_unused_expected_vars(declared: &[Value], solutions: &[Solution]) {
-    let mut bound: HashSet<&str> = HashSet::new();
-    for s in solutions {
-        for k in s.keys() {
-            bound.insert(k.as_str());
-        }
-    }
-    for v in declared {
-        if let Some(name) = v.as_str() {
-            if !bound.contains(name) {
-                eprintln!(
-                    "warning: expected_vars lists '{name}' but no solution binds it; \
-                     possible fixture authoring mistake"
-                );
-            }
-        }
-    }
 }
