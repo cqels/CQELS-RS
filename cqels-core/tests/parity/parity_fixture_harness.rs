@@ -95,8 +95,8 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
     ) -> Result<(), ParityMismatch> {
         let text = std::fs::read_to_string(case_file)
             .map_err(|e| ParityMismatch(format!("read {}: {e}", case_file.display())))?;
-        let doc: Value = serde_json::from_str(&text)
-            .map_err(|e| ParityMismatch(format!("parse json: {e}")))?;
+        let doc: Value =
+            serde_json::from_str(&text).map_err(|e| ParityMismatch(format!("parse json: {e}")))?;
 
         validate_payload_kind(&doc, "quads")?;
 
@@ -111,12 +111,18 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
             if let Some(action) = step.get("do").and_then(Value::as_str) {
                 self.drain_into(op, &mut pending);
                 match action {
-                    "emit" => op.emit(step.get("event_time_ms").and_then(Value::as_i64), str_at(step, "quads")),
+                    "emit" => op.emit(
+                        step.get("event_time_ms").and_then(Value::as_i64),
+                        str_at(step, "quads"),
+                    ),
                     "advance_watermark" => op.advance_watermark(i64_at(step, "watermark_ms")),
                     "advance_time" => op.advance_time(i64_at(step, "by_ms")),
                     "cancel" => op.cancel(),
                     "complete" => op.complete(),
-                    "error" => op.error(str_at(step, "error_type"), step.get("message").and_then(Value::as_str)),
+                    "error" => op.error(
+                        str_at(step, "error_type"),
+                        step.get("message").and_then(Value::as_str),
+                    ),
                     other => return Err(ParityMismatch(format!("unknown do: {other}"))),
                 }
                 self.drain_into(op, &mut pending);
@@ -124,18 +130,22 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
                 match kind {
                     "emission" => {
                         self.drain_into(op, &mut pending);
-                        let actual = pending
-                            .pop_front()
-                            .ok_or_else(|| ParityMismatch("expected an emission, none produced".into()))?;
-                        self.assert_emission(str_at(step, "match"), str_at(step, "order"), str_at(step, "quads"), &actual)?;
-                        if let Some(expected_count) = step.get("quad_count").and_then(Value::as_i64) {
+                        let actual = pending.pop_front().ok_or_else(|| {
+                            ParityMismatch("expected an emission, none produced".into())
+                        })?;
+                        self.assert_emission(
+                            str_at(step, "match"),
+                            str_at(step, "order"),
+                            str_at(step, "quads"),
+                            &actual,
+                        )?;
+                        if let Some(expected_count) = step.get("quad_count").and_then(Value::as_i64)
+                        {
                             // Spec B2 set-cardinality check: count non-empty raw N-Quads lines in
                             // the actual emission BEFORE any canonicalize/parse (which would dedup
                             // and mask a bag-leak). See schema docs for the rationale.
-                            let actual_count = actual
-                                .lines()
-                                .filter(|l| !l.trim().is_empty())
-                                .count() as i64;
+                            let actual_count =
+                                actual.lines().filter(|l| !l.trim().is_empty()).count() as i64;
                             if actual_count != expected_count {
                                 return Err(ParityMismatch(format!(
                                     "quad_count mismatch: expected {expected_count}, got \
@@ -154,7 +164,9 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
                         op.advance_time(i64_at(step, "by_ms"));
                         self.drain_into(op, &mut pending);
                         if let Some(e) = pending.front() {
-                            return Err(ParityMismatch(format!("expected no emission within window, got: {e}")));
+                            return Err(ParityMismatch(format!(
+                                "expected no emission within window, got: {e}"
+                            )));
                         }
                     }
                     "terminal" => self.assert_terminal(step, op, &mut pending)?,
@@ -174,7 +186,9 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
         }
         self.drain_into(op, &mut pending);
         if let Some(e) = pending.front() {
-            return Err(ParityMismatch(format!("unconsumed emission at end of script: {e}")));
+            return Err(ParityMismatch(format!(
+                "unconsumed emission at end of script: {e}"
+            )));
         }
         Ok(())
     }
@@ -187,7 +201,8 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
     ) -> Result<(), String> {
         let text = std::fs::read_to_string(case_file).map_err(|e| e.to_string())?;
         let doc: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        let want_fail = doc.get("expect_outcome").and_then(Value::as_str) == Some("comparison-failure");
+        let want_fail =
+            doc.get("expect_outcome").and_then(Value::as_str) == Some("comparison-failure");
         match (self.run_case(case_file, op), want_fail) {
             (Ok(()), false) => Ok(()),
             (Err(_), true) => Ok(()),
@@ -210,8 +225,8 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
     ) -> Result<(), ParityMismatch> {
         let text = std::fs::read_to_string(case_file)
             .map_err(|e| ParityMismatch(format!("read {}: {e}", case_file.display())))?;
-        let doc: Value = serde_json::from_str(&text)
-            .map_err(|e| ParityMismatch(format!("parse json: {e}")))?;
+        let doc: Value =
+            serde_json::from_str(&text).map_err(|e| ParityMismatch(format!("parse json: {e}")))?;
 
         validate_payload_kind(&doc, "solutions")?;
 
@@ -266,8 +281,7 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
                     "solutions_multiset" => {
                         pending.extend(op.drain_solutions());
                         let expected = parse_solutions_array(step, "solutions")?;
-                        if let Some(declared) =
-                            step.get("expected_vars").and_then(Value::as_array)
+                        if let Some(declared) = step.get("expected_vars").and_then(Value::as_array)
                         {
                             warn_unused_expected_vars(declared, &expected);
                         }
@@ -311,9 +325,7 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
                                     )));
                                 }
                             }
-                            if let Some(mc) =
-                                step.get("message_contains").and_then(Value::as_str)
-                            {
+                            if let Some(mc) = step.get("message_contains").and_then(Value::as_str) {
                                 if !t.message.as_deref().unwrap_or("").contains(mc) {
                                     return Err(ParityMismatch(format!(
                                         "error message did not contain: {mc}"
@@ -352,14 +364,21 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
         pending.extend(op.drain_emissions());
     }
 
-    fn assert_emission(&self, mat: &str, order: &str, expected: &str, actual: &str) -> Result<(), ParityMismatch> {
+    fn assert_emission(
+        &self,
+        mat: &str,
+        order: &str,
+        expected: &str,
+        actual: &str,
+    ) -> Result<(), ParityMismatch> {
         // canonical+ordered is permitted by the schema but not meaningfully implemented: canonical
         // comparison normalizes to a sorted dataset, so "ordered" cannot be honored. Fail loudly
         // rather than silently degrade to canonical+unordered (which would mask an ordering bug).
         if mat == "canonical" && order == "ordered" {
             return Err(ParityMismatch(
                 "canonical + ordered is unsupported; use exact+ordered (positional) or \
-                 canonical+unordered (dataset semantics)".into(),
+                 canonical+unordered (dataset semantics)"
+                    .into(),
             ));
         }
         let equal = if mat == "exact" {
@@ -392,24 +411,34 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
     ) -> Result<(), ParityMismatch> {
         self.drain_into(op, pending);
         if let Some(e) = pending.front() {
-            return Err(ParityMismatch(format!("emission produced before terminal: {e}")));
+            return Err(ParityMismatch(format!(
+                "emission produced before terminal: {e}"
+            )));
         }
         let t = op
             .terminal_or_none()
             .ok_or_else(|| ParityMismatch("expected terminal, stream not terminated".into()))?;
         let kind = str_at(step, "kind");
         if kind != t.kind {
-            return Err(ParityMismatch(format!("terminal kind mismatch: expected {kind}, got {}", t.kind)));
+            return Err(ParityMismatch(format!(
+                "terminal kind mismatch: expected {kind}, got {}",
+                t.kind
+            )));
         }
         if kind == "error" {
             if let Some(et) = step.get("error_type").and_then(Value::as_str) {
                 if Some(et.to_string()) != t.error_type {
-                    return Err(ParityMismatch(format!("error_type mismatch: expected {et}, got {:?}", t.error_type)));
+                    return Err(ParityMismatch(format!(
+                        "error_type mismatch: expected {et}, got {:?}",
+                        t.error_type
+                    )));
                 }
             }
             if let Some(mc) = step.get("message_contains").and_then(Value::as_str) {
                 if !t.message.as_deref().unwrap_or("").contains(mc) {
-                    return Err(ParityMismatch(format!("error message did not contain: {mc}")));
+                    return Err(ParityMismatch(format!(
+                        "error message did not contain: {mc}"
+                    )));
                 }
             }
         }
@@ -418,7 +447,11 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
 }
 
 fn normalize_lines(nq: &str) -> Vec<String> {
-    nq.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+    nq.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 fn str_at<'v>(v: &'v Value, key: &str) -> &'v str {
@@ -460,9 +493,7 @@ fn parse_solutions_array(step: &Value, key: &str) -> Result<Vec<Solution>, Parit
         .enumerate()
         .map(|(i, sv)| {
             sv.as_object()
-                .ok_or_else(|| {
-                    ParityMismatch(format!("'{key}'[{i}] is not a JSON object"))
-                })
+                .ok_or_else(|| ParityMismatch(format!("'{key}'[{i}] is not a JSON object")))
                 .and_then(|obj| object_to_solution(obj, &format!("{key}[{i}]")))
         })
         .collect()
@@ -485,10 +516,7 @@ fn object_to_solution(obj: &Map<String, Value>, where_: &str) -> Result<Solution
 #[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
 fn solution_canonical_string(solution: &Solution) -> String {
     // BTreeMap iteration is sorted by key, so this is canonical by construction.
-    let parts: Vec<String> = solution
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let parts: Vec<String> = solution.iter().map(|(k, v)| format!("{k}={v}")).collect();
     format!("{{{}}}", parts.join(", "))
 }
 
