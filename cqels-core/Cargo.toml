@@ -35,3 +35,8 @@ sha2.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }
+# Parity-fixture harness (tests/parity_runner.rs). Pin EXACTLY to match
+# parity-root/canon-cli/Cargo.toml — both must produce byte-identical canonical N-Quads.
+# rdf-canon 0.15.x requires oxrdf 0.2.x; the workspace's oxrdf = "0.2" already resolves there.
+oxttl = "=0.1.8"
+rdf-canon = "=0.15.3"

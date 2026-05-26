@@ -49,6 +49,13 @@ fn sorted_timestamps(count: usize) -> impl Strategy<Value = Vec<i64>> {
     })
 }
 
+/// Strategy for generating UNSORTED timestamp sequences (deliberately includes
+/// out-of-order events). Used by the spec-I1 regression to verify each element
+/// is routed to its natural window even when arrival order is arbitrary.
+fn unsorted_timestamps(count: usize) -> impl Strategy<Value = Vec<i64>> {
+    prop::collection::vec(0i64..100_000, count..=count)
+}
+
 // ---------------------------------------------------------------------------
 // Tumbling Window Properties
 // ---------------------------------------------------------------------------
@@ -147,6 +154,45 @@ proptest! {
                     );
                 }
             }
+            Ok(())
+        })?;
+    }
+
+    /// Parity-spec I1 regression: even under arbitrary arrival order
+    /// (out-of-order events), every element is assigned to its natural
+    /// window — `floor(t / size_ms)`. Pre-fix code merged late events into
+    /// the current open batch, which this property would catch.
+    #[test]
+    fn tumbling_window_routes_out_of_order_to_natural_bucket(
+        timestamps in unsorted_timestamps(30),
+        window_ms in 1000i64..20000,
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let elements = make_elements(timestamps.clone());
+
+        rt.block_on(async {
+            let stream = Box::pin(futures::stream::iter(elements));
+            let window = TumblingWindow::new(Duration::from_millis(window_ms as u64));
+            let batches: Vec<_> = window.apply(stream).collect().await;
+
+            // I1: every element's timestamp lies within its batch's [start, end).
+            for batch in &batches {
+                for elem in &batch.elements {
+                    prop_assert!(
+                        elem.timestamp >= batch.window_start && elem.timestamp < batch.window_end,
+                        "OOO routing bug: element ts={} ended up in window [{}, {})",
+                        elem.timestamp, batch.window_start, batch.window_end
+                    );
+                }
+            }
+
+            // No element lost or duplicated.
+            let mut collected: Vec<i64> =
+                batches.iter().flat_map(|b| b.elements.iter().map(|e| e.timestamp)).collect();
+            collected.sort();
+            let mut expected = timestamps.clone();
+            expected.sort();
+            prop_assert_eq!(collected, expected);
             Ok(())
         })?;
     }

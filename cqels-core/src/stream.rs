@@ -228,6 +228,15 @@ pub enum StreamEvent<T: Clone> {
     Record { value: T, timestamp: i64 },
     /// A watermark indicating that all events up to this timestamp have been received.
     Watermark { timestamp: i64 },
+    /// Upstream signaled an error. Operators consuming `Stream<StreamEvent<T>>`
+    /// should propagate this as their terminal error without flushing any open
+    /// state (parity spec `graph.stream.WindowOperator` B6). Carries the
+    /// fixture-style `error_type` + optional `message` so the terminal can be
+    /// reported verbatim.
+    Error {
+        kind: String,
+        message: Option<String>,
+    },
 }
 
 impl<T: Clone> StreamEvent<T> {
@@ -241,11 +250,22 @@ impl<T: Clone> StreamEvent<T> {
         StreamEvent::Watermark { timestamp }
     }
 
-    /// Returns the timestamp of this event.
+    /// Creates a new upstream-error event.
+    pub fn error(kind: impl Into<String>, message: Option<impl Into<String>>) -> Self {
+        StreamEvent::Error {
+            kind: kind.into(),
+            message: message.map(Into::into),
+        }
+    }
+
+    /// Returns the timestamp of this event. Error events have no timestamp;
+    /// the returned value is `i64::MIN` so they don't accidentally advance
+    /// any time tracker.
     pub fn timestamp(&self) -> i64 {
         match self {
             StreamEvent::Record { timestamp, .. } => *timestamp,
             StreamEvent::Watermark { timestamp } => *timestamp,
+            StreamEvent::Error { .. } => i64::MIN,
         }
     }
 
@@ -259,15 +279,21 @@ impl<T: Clone> StreamEvent<T> {
         matches!(self, StreamEvent::Record { .. })
     }
 
-    /// Returns the value if this is a record, `None` if it's a watermark.
+    /// Returns `true` if this is an upstream-error event.
+    pub fn is_error(&self) -> bool {
+        matches!(self, StreamEvent::Error { .. })
+    }
+
+    /// Returns the value if this is a record, `None` otherwise.
     pub fn value(&self) -> Option<&T> {
         match self {
             StreamEvent::Record { value, .. } => Some(value),
-            StreamEvent::Watermark { .. } => None,
+            StreamEvent::Watermark { .. } | StreamEvent::Error { .. } => None,
         }
     }
 
-    /// Maps the value of this event using the provided function.
+    /// Maps the value of this event using the provided function. Non-record
+    /// events pass through unchanged.
     pub fn map<U: Clone, F: FnOnce(&T) -> U>(&self, f: F) -> StreamEvent<U> {
         match self {
             StreamEvent::Record { value, timestamp } => StreamEvent::Record {
@@ -276,6 +302,10 @@ impl<T: Clone> StreamEvent<T> {
             },
             StreamEvent::Watermark { timestamp } => StreamEvent::Watermark {
                 timestamp: *timestamp,
+            },
+            StreamEvent::Error { kind, message } => StreamEvent::Error {
+                kind: kind.clone(),
+                message: message.clone(),
             },
         }
     }
@@ -295,6 +325,9 @@ impl<T: Clone + fmt::Display> fmt::Display for StreamEvent<T> {
             }
             StreamEvent::Watermark { timestamp } => {
                 write!(f, "Watermark[ts={timestamp}]")
+            }
+            StreamEvent::Error { kind, message } => {
+                write!(f, "Error[kind={kind}, message={message:?}]")
             }
         }
     }
