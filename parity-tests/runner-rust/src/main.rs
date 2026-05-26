@@ -391,12 +391,32 @@ async fn run_workload(workload: &Workload) -> Result<Vec<(BTreeMap<String, Strin
     // Drain. Bindings flow through tokio tasks, so wait a bounded
     // amount of time for the last one to land. The metadata can
     // override the default (1s) for slow tumbling-window workloads.
+    //
+    // Two distinct exit conditions:
+    //
+    // 1. **Known target reached.** When `expected.jsonl` exists and is
+    //    non-empty, `target > 0` and the loop short-circuits as soon
+    //    as we've collected enough bindings. This keeps the regular
+    //    `cargo xtask parity` sweep fast.
+    //
+    // 2. **Unknown target — wait the full timeout.** When
+    //    `expected.jsonl` is absent (`cargo xtask parity diff` /
+    //    `parity capture` on a freshly-authored fixture) or empty
+    //    (workload genuinely expects zero bindings), `target == 0`.
+    //    The old code wrote `if count >= target { break }` here,
+    //    which short-circuits on `0 >= 0` BEFORE any async result
+    //    has had time to land — so `--dump` / `parity capture`
+    //    captured nothing on fresh fixtures (codex P1 finding on PR
+    //    HiveIntel/cqels-rs#71). Guarding the early exit with
+    //    `target > 0` lets the deadline path drive termination
+    //    instead, giving async results the full `drain_ms` to flow
+    //    through.
     let drain_ms = workload.metadata.drain_timeout_ms.unwrap_or(1000);
     let drain_until = std::time::Instant::now() + Duration::from_millis(drain_ms);
     let target = workload.expected.len();
     loop {
         let count = captured.lock().unwrap().len();
-        if count >= target {
+        if target > 0 && count >= target {
             break;
         }
         if std::time::Instant::now() >= drain_until {

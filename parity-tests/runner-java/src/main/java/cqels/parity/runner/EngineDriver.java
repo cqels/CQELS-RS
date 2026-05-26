@@ -145,11 +145,33 @@ public final class EngineDriver {
             // expected binding to land. The fixture metadata can
             // override the default (1s) for slow tumbling-window
             // workloads — same convention as the Rust runner.
+            //
+            // Two distinct exit conditions:
+            //
+            // 1. **Known target reached.** When `expected.jsonl` exists
+            //    and is non-empty, `target > 0` and the loop
+            //    short-circuits as soon as we've collected enough
+            //    bindings. Keeps the regular sweep fast.
+            //
+            // 2. **Unknown target — wait the full timeout.** When
+            //    `expected.jsonl` is absent (newly-authored fixture
+            //    used by `cargo xtask parity diff` / `parity capture`)
+            //    or empty (workload genuinely expects zero bindings),
+            //    `target == 0`. The old loop condition
+            //    `captured.size() < target` evaluates `0 < 0 = false`
+            //    immediately and exits without waiting — so
+            //    `--dump` / `parity capture` captured nothing on fresh
+            //    fixtures (codex P1 finding on PR
+            //    HiveIntel/cqels-rs#71). Guarding the early exit with
+            //    `target > 0` lets the deadline drive termination
+            //    instead, giving async results the full `drainMs` to
+            //    flow through.
             int target = fixture.expected.size();
             int drainMs = fixture.metadata.drainTimeoutMs != null
                     ? fixture.metadata.drainTimeoutMs : 1000;
             long deadline = System.currentTimeMillis() + drainMs;
-            while (captured.size() < target && System.currentTimeMillis() < deadline) {
+            while (System.currentTimeMillis() < deadline
+                    && (target == 0 || captured.size() < target)) {
                 try { Thread.sleep(10); } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
