@@ -22,18 +22,16 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use cqels_core::compiler::pipeline::apply_distinct;
-use cqels_model::{BindingSet, Term, Value};
+use cqels_model::BindingSet;
 use futures::channel::mpsc;
 use futures::executor::block_on_stream;
 use futures::stream::Stream;
 use futures::task::noop_waker_ref;
 use futures::StreamExt;
-use oxttl::NTriplesParser;
 use serde_json::Value as JsonValue;
 
 use crate::parity_fixture_harness::{Solution, SolutionFixtureOperator, Terminal};
-
-const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+use crate::solution_codec::{bindingset_to_solution, solution_to_bindingset};
 
 type SolutionStream = Pin<Box<dyn Stream<Item = BindingSet> + Send>>;
 
@@ -187,52 +185,6 @@ impl SolutionFixtureOperator for DistinctOperatorAdapter {
     }
 }
 
-// ─── Conversions ─────────────────────────────────────────────────────────
-//
-// These mirror the ones in minus_operator_adapter.rs verbatim. When the
-// LL1 canonicalization-symmetry fix lands (parity-session decision pending),
-// extract into a shared `solution_codec.rs` module so all solutions-payload
-// adapters route through one canonicalizer.
-
-fn solution_to_bindingset(sol: &Solution) -> BindingSet {
-    let mut bs = BindingSet::new(0);
-    for (var, term_str) in sol {
-        let value = parse_term_string(term_str).unwrap_or_else(|err| {
-            panic!("parse failed for variable '{var}' = {term_str:?}: {err}")
-        });
-        bs.insert(var.as_str(), value);
-    }
-    bs
-}
-
-fn bindingset_to_solution(bs: &BindingSet) -> Solution {
-    bs.iter()
-        .map(|(var, val)| (var.to_string(), value_to_canonical_nt(val)))
-        .collect()
-}
-
-fn parse_term_string(s: &str) -> Result<Value, String> {
-    let stub = format!("<urn:s> <urn:p> {s} .\n");
-    let mut iter = NTriplesParser::new().for_reader(stub.as_bytes());
-    let triple = iter
-        .next()
-        .ok_or_else(|| format!("expected one triple from stub for term {s:?}"))?
-        .map_err(|e| format!("NTriples parse failed for term {s:?}: {e}"))?;
-    Ok(Value::Term(Term::from(triple.object)))
-}
-
-fn value_to_canonical_nt(v: &Value) -> String {
-    let term = match v {
-        Value::Term(t) => t.clone(),
-        other => match other.to_term() {
-            Some(t) => t,
-            None => return "null".to_string(),
-        },
-    };
-    if let Term::Literal(lit) = &term {
-        if lit.language().is_none() && lit.datatype() == Some(XSD_STRING) {
-            return format!("\"{}\"", lit.value());
-        }
-    }
-    term.to_string()
-}
+// Conversions live in `crate::solution_codec` — shared across every
+// solutions-payload adapter. See the LL1 note there for the eventual
+// canonicalization-symmetry fix.

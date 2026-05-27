@@ -20,6 +20,9 @@ mod tumbling_window_adapter;
 #[path = "parity/sliding_window_adapter.rs"]
 mod sliding_window_adapter;
 
+#[path = "parity/solution_codec.rs"]
+mod solution_codec;
+
 #[path = "parity/minus_operator_adapter.rs"]
 mod minus_operator_adapter;
 
