@@ -175,6 +175,19 @@ impl SolutionFixtureOperator for MinusOperatorAdapter {
     fn terminal_or_none(&self) -> Option<Terminal> {
         self.terminal.clone()
     }
+
+    /// Round-trips each expected term-string through the engine's NTriples parser
+    /// and back through `value_to_canonical_nt` so the harness's multiset comparator
+    /// sees byte-identical canonical form on both expected and actual. Closes the
+    /// xsd:string-canon asymmetry called out in parity-root#3 (2026-05-27).
+    fn canonicalize_solution(&self, solution: Solution) -> Solution {
+        let mut canonical = Solution::new();
+        for (var, term_str) in solution {
+            let parsed = parse_term_string(&term_str);
+            canonical.insert(var, value_to_canonical_nt(&parsed));
+        }
+        canonical
+    }
 }
 
 // ─── Conversions ─────────────────────────────────────────────────────────
@@ -212,12 +225,27 @@ fn parse_term_string(s: &str) -> Value {
 ///
 /// `xsd:string`-typed plain literals collapse to bare `"foo"` (RDF 1.1 canonical form);
 /// other typed/lang literals serialize verbatim via `cqels_model::Term`'s Display impl.
+///
+/// Defensive on `Value::Null`: per spec D5 (parity-root, 2026-05-27), the parity surface
+/// uses absence-only UNBOUND — `Value::Null` is not a valid binding value in this adapter's
+/// pipeline. Hits `unreachable!` with a diagnostic rather than silently emitting the literal
+/// string `"null"` (cqels-rs#78). Today's fixtures never produce `Value::Null` because all
+/// term-strings parse to `Value::Term`; if a future code path leaks a null binding through,
+/// this fails loudly.
 fn value_to_canonical_nt(v: &Value) -> String {
     let term = match v {
         Value::Term(t) => t.clone(),
+        Value::Null => unreachable!(
+            "Value::Null in MinusOperatorAdapter output — parity surface uses absence-only \
+             UNBOUND (spec D5, cqels-rs#78). All fixture inputs parse to Value::Term; a null \
+             binding indicates a latent bug in the adapter or engine."
+        ),
         other => match other.to_term() {
             Some(t) => t,
-            None => return "null".to_string(),
+            None => panic!(
+                "value_to_canonical_nt received a non-Term Value with no to_term() conversion: \
+                 {other:?} — extend the match arm if a new Value variant is added."
+            ),
         },
     };
     if let Term::Literal(lit) = &term {
