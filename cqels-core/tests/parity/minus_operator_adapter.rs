@@ -2,10 +2,12 @@
 //! [`SolutionFixtureOperator`] interface.
 //!
 //! Lifecycle (lazy pipeline): exclusions accumulate via `set_exclusions`; on the first
-//! `emit_solution` (or on `complete`), the adapter constructs a `MinusOperator` plus a
-//! `futures::channel::mpsc::unbounded` channel and pins the operator with `Box::leak` so
-//! [`MinusOperator::apply`]'s `&'a self` lifetime can be `'static`. The leaked operator
-//! lives only for the duration of one fixture run; harness tests are short-lived.
+//! `emit_solution` (or on `complete`), the adapter constructs an `Arc<MinusOperator>` plus a
+//! `futures::channel::mpsc::unbounded` channel and inlines the body of
+//! [`MinusOperator::apply`] (a `Stream::filter` over [`MinusOperator::is_excluded`]) so the
+//! operator can be cloned into the filter closure without needing a `&'static` borrow. The
+//! parity surface is the SPARQL 1.1 §8.3 compatibility check inside `is_excluded`, not the
+//! `apply` call site — both are exercised here.
 //!
 //! Term I/O: each fixture solution carries variable→N-Triples-style strings. Parsing wraps
 //! each term in a stub triple `<urn:s> <urn:p> {term} .` and runs `oxttl::NTriplesParser`,
@@ -18,6 +20,7 @@
 
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use cqels_core::operator::minus::MinusOperator;
@@ -65,17 +68,29 @@ impl MinusOperatorAdapter {
             return;
         }
         let (tx, rx) = mpsc::unbounded::<BindingSet>();
-        // `MinusOperator::apply` borrows `&'a self`; leak a Box so `'a` is `'static`.
-        // Test-only — one tiny leak per fixture run.
-        let op: &'static MinusOperator =
-            Box::leak(Box::new(MinusOperator::excluding(self.exclusions.clone())));
-        let output = op.apply(Box::pin(rx));
+        // `MinusOperator::apply` borrows `&'a self`, which forces the operator
+        // to live as long as the returned stream. Rather than `Box::leak`-ing
+        // for a `'static` borrow, hold the operator in an `Arc` and inline
+        // `apply`'s body — `Stream::filter` over `is_excluded`. Same code path
+        // is exercised; the Arc drops with the closure when the stream ends.
+        let op = Arc::new(MinusOperator::excluding(self.exclusions.clone()));
+        let op_for_filter = Arc::clone(&op);
+        let filtered = rx.filter(move |bs| futures::future::ready(!op_for_filter.is_excluded(bs)));
         self.sender = Some(tx);
-        self.output = Some(output);
+        self.output = Some(Box::pin(filtered));
     }
 
     /// Non-blocking pull from the output stream into `pending`. Stops at the
     /// first `Pending` so the caller can resume later.
+    ///
+    /// **Load-bearing assumption**: `MinusOperator`'s filter predicate is
+    /// synchronous (`futures::future::ready(...)`), so every queued item on
+    /// the upstream channel resolves to `Poll::Ready(Some(_))` in a single
+    /// poll under the `noop_waker`. A `Poll::Pending` therefore means the
+    /// upstream channel is empty, not that we owe a wakeup. If a future
+    /// operator change ever introduces an async predicate, this loop will
+    /// silently strand items in Pending — replace `noop_waker_ref` with a
+    /// proper executor at that point.
     fn drain_ready(&mut self) {
         let Some(output) = self.output.as_mut() else {
             return;
@@ -112,10 +127,22 @@ impl SolutionFixtureOperator for MinusOperatorAdapter {
     }
 
     fn set_exclusions(&mut self, solutions: &[Solution]) {
+        debug_assert!(
+            self.sender.is_none(),
+            "set_exclusions called after the pipeline was constructed — \
+             the leaked-into-closure MinusOperator already snapshotted the \
+             old exclusions and new values would be silently ignored. \
+             The harness should reject this at script level."
+        );
         self.exclusions = solutions.iter().map(solution_to_bindingset).collect();
     }
 
     fn emit_solution(&mut self, solution: &Solution) {
+        debug_assert!(
+            self.terminal.is_none() && !self.cancelled,
+            "emit_solution called after a terminal (complete/error) or cancel — \
+             fixture script bug. Adapter silently no-ops in release builds."
+        );
         if self.cancelled || self.terminal.is_some() {
             return;
         }
@@ -123,7 +150,13 @@ impl SolutionFixtureOperator for MinusOperatorAdapter {
         let Some(sender) = self.sender.as_ref() else {
             return;
         };
-        let _ = sender.unbounded_send(solution_to_bindingset(solution));
+        if let Err(e) = sender.unbounded_send(solution_to_bindingset(solution)) {
+            // The receiver lives inside our own `self.output` filter stream;
+            // a send failure here means the operator dropped its receiver
+            // unexpectedly. Surface to test output so the diagnostic isn't
+            // hidden behind a later multiset mismatch.
+            eprintln!("MinusOperatorAdapter: emit_solution send failed: {e}");
+        }
         self.drain_ready();
     }
 
@@ -182,7 +215,14 @@ impl SolutionFixtureOperator for MinusOperatorAdapter {
 fn solution_to_bindingset(sol: &Solution) -> BindingSet {
     let mut bs = BindingSet::new(0);
     for (var, term_str) in sol {
-        bs.insert(var.as_str(), parse_term_string(term_str));
+        let value = parse_term_string(term_str).unwrap_or_else(|err| {
+            // Caller-side context: include the variable name so a fixture
+            // typo points to the offending JSON field, not just the raw
+            // N-Triples error. The fixture file path comes from the
+            // run_solution_case wrapper one level up.
+            panic!("parse failed for variable '{var}' = {term_str:?}: {err}")
+        });
+        bs.insert(var.as_str(), value);
     }
     bs
 }
@@ -198,14 +238,14 @@ fn bindingset_to_solution(bs: &BindingSet) -> Solution {
 /// Accepts the four N-Triples shapes: `<iri>`, `"literal"`, `"literal"@lang`,
 /// `"literal"^^<datatype>`, and `_:bnode`. Wraps the term in a stub triple to
 /// reuse oxttl's parser rather than rolling a single-term tokenizer.
-fn parse_term_string(s: &str) -> Value {
+fn parse_term_string(s: &str) -> Result<Value, String> {
     let stub = format!("<urn:s> <urn:p> {s} .\n");
     let mut iter = NTriplesParser::new().for_reader(stub.as_bytes());
     let triple = iter
         .next()
-        .unwrap_or_else(|| panic!("expected one triple from stub for term: {s}"))
-        .unwrap_or_else(|e| panic!("NTriples parse failed for term {s}: {e}"));
-    Value::Term(Term::from(triple.object))
+        .ok_or_else(|| format!("expected one triple from stub for term {s:?}"))?
+        .map_err(|e| format!("NTriples parse failed for term {s:?}: {e}"))?;
+    Ok(Value::Term(Term::from(triple.object)))
 }
 
 /// Serializes a `Value` back to N-Triples-style notation matching the fixture format.
