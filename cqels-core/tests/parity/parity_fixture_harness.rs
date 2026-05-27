@@ -8,8 +8,8 @@
 //! Depends only on `serde_json` for parsing. Wire `RdfBackend` to oxrdf / rdf-canon (oxrdfc), and
 //! `FixtureOperator` to your real RxRust / futures::Stream windowing pipeline.
 
-use serde_json::Value;
-use std::collections::{HashSet, VecDeque};
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -42,6 +42,38 @@ pub trait FixtureOperator {
     fn terminal_or_none(&self) -> Option<Terminal>;
 }
 
+/// A single SPARQL solution mapping: variable name → canonical N-Triples term string.
+///
+/// Keys are variable names without a leading `?`. Values are normalized to
+/// the engine's canonical N-Triples form before being placed here, so equality
+/// of `Solution` is byte-equality of canonical term strings. Absence of a
+/// key means the variable is UNBOUND in this solution.
+#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+pub type Solution = BTreeMap<String, String>;
+
+/// Adapt a SPARQL binding-set operator (e.g. `MinusOperator`) to the harness.
+///
+/// Parallel to [`FixtureOperator`] but for solution payloads — used by the
+/// `do_set_exclusions` / `do_emit_solution` / `expect_solutions_multiset`
+/// step family. Cases that drive a [`SolutionFixtureOperator`] should declare
+/// `"payload_kind": "solutions"`.
+#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+pub trait SolutionFixtureOperator {
+    fn configure(&mut self, config: &Value);
+    /// Sets the right-hand side of an anti-join-style operator (MinusOperator).
+    /// Called at most once per case, before any `emit_solution`. Empty list
+    /// is the M4 identity case (Ω₂ = ∅).
+    fn set_exclusions(&mut self, solutions: &[Solution]);
+    fn emit_solution(&mut self, solution: &Solution);
+    fn cancel(&mut self);
+    fn complete(&mut self);
+    fn error(&mut self, error_type: &str, message: Option<&str>);
+    /// Solutions produced since the previous drain, in the operator's emission order.
+    /// The harness's multiset comparator ignores ordering between solutions.
+    fn drain_solutions(&mut self) -> Vec<Solution>;
+    fn terminal_or_none(&self) -> Option<Terminal>;
+}
+
 #[derive(Debug)]
 pub struct ParityMismatch(pub String);
 
@@ -65,6 +97,8 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
             .map_err(|e| ParityMismatch(format!("read {}: {e}", case_file.display())))?;
         let doc: Value =
             serde_json::from_str(&text).map_err(|e| ParityMismatch(format!("parse json: {e}")))?;
+
+        validate_payload_kind(&doc, "quads")?;
 
         op.configure(doc.get("config").unwrap_or(&Value::Null));
         let script = doc["script"]
@@ -177,6 +211,157 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
         }
     }
 
+    /// Run one case driving a [`SolutionFixtureOperator`].
+    ///
+    /// Parallel to [`Self::run_case`] but for SPARQL binding-set operators.
+    /// The case must declare `"payload_kind": "solutions"` (or have no
+    /// `payload_kind` field and use only solution-shaped steps); a mixed-kind
+    /// script is rejected at load time.
+    #[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+    pub fn run_solution_case<O: SolutionFixtureOperator>(
+        &self,
+        case_file: &Path,
+        op: &mut O,
+    ) -> Result<(), ParityMismatch> {
+        let text = std::fs::read_to_string(case_file)
+            .map_err(|e| ParityMismatch(format!("read {}: {e}", case_file.display())))?;
+        let doc: Value =
+            serde_json::from_str(&text).map_err(|e| ParityMismatch(format!("parse json: {e}")))?;
+
+        validate_payload_kind(&doc, "solutions")?;
+
+        op.configure(doc.get("config").unwrap_or(&Value::Null));
+        let script = doc["script"]
+            .as_array()
+            .ok_or_else(|| ParityMismatch("script is not an array".into()))?;
+
+        let mut pending: Vec<Solution> = Vec::new();
+        let mut exclusions_set = false;
+        let mut emitted_solution = false;
+
+        for step in script {
+            if let Some(action) = step.get("do").and_then(Value::as_str) {
+                pending.extend(op.drain_solutions());
+                match action {
+                    "set_exclusions" => {
+                        if exclusions_set {
+                            return Err(ParityMismatch(
+                                "do_set_exclusions appears more than once".into(),
+                            ));
+                        }
+                        if emitted_solution {
+                            return Err(ParityMismatch(
+                                "do_set_exclusions must precede any do_emit_solution".into(),
+                            ));
+                        }
+                        let solutions = parse_solutions_array(step, "solutions")?;
+                        op.set_exclusions(&solutions);
+                        exclusions_set = true;
+                    }
+                    "emit_solution" => {
+                        let solution = parse_solution_object(step, "solution")?;
+                        op.emit_solution(&solution);
+                        emitted_solution = true;
+                    }
+                    "cancel" => op.cancel(),
+                    "complete" => op.complete(),
+                    "error" => op.error(
+                        str_at(step, "error_type"),
+                        step.get("message").and_then(Value::as_str),
+                    ),
+                    other => {
+                        return Err(ParityMismatch(format!(
+                            "step '{other}' is not valid in a solutions-payload script"
+                        )));
+                    }
+                }
+                pending.extend(op.drain_solutions());
+            } else if let Some(kind) = step.get("expect").and_then(Value::as_str) {
+                match kind {
+                    "solutions_multiset" => {
+                        pending.extend(op.drain_solutions());
+                        let expected = parse_solutions_array(step, "solutions")?;
+                        // expected_vars is currently informational only.
+                        // The earlier warn_unused_expected_vars check
+                        // false-positived on legitimate M5 (UNBOUND) fixtures
+                        // where a variable IS in expected_vars but never bound
+                        // in any output solution by design. Reported by the
+                        // Rust adapter session 2026-05-26.
+                        compare_solution_multisets(&expected, &pending)?;
+                        pending.clear();
+                    }
+                    "no_solution" => {
+                        pending.extend(op.drain_solutions());
+                        if !pending.is_empty() {
+                            return Err(ParityMismatch(format!(
+                                "expected no solution, got {} pending: {}",
+                                pending.len(),
+                                solutions_summary(&pending),
+                            )));
+                        }
+                    }
+                    "terminal" => {
+                        pending.extend(op.drain_solutions());
+                        if !pending.is_empty() {
+                            return Err(ParityMismatch(format!(
+                                "solution(s) produced before terminal: {}",
+                                solutions_summary(&pending),
+                            )));
+                        }
+                        let t = op.terminal_or_none().ok_or_else(|| {
+                            ParityMismatch("expected terminal, stream not terminated".into())
+                        })?;
+                        let want_kind = str_at(step, "kind");
+                        if want_kind != t.kind {
+                            return Err(ParityMismatch(format!(
+                                "terminal kind mismatch: expected {want_kind}, got {}",
+                                t.kind
+                            )));
+                        }
+                        if want_kind == "error" {
+                            if let Some(et) = step.get("error_type").and_then(Value::as_str) {
+                                if Some(et.to_string()) != t.error_type {
+                                    return Err(ParityMismatch(format!(
+                                        "error_type mismatch: expected {et}, got {:?}",
+                                        t.error_type
+                                    )));
+                                }
+                            }
+                            if let Some(mc) = step.get("message_contains").and_then(Value::as_str) {
+                                if !t.message.as_deref().unwrap_or("").contains(mc) {
+                                    return Err(ParityMismatch(format!(
+                                        "error message did not contain: {mc}"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    "no_terminal" => {
+                        if let Some(t) = op.terminal_or_none() {
+                            return Err(ParityMismatch(format!(
+                                "expected no terminal, got: kind={} error_type={:?} message={:?}",
+                                t.kind, t.error_type, t.message,
+                            )));
+                        }
+                    }
+                    other => {
+                        return Err(ParityMismatch(format!(
+                            "expect '{other}' is not valid in a solutions-payload script"
+                        )));
+                    }
+                }
+            }
+        }
+        pending.extend(op.drain_solutions());
+        if !pending.is_empty() {
+            return Err(ParityMismatch(format!(
+                "unconsumed solution(s) at end of script: {}",
+                solutions_summary(&pending),
+            )));
+        }
+        Ok(())
+    }
+
     fn drain_into<O: FixtureOperator>(&self, op: &mut O, pending: &mut VecDeque<String>) {
         pending.extend(op.drain_emissions());
     }
@@ -277,4 +462,103 @@ fn str_at<'v>(v: &'v Value, key: &str) -> &'v str {
 
 fn i64_at(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+fn validate_payload_kind(doc: &Value, expected: &str) -> Result<(), ParityMismatch> {
+    if let Some(kind) = doc.get("payload_kind").and_then(Value::as_str) {
+        if kind != expected {
+            return Err(ParityMismatch(format!(
+                "payload_kind '{kind}' on the case does not match this run method (expected '{expected}'). \
+                 Use run_case for 'quads' and run_solution_case for 'solutions'."
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+fn parse_solution_object(step: &Value, key: &str) -> Result<Solution, ParityMismatch> {
+    let obj = step
+        .get(key)
+        .and_then(Value::as_object)
+        .ok_or_else(|| ParityMismatch(format!("step missing '{key}' object")))?;
+    object_to_solution(obj, key)
+}
+
+#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+fn parse_solutions_array(step: &Value, key: &str) -> Result<Vec<Solution>, ParityMismatch> {
+    let arr = step
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| ParityMismatch(format!("step missing '{key}' array")))?;
+    arr.iter()
+        .enumerate()
+        .map(|(i, sv)| {
+            sv.as_object()
+                .ok_or_else(|| ParityMismatch(format!("'{key}'[{i}] is not a JSON object")))
+                .and_then(|obj| object_to_solution(obj, &format!("{key}[{i}]")))
+        })
+        .collect()
+}
+
+#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+fn object_to_solution(obj: &Map<String, Value>, where_: &str) -> Result<Solution, ParityMismatch> {
+    let mut solution = Solution::new();
+    for (var, term) in obj {
+        let term_str = term.as_str().ok_or_else(|| {
+            ParityMismatch(format!(
+                "{where_}.'{var}' is not a string (terms are N-Triples-style strings)"
+            ))
+        })?;
+        solution.insert(var.clone(), term_str.to_string());
+    }
+    Ok(solution)
+}
+
+#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+fn solution_canonical_string(solution: &Solution) -> String {
+    // BTreeMap iteration is sorted by key, so this is canonical by construction.
+    let parts: Vec<String> = solution.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{{{}}}", parts.join(", "))
+}
+
+#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+fn solutions_summary(solutions: &[Solution]) -> String {
+    let mut bag: Vec<String> = solutions.iter().map(solution_canonical_string).collect();
+    bag.sort();
+    bag.join(" | ")
+}
+
+#[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
+fn compare_solution_multisets(
+    expected: &[Solution],
+    actual: &[Solution],
+) -> Result<(), ParityMismatch> {
+    let mut want: HashMap<String, i64> = HashMap::new();
+    for s in expected {
+        *want.entry(solution_canonical_string(s)).or_insert(0) += 1;
+    }
+    let mut got: HashMap<String, i64> = HashMap::new();
+    for s in actual {
+        *got.entry(solution_canonical_string(s)).or_insert(0) += 1;
+    }
+    if want == got {
+        return Ok(());
+    }
+    let mut diff = String::new();
+    let mut keys: HashSet<&String> = HashSet::new();
+    keys.extend(want.keys());
+    keys.extend(got.keys());
+    let mut sorted_keys: Vec<&String> = keys.into_iter().collect();
+    sorted_keys.sort();
+    for k in sorted_keys {
+        let w = want.get(k).copied().unwrap_or(0);
+        let g = got.get(k).copied().unwrap_or(0);
+        if w != g {
+            diff.push_str(&format!("  {k}: expected ×{w}, got ×{g}\n"));
+        }
+    }
+    Err(ParityMismatch(format!(
+        "solution multiset mismatch:\n{diff}"
+    )))
 }

@@ -20,8 +20,12 @@ mod tumbling_window_adapter;
 #[path = "parity/sliding_window_adapter.rs"]
 mod sliding_window_adapter;
 
+#[path = "parity/minus_operator_adapter.rs"]
+mod minus_operator_adapter;
+
 use std::path::{Path, PathBuf};
 
+use minus_operator_adapter::MinusOperatorAdapter;
 use oxrdf_backend::OxRdfBackend;
 use parity_fixture_harness::{FixtureOperator, Harness, Terminal};
 use sliding_window_adapter::SlidingWindowAdapter;
@@ -130,6 +134,25 @@ fn sliding_window_operator_parity() {
     for f in cases {
         let mut adapter = SlidingWindowAdapter::new();
         h.run_case(&f, &mut adapter)
+            .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
+    }
+}
+
+/// Parity corpus for `sparql.operator.MinusOperator`. Uses the solutions-payload
+/// dispatch (`run_solution_case`) rather than the quads dispatch — every case
+/// under `parity/fixtures/minus-operator/` must declare `"payload_kind": "solutions"`.
+#[test]
+fn minus_operator_parity() {
+    if skip_if_no_fixtures("minus_operator_parity") {
+        return;
+    }
+    let backend = OxRdfBackend;
+    let h = Harness::new(&backend);
+    let cases = case_files("minus-operator");
+    assert!(!cases.is_empty(), "no minus-operator cases found");
+    for f in cases {
+        let mut adapter = MinusOperatorAdapter::new();
+        h.run_solution_case(&f, &mut adapter)
             .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
     }
 }
