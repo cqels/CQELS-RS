@@ -47,9 +47,16 @@ pub(crate) fn solution_to_bindingset(sol: &Solution) -> BindingSet {
 /// name → canonical N-Triples term string). Iteration order is
 /// HashMap-undefined, but Solution is a BTreeMap so the final result is
 /// sorted by variable name regardless.
+///
+/// `Value::Null` bindings are **dropped** from the output (D3.3 alignment
+/// with the Java adapter's `if (v == null) continue` defensive guard, per
+/// CROSS_REVIEW_CHECKLIST.md D5/D3.3 and spec D5). Operators never produce
+/// `Value::Null` in practice today, but if one ever leaks in, the wire
+/// format's absent-key-means-UNBOUND convention says "drop", not "emit
+/// the string 'null'".
 pub(crate) fn bindingset_to_solution(bs: &BindingSet) -> Solution {
     bs.iter()
-        .map(|(var, val)| (var.to_string(), value_to_canonical_nt(val)))
+        .filter_map(|(var, val)| value_to_canonical_nt(val).map(|nt| (var.to_string(), nt)))
         .collect()
 }
 
@@ -72,18 +79,20 @@ pub(crate) fn parse_term_string(s: &str) -> Result<Value, String> {
 /// format. `xsd:string`-typed plain literals collapse to bare `"foo"` (RDF
 /// 1.1 canonical form); other typed/lang literals serialize verbatim via
 /// [`cqels_model::Term`]'s `Display` impl.
-pub(crate) fn value_to_canonical_nt(v: &Value) -> String {
+///
+/// Returns `None` for [`Value::Null`] — under the wire format's
+/// absent-key-means-UNBOUND convention, a null binding doesn't belong in
+/// the output. Matches the Java adapter's `if (v == null) continue`
+/// shape (CROSS_REVIEW_CHECKLIST D3.3, spec D5).
+pub(crate) fn value_to_canonical_nt(v: &Value) -> Option<String> {
     let term = match v {
         Value::Term(t) => t.clone(),
-        other => match other.to_term() {
-            Some(t) => t,
-            None => return "null".to_string(),
-        },
+        other => other.to_term()?,
     };
     if let Term::Literal(lit) = &term {
         if lit.language().is_none() && lit.datatype() == Some(XSD_STRING) {
-            return format!("\"{}\"", lit.value());
+            return Some(format!("\"{}\"", lit.value()));
         }
     }
-    term.to_string()
+    Some(term.to_string())
 }
