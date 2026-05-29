@@ -72,6 +72,17 @@ pub trait SolutionFixtureOperator {
     /// The harness's multiset comparator ignores ordering between solutions.
     fn drain_solutions(&mut self) -> Vec<Solution>;
     fn terminal_or_none(&self) -> Option<Terminal>;
+
+    /// Normalizes each term-string in a fixture's expected solution through the
+    /// engine's RDF term parser, returning a `Solution` whose values are in
+    /// byte-identical canonical NTriples form to whatever this adapter produces
+    /// from `drain_solutions`. The default impl is identity — override it on
+    /// SPARQL-op adapters whose engine emits a normalized form (e.g.
+    /// `"foo"^^xsd:string` → `"foo"`) to keep fixture-author flexibility
+    /// without breaking the multiset comparator (parity-root#3, 2026-05-27).
+    fn canonicalize_solution(&self, solution: Solution) -> Solution {
+        solution
+    }
 }
 
 #[derive(Debug)]
@@ -263,12 +274,46 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
                         op.emit_solution(&solution);
                         emitted_solution = true;
                     }
-                    "cancel" => op.cancel(),
+                    "cancel" => {
+                        // Spec M-S4 (parity-root#5): require an explicit
+                        // drain-expect before cancel so pre-cancel emissions
+                        // are observable. Fixture authors get a clear
+                        // diagnostic at the offending step rather than the
+                        // misleading end-of-script "unconsumed solution" tail.
+                        pending.extend(op.drain_solutions());
+                        if !pending.is_empty() {
+                            return Err(ParityMismatch(format!(
+                                "{} pending solution(s) at do: cancel — explicit \
+                                 expect: solutions_multiset (or expect: no_solution) \
+                                 required immediately before do: cancel (M-S4 / \
+                                 parity-root#5). Pending: {}",
+                                pending.len(),
+                                solutions_summary(&pending),
+                            )));
+                        }
+                        op.cancel();
+                    }
                     "complete" => op.complete(),
-                    "error" => op.error(
-                        str_at(step, "error_type"),
-                        step.get("message").and_then(Value::as_str),
-                    ),
+                    "error" => {
+                        // Spec M-S2 (parity-root#4): require an explicit
+                        // drain-expect before error so pre-error emissions
+                        // are observable.
+                        pending.extend(op.drain_solutions());
+                        if !pending.is_empty() {
+                            return Err(ParityMismatch(format!(
+                                "{} pending solution(s) at do: error — explicit \
+                                 expect: solutions_multiset (or expect: no_solution) \
+                                 required immediately before do: error (M-S2 / \
+                                 parity-root#4). Pending: {}",
+                                pending.len(),
+                                solutions_summary(&pending),
+                            )));
+                        }
+                        op.error(
+                            str_at(step, "error_type"),
+                            step.get("message").and_then(Value::as_str),
+                        );
+                    }
                     other => {
                         return Err(ParityMismatch(format!(
                             "step '{other}' is not valid in a solutions-payload script"
@@ -280,7 +325,18 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
                 match kind {
                     "solutions_multiset" => {
                         pending.extend(op.drain_solutions());
-                        let expected = parse_solutions_array(step, "solutions")?;
+                        let raw_expected = parse_solutions_array(step, "solutions")?;
+                        // Run each expected solution through the adapter's
+                        // canonicalize_solution (parity-root#3, 2026-05-27):
+                        // default impl is identity; SPARQL-op adapters whose
+                        // engine emits a normalized form (e.g. xsd:string →
+                        // bare literal) override to round-trip the term string
+                        // through their parser so the comparator sees
+                        // byte-identical canonical NTriples on both sides.
+                        let expected: Vec<Solution> = raw_expected
+                            .into_iter()
+                            .map(|s| op.canonicalize_solution(s))
+                            .collect();
                         // expected_vars is currently informational only.
                         // The earlier warn_unused_expected_vars check
                         // false-positived on legitimate M5 (UNBOUND) fixtures
@@ -518,8 +574,15 @@ fn object_to_solution(obj: &Map<String, Value>, where_: &str) -> Result<Solution
 #[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters
 fn solution_canonical_string(solution: &Solution) -> String {
     // BTreeMap iteration is sorted by key, so this is canonical by construction.
-    let parts: Vec<String> = solution.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    format!("{{{}}}", parts.join(", "))
+    // Encoded as a JSON array of [key, value] pairs to avoid the `=` / `, `
+    // ambiguity that bit the multiset comparator when literal values legally
+    // contained those characters (parity-root#6, 2026-05-27). serde_json
+    // handles all the string-escaping; the result is unambiguous + readable.
+    let pairs: Vec<[String; 2]> = solution
+        .iter()
+        .map(|(k, v)| [k.clone(), v.clone()])
+        .collect();
+    serde_json::to_string(&pairs).expect("serde_json::to_string on Vec<[String;2]> never fails")
 }
 
 #[allow(dead_code)] // used by future MinusOperator + other SPARQL-op adapters

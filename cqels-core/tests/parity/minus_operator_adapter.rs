@@ -33,7 +33,9 @@ use futures::StreamExt;
 use serde_json::Value as JsonValue;
 
 use crate::parity_fixture_harness::{Solution, SolutionFixtureOperator, Terminal};
-use crate::solution_codec::{bindingset_to_solution, solution_to_bindingset};
+use crate::solution_codec::{
+    bindingset_to_solution, parse_term_string, solution_to_bindingset, value_to_canonical_nt,
+};
 
 type SolutionStream = Pin<Box<dyn Stream<Item = BindingSet> + Send>>;
 
@@ -205,6 +207,20 @@ impl SolutionFixtureOperator for MinusOperatorAdapter {
 
     fn terminal_or_none(&self) -> Option<Terminal> {
         self.terminal.clone()
+    }
+
+    /// Round-trips each expected term-string through the engine's NTriples parser
+    /// and back through `value_to_canonical_nt` so the harness's multiset comparator
+    /// sees byte-identical canonical form on both expected and actual. Closes the
+    /// xsd:string-canon asymmetry called out in parity-root#3 (2026-05-27).
+    fn canonicalize_solution(&self, solution: Solution) -> Solution {
+        let mut canonical = Solution::new();
+        for (var, term_str) in solution {
+            let parsed = parse_term_string(&term_str)
+                .unwrap_or_else(|err| panic!("canonicalize parse failed for {term_str:?}: {err}"));
+            canonical.insert(var, value_to_canonical_nt(&parsed));
+        }
+        canonical
     }
 }
 
