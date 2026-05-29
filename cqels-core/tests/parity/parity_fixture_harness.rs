@@ -578,7 +578,10 @@ fn solution_canonical_string(solution: &Solution) -> String {
     // ambiguity that bit the multiset comparator when literal values legally
     // contained those characters (parity-root#6, 2026-05-27). serde_json
     // handles all the string-escaping; the result is unambiguous + readable.
-    let pairs: Vec<[String; 2]> = solution.iter().map(|(k, v)| [k.clone(), v.clone()]).collect();
+    let pairs: Vec<[String; 2]> = solution
+        .iter()
+        .map(|(k, v)| [k.clone(), v.clone()])
+        .collect();
     serde_json::to_string(&pairs).expect("serde_json::to_string on Vec<[String;2]> never fails")
 }
 

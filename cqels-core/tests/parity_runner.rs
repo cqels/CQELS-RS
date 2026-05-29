@@ -20,11 +20,18 @@ mod tumbling_window_adapter;
 #[path = "parity/sliding_window_adapter.rs"]
 mod sliding_window_adapter;
 
+#[path = "parity/solution_codec.rs"]
+mod solution_codec;
+
 #[path = "parity/minus_operator_adapter.rs"]
 mod minus_operator_adapter;
 
+#[path = "parity/distinct_operator_adapter.rs"]
+mod distinct_operator_adapter;
+
 use std::path::{Path, PathBuf};
 
+use distinct_operator_adapter::DistinctOperatorAdapter;
 use minus_operator_adapter::MinusOperatorAdapter;
 use oxrdf_backend::OxRdfBackend;
 use parity_fixture_harness::{FixtureOperator, Harness, Terminal};
@@ -152,6 +159,34 @@ fn minus_operator_parity() {
     assert!(!cases.is_empty(), "no minus-operator cases found");
     for f in cases {
         let mut adapter = MinusOperatorAdapter::new();
+        h.run_solution_case(&f, &mut adapter)
+            .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
+    }
+}
+
+/// Parity corpus for `sparql.operator.Distinct` (multiset → set collapse over
+/// solution mappings). Same dispatch shape as `minus_operator_parity` but with
+/// `DistinctOperatorAdapter`. The corpus is partial today (autonomous Stage B
+/// — LL1-safe fixtures only); literal-heavy cases follow once the
+/// canonicalization-symmetry decision lands. If no cases exist yet, the test
+/// no-ops with a printed skip so it doesn't fail-fast.
+#[test]
+fn distinct_operator_parity() {
+    if skip_if_no_fixtures("distinct_operator_parity") {
+        return;
+    }
+    let backend = OxRdfBackend;
+    let h = Harness::new(&backend);
+    let cases = case_files("distinct-operator");
+    if cases.is_empty() {
+        eprintln!(
+            "[parity_runner] distinct_operator_parity: no fixtures under \
+             parity/fixtures/distinct-operator/ yet; skipping."
+        );
+        return;
+    }
+    for f in cases {
+        let mut adapter = DistinctOperatorAdapter::new();
         h.run_solution_case(&f, &mut adapter)
             .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
     }

@@ -2,10 +2,12 @@
 //! [`SolutionFixtureOperator`] interface.
 //!
 //! Lifecycle (lazy pipeline): exclusions accumulate via `set_exclusions`; on the first
-//! `emit_solution` (or on `complete`), the adapter constructs a `MinusOperator` plus a
-//! `futures::channel::mpsc::unbounded` channel and pins the operator with `Box::leak` so
-//! [`MinusOperator::apply`]'s `&'a self` lifetime can be `'static`. The leaked operator
-//! lives only for the duration of one fixture run; harness tests are short-lived.
+//! `emit_solution` (or on `complete`), the adapter constructs an `Arc<MinusOperator>` plus a
+//! `futures::channel::mpsc::unbounded` channel and inlines the body of
+//! [`MinusOperator::apply`] (a `Stream::filter` over [`MinusOperator::is_excluded`]) so the
+//! operator can be cloned into the filter closure without needing a `&'static` borrow. The
+//! parity surface is the SPARQL 1.1 §8.3 compatibility check inside `is_excluded`, not the
+//! `apply` call site — both are exercised here.
 //!
 //! Term I/O: each fixture solution carries variable→N-Triples-style strings. Parsing wraps
 //! each term in a stub triple `<urn:s> <urn:p> {term} .` and runs `oxttl::NTriplesParser`,
@@ -18,21 +20,22 @@
 
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use cqels_core::operator::minus::MinusOperator;
-use cqels_model::{BindingSet, Term, Value};
+use cqels_model::BindingSet;
 use futures::channel::mpsc;
 use futures::executor::block_on_stream;
 use futures::stream::Stream;
 use futures::task::noop_waker_ref;
 use futures::StreamExt;
-use oxttl::NTriplesParser;
 use serde_json::Value as JsonValue;
 
 use crate::parity_fixture_harness::{Solution, SolutionFixtureOperator, Terminal};
-
-const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+use crate::solution_codec::{
+    bindingset_to_solution, parse_term_string, solution_to_bindingset, value_to_canonical_nt,
+};
 
 type SolutionStream = Pin<Box<dyn Stream<Item = BindingSet> + Send>>;
 
@@ -65,17 +68,29 @@ impl MinusOperatorAdapter {
             return;
         }
         let (tx, rx) = mpsc::unbounded::<BindingSet>();
-        // `MinusOperator::apply` borrows `&'a self`; leak a Box so `'a` is `'static`.
-        // Test-only — one tiny leak per fixture run.
-        let op: &'static MinusOperator =
-            Box::leak(Box::new(MinusOperator::excluding(self.exclusions.clone())));
-        let output = op.apply(Box::pin(rx));
+        // `MinusOperator::apply` borrows `&'a self`, which forces the operator
+        // to live as long as the returned stream. Rather than `Box::leak`-ing
+        // for a `'static` borrow, hold the operator in an `Arc` and inline
+        // `apply`'s body — `Stream::filter` over `is_excluded`. Same code path
+        // is exercised; the Arc drops with the closure when the stream ends.
+        let op = Arc::new(MinusOperator::excluding(self.exclusions.clone()));
+        let op_for_filter = Arc::clone(&op);
+        let filtered = rx.filter(move |bs| futures::future::ready(!op_for_filter.is_excluded(bs)));
         self.sender = Some(tx);
-        self.output = Some(output);
+        self.output = Some(Box::pin(filtered));
     }
 
     /// Non-blocking pull from the output stream into `pending`. Stops at the
     /// first `Pending` so the caller can resume later.
+    ///
+    /// **Load-bearing assumption**: `MinusOperator`'s filter predicate is
+    /// synchronous (`futures::future::ready(...)`), so every queued item on
+    /// the upstream channel resolves to `Poll::Ready(Some(_))` in a single
+    /// poll under the `noop_waker`. A `Poll::Pending` therefore means the
+    /// upstream channel is empty, not that we owe a wakeup. If a future
+    /// operator change ever introduces an async predicate, this loop will
+    /// silently strand items in Pending — replace `noop_waker_ref` with a
+    /// proper executor at that point.
     fn drain_ready(&mut self) {
         let Some(output) = self.output.as_mut() else {
             return;
@@ -112,10 +127,22 @@ impl SolutionFixtureOperator for MinusOperatorAdapter {
     }
 
     fn set_exclusions(&mut self, solutions: &[Solution]) {
+        debug_assert!(
+            self.sender.is_none(),
+            "set_exclusions called after the pipeline was constructed — \
+             the leaked-into-closure MinusOperator already snapshotted the \
+             old exclusions and new values would be silently ignored. \
+             The harness should reject this at script level."
+        );
         self.exclusions = solutions.iter().map(solution_to_bindingset).collect();
     }
 
     fn emit_solution(&mut self, solution: &Solution) {
+        debug_assert!(
+            self.terminal.is_none() && !self.cancelled,
+            "emit_solution called after a terminal (complete/error) or cancel — \
+             fixture script bug. Adapter silently no-ops in release builds."
+        );
         if self.cancelled || self.terminal.is_some() {
             return;
         }
@@ -123,7 +150,13 @@ impl SolutionFixtureOperator for MinusOperatorAdapter {
         let Some(sender) = self.sender.as_ref() else {
             return;
         };
-        let _ = sender.unbounded_send(solution_to_bindingset(solution));
+        if let Err(e) = sender.unbounded_send(solution_to_bindingset(solution)) {
+            // The receiver lives inside our own `self.output` filter stream;
+            // a send failure here means the operator dropped its receiver
+            // unexpectedly. Surface to test output so the diagnostic isn't
+            // hidden behind a later multiset mismatch.
+            eprintln!("MinusOperatorAdapter: emit_solution send failed: {e}");
+        }
         self.drain_ready();
     }
 
@@ -183,75 +216,14 @@ impl SolutionFixtureOperator for MinusOperatorAdapter {
     fn canonicalize_solution(&self, solution: Solution) -> Solution {
         let mut canonical = Solution::new();
         for (var, term_str) in solution {
-            let parsed = parse_term_string(&term_str);
+            let parsed = parse_term_string(&term_str)
+                .unwrap_or_else(|err| panic!("canonicalize parse failed for {term_str:?}: {err}"));
             canonical.insert(var, value_to_canonical_nt(&parsed));
         }
         canonical
     }
 }
 
-// ─── Conversions ─────────────────────────────────────────────────────────
-
-fn solution_to_bindingset(sol: &Solution) -> BindingSet {
-    let mut bs = BindingSet::new(0);
-    for (var, term_str) in sol {
-        bs.insert(var.as_str(), parse_term_string(term_str));
-    }
-    bs
-}
-
-fn bindingset_to_solution(bs: &BindingSet) -> Solution {
-    bs.iter()
-        .map(|(var, val)| (var.to_string(), value_to_canonical_nt(val)))
-        .collect()
-}
-
-/// Parses an N-Triples-style term string into a `cqels_model::Value`.
-///
-/// Accepts the four N-Triples shapes: `<iri>`, `"literal"`, `"literal"@lang`,
-/// `"literal"^^<datatype>`, and `_:bnode`. Wraps the term in a stub triple to
-/// reuse oxttl's parser rather than rolling a single-term tokenizer.
-fn parse_term_string(s: &str) -> Value {
-    let stub = format!("<urn:s> <urn:p> {s} .\n");
-    let mut iter = NTriplesParser::new().for_reader(stub.as_bytes());
-    let triple = iter
-        .next()
-        .unwrap_or_else(|| panic!("expected one triple from stub for term: {s}"))
-        .unwrap_or_else(|e| panic!("NTriples parse failed for term {s}: {e}"));
-    Value::Term(Term::from(triple.object))
-}
-
-/// Serializes a `Value` back to N-Triples-style notation matching the fixture format.
-///
-/// `xsd:string`-typed plain literals collapse to bare `"foo"` (RDF 1.1 canonical form);
-/// other typed/lang literals serialize verbatim via `cqels_model::Term`'s Display impl.
-///
-/// Defensive on `Value::Null`: per spec D5 (parity-root, 2026-05-27), the parity surface
-/// uses absence-only UNBOUND — `Value::Null` is not a valid binding value in this adapter's
-/// pipeline. Hits `unreachable!` with a diagnostic rather than silently emitting the literal
-/// string `"null"` (cqels-rs#78). Today's fixtures never produce `Value::Null` because all
-/// term-strings parse to `Value::Term`; if a future code path leaks a null binding through,
-/// this fails loudly.
-fn value_to_canonical_nt(v: &Value) -> String {
-    let term = match v {
-        Value::Term(t) => t.clone(),
-        Value::Null => unreachable!(
-            "Value::Null in MinusOperatorAdapter output — parity surface uses absence-only \
-             UNBOUND (spec D5, cqels-rs#78). All fixture inputs parse to Value::Term; a null \
-             binding indicates a latent bug in the adapter or engine."
-        ),
-        other => match other.to_term() {
-            Some(t) => t,
-            None => panic!(
-                "value_to_canonical_nt received a non-Term Value with no to_term() conversion: \
-                 {other:?} — extend the match arm if a new Value variant is added."
-            ),
-        },
-    };
-    if let Term::Literal(lit) = &term {
-        if lit.language().is_none() && lit.datatype() == Some(XSD_STRING) {
-            return format!("\"{}\"", lit.value());
-        }
-    }
-    term.to_string()
-}
+// Conversions live in `crate::solution_codec` — shared across every
+// solutions-payload adapter. See the LL1 note there for the eventual
+// canonicalization-symmetry fix.
