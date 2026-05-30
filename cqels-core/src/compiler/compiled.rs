@@ -341,37 +341,51 @@ impl ContinuousQuery for CompiledCqelsQuery {
         // every batch regardless of its source — they're added to
         // each source's pattern set inside the matcher below.
 
-        // Pre-compute static bindings from RDF store (if available)
+        // Pre-compute static bindings from RDF store (if available).
+        //
+        // `None` means there were no static / named-graph patterns to
+        // resolve, so the stream passes through untouched. `Some(rows)` means
+        // the conjunctive static side was evaluated — `rows` may be empty when
+        // a mandatory pattern matched nothing, in which case the whole query
+        // produces no results (#81).
         let rdf_store = self.rdf_store.clone();
-        let static_bindings: Vec<BindingSet> = if let Some(store) = &rdf_store {
-            let mut accumulated: Vec<BindingSet> = Vec::new();
+        let has_static_patterns = !static_patterns.is_empty() || !named_graph_patterns.is_empty();
+        let static_bindings: Option<Vec<BindingSet>> = match &rdf_store {
+            Some(store) if has_static_patterns => {
+                let mut accumulated: Vec<BindingSet> = Vec::new();
+                // Tracks whether the first pattern has seeded `accumulated`,
+                // kept separate from emptiness: every static / named-graph
+                // pattern is mandatory, so once any returns zero rows the
+                // conjunctive join is empty and `join_binding_sets` keeps it
+                // empty thereafter.
+                let mut initialized = false;
 
-            // Query each static pattern and progressively join results
-            for pattern in &static_patterns {
-                let pattern_results = store.query_pattern(pattern, &prefixes);
-                if accumulated.is_empty() {
-                    accumulated = pattern_results;
-                } else if !pattern_results.is_empty() {
-                    accumulated = join_binding_sets(&accumulated, &pattern_results);
+                for pattern in &static_patterns {
+                    let pattern_results = store.query_pattern(pattern, &prefixes);
+                    accumulated = if initialized {
+                        join_binding_sets(&accumulated, &pattern_results)
+                    } else {
+                        initialized = true;
+                        pattern_results
+                    };
                 }
-            }
 
-            // Query each named graph pattern and join with accumulated results
-            for (graph_uri, patterns) in &named_graph_patterns {
-                for pattern in patterns {
-                    let pattern_results =
-                        store.query_named_graph_pattern(graph_uri, pattern, &prefixes);
-                    if accumulated.is_empty() {
-                        accumulated = pattern_results;
-                    } else if !pattern_results.is_empty() {
-                        accumulated = join_binding_sets(&accumulated, &pattern_results);
+                for (graph_uri, patterns) in &named_graph_patterns {
+                    for pattern in patterns {
+                        let pattern_results =
+                            store.query_named_graph_pattern(graph_uri, pattern, &prefixes);
+                        accumulated = if initialized {
+                            join_binding_sets(&accumulated, &pattern_results)
+                        } else {
+                            initialized = true;
+                            pattern_results
+                        };
                     }
                 }
-            }
 
-            accumulated
-        } else {
-            vec![]
+                Some(accumulated)
+            }
+            _ => None,
         };
 
         // Phase 1: Batch-level pattern matching.
@@ -437,20 +451,27 @@ impl ContinuousQuery for CompiledCqelsQuery {
                 futures::stream::iter(results)
             }));
 
-        // Phase 1b: Join stream bindings with static bindings from RDF store
-        let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
-            if !static_bindings.is_empty() {
-                Box::pin(binding_stream.flat_map(move |bs| {
-                    let joined: Vec<BindingSet> = static_bindings
-                        .iter()
-                        .filter_map(|static_bs| bs.join(static_bs))
-                        .collect();
-                    // If no joins succeed, pass through the original binding
-                    futures::stream::iter(if joined.is_empty() { vec![bs] } else { joined })
-                }))
-            } else {
-                binding_stream
-            };
+        // Phase 1b: Join stream bindings with static bindings from RDF store.
+        //
+        // `None` — no static patterns — leaves the stream untouched. `Some`
+        // means the static side was evaluated as a mandatory conjunction.
+        // When it's empty (`Some([])`, a mandatory pattern matched nothing)
+        // every per-row join fails, so no bindings are emitted — but the input
+        // is still drained rather than the output completing early. Completing
+        // here would end the continuous query's stream, which the engine treats
+        // as termination (`CleanupStream` unregisters it); a satisfiable-later
+        // or simply empty query must instead stay alive and yield nothing while
+        // its input is open (#81).
+        let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> = match static_bindings {
+            Some(static_rows) => Box::pin(binding_stream.flat_map(move |bs| {
+                let joined: Vec<BindingSet> = static_rows
+                    .iter()
+                    .filter_map(|static_bs| bs.join(static_bs))
+                    .collect();
+                futures::stream::iter(joined)
+            })),
+            None => binding_stream,
+        };
 
         // Phase 1c: Apply RSP-QL stream semantics
         let binding_stream =
@@ -1255,11 +1276,20 @@ impl ContinuousQuery for CompiledCypherQuery {
         let limit = definition.limit;
         let group_by = definition.group_by_expressions.clone();
 
-        // Pre-compute static bindings from RDF store for Cypher static/named-graph patterns
+        // Pre-compute static bindings from RDF store for Cypher static/named-graph patterns.
+        //
+        // Same semantics as the CQELS path: `None` means there were no static
+        // / named-graph relationships to resolve (stream passes through),
+        // `Some(rows)` means the conjunctive static side was evaluated and an
+        // empty `rows` (a mandatory relationship matched nothing) means the
+        // query produces no results (#81).
         let rdf_store = self.rdf_store.clone();
-        let static_bindings: Vec<BindingSet> = if let Some(store) = &rdf_store {
+        let static_bindings: Option<Vec<BindingSet>> = if let Some(store) = &rdf_store {
             use crate::parser::ast::PatternSource;
             let mut accumulated: Vec<BindingSet> = Vec::new();
+            // Separate from emptiness: each static/named-graph relationship is
+            // mandatory, so once any returns zero rows the join stays empty.
+            let mut initialized = false;
 
             for pg in &definition.pattern_groups {
                 if pg.source == PatternSource::Static || pg.source == PatternSource::Graph {
@@ -1295,18 +1325,26 @@ impl ContinuousQuery for CompiledCypherQuery {
                                 store.query_pattern(&triple_pattern, &prefixes)
                             };
 
-                            if accumulated.is_empty() {
-                                accumulated = pattern_results;
-                            } else if !pattern_results.is_empty() {
-                                accumulated = join_binding_sets(&accumulated, &pattern_results);
-                            }
+                            accumulated = if initialized {
+                                join_binding_sets(&accumulated, &pattern_results)
+                            } else {
+                                initialized = true;
+                                pattern_results
+                            };
                         }
                     }
                 }
             }
-            accumulated
+            // `initialized` is true iff at least one static/named-graph
+            // relationship was actually queried; only then is the static side
+            // a real constraint on the stream.
+            if initialized {
+                Some(accumulated)
+            } else {
+                None
+            }
         } else {
-            vec![]
+            None
         };
 
         // Take input streams — merge multiple if available
@@ -1428,19 +1466,22 @@ impl ContinuousQuery for CompiledCypherQuery {
                 futures::stream::iter(all_results)
             }));
 
-        // Phase 1b: Join stream bindings with static bindings from RDF store
-        let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
-            if !static_bindings.is_empty() {
-                Box::pin(binding_stream.flat_map(move |bs| {
-                    let joined: Vec<BindingSet> = static_bindings
-                        .iter()
-                        .filter_map(|static_bs| bs.join(static_bs))
-                        .collect();
-                    futures::stream::iter(if joined.is_empty() { vec![bs] } else { joined })
-                }))
-            } else {
-                binding_stream
-            };
+        // Phase 1b: Join stream bindings with static bindings from RDF store.
+        // See the CQELS path for the `Option` semantics. An empty static side
+        // (`Some([])`, an unmatched mandatory static relationship) emits no
+        // bindings but still drains the input rather than completing early, so
+        // the continuous query stays alive/registered instead of being torn
+        // down by `CleanupStream` (#81).
+        let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> = match static_bindings {
+            Some(static_rows) => Box::pin(binding_stream.flat_map(move |bs| {
+                let joined: Vec<BindingSet> = static_rows
+                    .iter()
+                    .filter_map(|static_bs| bs.join(static_bs))
+                    .collect();
+                futures::stream::iter(joined)
+            })),
+            None => binding_stream,
+        };
 
         // Phase 2: Apply WHERE filter
         let evaluator2 = evaluator.clone();
@@ -1613,6 +1654,164 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results[0].contains("sensor"));
         assert!(results[0].contains("temp"));
+    }
+
+    /// Builds a SELECT query whose static side is an unsatisfiable mandatory
+    /// conjunction: pattern A (`?sensor :locatedIn ?room`) matches one row in
+    /// the store, pattern B (`?room :hasStatus ?status`) matches none. The
+    /// stream pattern binds `?sensor`, compatible with A. Shared by the two
+    /// `#81` regression tests below.
+    fn build_static_unsatisfiable_query() -> CompiledCqelsQuery {
+        use crate::store::OxigraphRdfStore;
+
+        // Store has data for pattern A (?sensor :locatedIn ?room) but NOT
+        // for pattern B (?room :hasStatus ?status) — so B is unmatched.
+        let store = OxigraphRdfStore::new().unwrap();
+        store
+            .load_statements(&[Statement::new(
+                Term::Iri(IriTerm::new("http://example.org/sensor1")),
+                IriTerm::new("http://example.org/locatedIn"),
+                Term::Iri(IriTerm::new("http://example.org/room1")),
+            )])
+            .unwrap();
+
+        let definition = CqelsQueryDefinition {
+            name: None,
+            description: None,
+            query_type: CqelsQueryType::Select,
+            prefixes: HashMap::new(),
+            streams: vec![CqelsStreamDefinition::root("sensors", WindowSpec::now())],
+            named_windows: vec![],
+            static_graphs: vec![],
+            named_graphs: vec![],
+            select_elements: vec![SelectElement::Variable("?sensor".to_string())],
+            distinct: false,
+            pattern_groups: vec![
+                CqelsPatternGroup::Stream {
+                    source: "sensors".to_string(),
+                    patterns: vec![TriplePattern {
+                        subject: "?sensor".to_string(),
+                        predicate: "<http://example.org/temp>".to_string(),
+                        object: "?temp".to_string(),
+                    }],
+                },
+                // Pattern A: matches one row in the store.
+                CqelsPatternGroup::Static {
+                    patterns: vec![TriplePattern {
+                        subject: "?sensor".to_string(),
+                        predicate: "<http://example.org/locatedIn>".to_string(),
+                        object: "?room".to_string(),
+                    }],
+                },
+                // Pattern B (mandatory): matches zero rows in the store.
+                CqelsPatternGroup::Static {
+                    patterns: vec![TriplePattern {
+                        subject: "?room".to_string(),
+                        predicate: "<http://example.org/hasStatus>".to_string(),
+                        object: "?status".to_string(),
+                    }],
+                },
+            ],
+            aggregates: vec![],
+            group_by_variables: vec![],
+            order_by_conditions: vec![],
+            limit: None,
+            operator_hints: OperatorHints::default(),
+            stream_semantics: StreamSemantics::default(),
+            construct_template: vec![],
+            seq_constraint: None,
+        };
+
+        CompiledCqelsQuery {
+            query_string: String::new(),
+            query_id: "test-81".to_string(),
+            definition: Arc::new(definition),
+            filter_expressions: Arc::new(vec![]),
+            bind_expressions: Arc::new(vec![]),
+            order_by_expressions: Arc::new(vec![]),
+            having_expressions: Arc::new(vec![]),
+            aggregate_specs: Arc::new(vec![]),
+            evaluator: Arc::new(ExpressionEvaluator::new()),
+            select_vars: Arc::new(vec!["sensor".to_string()]),
+            rdf_store: Some(Arc::new(store)),
+            self_join_hints: Arc::new(vec![]),
+        }
+    }
+
+    /// A stream element binding `?sensor = sensor1`, compatible with pattern A.
+    fn sensor1_temp_element() -> StreamElement {
+        StreamElement::Rdf(RdfStreamElement::new(
+            Statement::new(
+                Term::Iri(IriTerm::new("http://example.org/sensor1")),
+                IriTerm::new("http://example.org/temp"),
+                Term::Literal(LiteralTerm::new("42")),
+            ),
+            1000,
+        ))
+    }
+
+    /// Regression for #81: two mandatory STATIC patterns where the second
+    /// matches zero rows must yield no results, even when the first matches
+    /// and a stream row is compatible with it. The static side is a
+    /// conjunction — an unmatched mandatory pattern makes it empty, so
+    /// nothing should pass through.
+    #[tokio::test]
+    async fn static_join_empty_mandatory_pattern_yields_no_results() {
+        let query = build_static_unsatisfiable_query();
+
+        let mut inputs = QueryInputs::new();
+        inputs.add_stream(
+            "sensors",
+            Box::pin(futures::stream::iter(vec![sensor1_temp_element()])),
+        );
+
+        let results: Vec<BindingSet> = query.execute(inputs).collect().await;
+        assert_eq!(
+            results.len(),
+            0,
+            "unmatched mandatory STATIC pattern B must empty the conjunctive \
+             static side; got {results:?}"
+        );
+    }
+
+    /// Regression for #81 lifecycle: an unsatisfiable static side must yield no
+    /// bindings *without completing the output stream* while its input is still
+    /// open. A completed stream signals termination to the engine — its
+    /// `CleanupStream` wrapper unregisters the query on `Ready(None)` — so a
+    /// query that merely has no current matches must stay alive and pending,
+    /// not tear itself down. Guards against the earlier `stream::empty()` fix
+    /// that completed immediately and would have unregistered the query.
+    #[tokio::test]
+    async fn static_join_empty_mandatory_pattern_keeps_stream_alive() {
+        use futures::FutureExt;
+
+        let query = build_static_unsatisfiable_query();
+
+        // One compatible element, then a never-completing tail standing in for
+        // a live, still-open source.
+        let input = futures::stream::iter(vec![sensor1_temp_element()])
+            .chain(futures::stream::pending::<StreamElement>());
+        let mut inputs = QueryInputs::new();
+        inputs.add_stream("sensors", Box::pin(input));
+
+        let mut out = query.execute(inputs);
+
+        // Drive the pipeline repeatedly: the element drains (yielding nothing,
+        // since the static side is empty) and the stream must then report
+        // Pending — never Ready(None), which would unregister the query, nor a
+        // spurious binding.
+        for _ in 0..16 {
+            match out.next().now_or_never() {
+                Some(Some(binding)) => {
+                    panic!("unsatisfiable static side emitted a binding: {binding:?}")
+                }
+                Some(None) => panic!(
+                    "static-empty query completed its output stream; the engine \
+                     would unregister it instead of keeping it alive"
+                ),
+                None => {} // Pending — the query is still alive, as required.
+            }
+        }
     }
 
     /// Direct check that [`apply_window_spec`] respects each spec

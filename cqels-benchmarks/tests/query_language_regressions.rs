@@ -654,8 +654,11 @@ async fn test_named_graph_lookup() {
     }
 }
 
+// A mandatory STATIC pattern that matches nothing makes the conjunctive
+// static side empty, so the query yields no results — the stream row does
+// not pass through (see #81).
 #[tokio::test]
-async fn test_static_no_match_passthrough() {
+async fn test_static_no_match_yields_no_results() {
     let store = arc_store();
 
     let query_str = r#"
@@ -686,9 +689,11 @@ async fn test_static_no_match_passthrough() {
     inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
 
     let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
-    assert_eq!(results.len(), 1);
-    assert!(results[0].contains("sensor"));
-    assert!(results[0].contains("temp"));
+    assert_eq!(
+        results.len(),
+        0,
+        "unmatched mandatory STATIC pattern yields no results; got {results:?}"
+    );
 }
 
 #[tokio::test]
