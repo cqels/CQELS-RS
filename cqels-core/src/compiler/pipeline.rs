@@ -1458,7 +1458,27 @@ pub fn apply_distinct(
     }))
 }
 
-/// Produces a deterministic string key for a BindingSet by sorting variable names.
+/// Produces a deterministic string key for a [`BindingSet`] by sorting
+/// variable names and emitting length-prefixed values.
+///
+/// The encoding is `name=<valueLen>:<value>` per binding, joined with `,`,
+/// where `<valueLen>` is the Unicode scalar count of the stringified value.
+/// Length-prefixing guarantees injectivity: RDF terms can legally contain
+/// `,` and `=` in their `Display` form (e.g. a blank node `_:foo,b=_:bar`
+/// would otherwise collide with a two-binding `{a → _:foo, b → _:bar}`
+/// because [`cqels_model::term::BlankNodeTerm`]'s `_:id` Display has no
+/// closing delimiter).
+///
+/// Mirrors the Java side
+/// (`org.cqels.lang.common.computation.SolutionDistinct#solutionKey` in
+/// cqels/claude) which uses the same length-prefix shape with `String#length`
+/// (UTF-16 code units). The two are byte-identical on all-ASCII content,
+/// which covers the entire parity fixture corpus and all SPARQL grammar
+/// productions exercised by the unit-4 spec. Supplementary-plane Unicode
+/// content would diverge by ratio 1:2; no fixture exercises it.
+///
+/// See `parity/specs/distinct-operator.parity.md` D-D1 for the cross-engine
+/// contract.
 fn deterministic_binding_key(bs: &BindingSet) -> String {
     let mut pairs: Vec<(String, String)> = bs
         .variables()
@@ -1477,6 +1497,8 @@ fn deterministic_binding_key(bs: &BindingSet) -> String {
         }
         key.push_str(k);
         key.push('=');
+        key.push_str(&v.chars().count().to_string());
+        key.push(':');
         key.push_str(v);
     }
     key
@@ -2596,5 +2618,93 @@ mod tests {
 
         let results = match_cypher_pattern(&pattern, &stmts, 1000);
         assert_eq!(results.len(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // deterministic_binding_key + apply_distinct — parity-root unit 4 / D-D1
+    // ─────────────────────────────────────────────────────────────────────────
+
+    use cqels_model::term::BlankNodeTerm;
+
+    fn bs_with(pairs: &[(&str, Value)]) -> BindingSet {
+        let mut bs = BindingSet::new(0);
+        for (name, value) in pairs {
+            bs.insert(*name, value.clone());
+        }
+        bs
+    }
+
+    fn iri(v: &str) -> Value {
+        Value::Term(Term::Iri(IriTerm::new(v)))
+    }
+
+    fn bnode(id: &str) -> Value {
+        Value::Term(Term::BlankNode(BlankNodeTerm::new(id)))
+    }
+
+    #[test]
+    fn deterministic_binding_key_empty_emits_empty_string() {
+        assert_eq!(deterministic_binding_key(&BindingSet::new(0)), "");
+    }
+
+    #[test]
+    fn deterministic_binding_key_sorts_by_name_regardless_of_insertion_order() {
+        let r1 = bs_with(&[("b", iri("urn:y")), ("a", iri("urn:x"))]);
+        let r2 = bs_with(&[("a", iri("urn:x")), ("b", iri("urn:y"))]);
+        assert_eq!(
+            deterministic_binding_key(&r1),
+            deterministic_binding_key(&r2)
+        );
+        // Pin the canonical shape: name=<valueLen>:<value> joined by ','.
+        // Rust IRI Display is `<urn:x>` (7 chars including angle brackets).
+        assert_eq!(deterministic_binding_key(&r1), "a=7:<urn:x>,b=7:<urn:y>");
+    }
+
+    #[test]
+    fn deterministic_binding_key_injective_blank_node_containing_comma_and_equals() {
+        // Regression mirror of the Java test
+        // `solutionKey_injective_iriContainingCommaAndEquals` (cqels/claude#143
+        // Codex P2 fix). Rust hits the collision through BlankNodeTerm rather
+        // than IRI — IriTerm Display brackets the value, but BlankNodeTerm's
+        // `_:id` Display has no closing delimiter, so a blank node ID
+        // `foo,b=_:bar` produces the same naive `name=value`-joined key as
+        // a two-binding `{a → _:foo, b → _:bar}`. Length-prefixing breaks the
+        // tie.
+        let two_bindings = bs_with(&[("a", bnode("foo")), ("b", bnode("bar"))]);
+        let one_binding_colliding = bs_with(&[("a", bnode("foo,b=_:bar"))]);
+        assert_ne!(
+            deterministic_binding_key(&two_bindings),
+            deterministic_binding_key(&one_binding_colliding),
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_distinct_multiset_collapse_first_seen_wins() {
+        // D1 — multiset → set collapse: identical solutions dedup to one,
+        // first-seen order preserved.
+        let a = bs_with(&[("x", iri("urn:a"))]);
+        let a_dup = bs_with(&[("x", iri("urn:a"))]);
+        let b = bs_with(&[("x", iri("urn:b"))]);
+
+        let input = futures::stream::iter(vec![a.clone(), a_dup, b.clone(), a.clone()]);
+        let out: Vec<BindingSet> = apply_distinct(Box::pin(input)).collect().await;
+
+        assert_eq!(out, vec![a, b]);
+    }
+
+    #[tokio::test]
+    async fn apply_distinct_blank_node_collision_both_kept() {
+        // End-to-end version of the injectivity regression: both solutions
+        // are observably distinct, must both survive `apply_distinct`.
+        let two_bindings = bs_with(&[("a", bnode("foo")), ("b", bnode("bar"))]);
+        let one_binding_colliding = bs_with(&[("a", bnode("foo,b=_:bar"))]);
+
+        let input =
+            futures::stream::iter(vec![two_bindings.clone(), one_binding_colliding.clone()]);
+        let out: Vec<BindingSet> = apply_distinct(Box::pin(input)).collect().await;
+
+        assert_eq!(out.len(), 2);
+        assert!(out.contains(&two_bindings));
+        assert!(out.contains(&one_binding_colliding));
     }
 }
