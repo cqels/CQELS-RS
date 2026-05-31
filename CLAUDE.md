@@ -3,7 +3,7 @@
 ## Environment
 
 - Cargo path: `~/.cargo/bin/cargo` (not in default PATH)
-- MSRV: Rust 1.83 (see `rust-version` in workspace Cargo.toml)
+- MSRV: Rust 1.85 (see `rust-version` in workspace Cargo.toml)
 - Workspace members: cqels-model, cqels-core, cqels-engine, cqels-reasoning, cqels-geo, cqels-benchmarks, xtask
 - Repo: HiveIntel/cqels-rs on GitHub
 
@@ -49,7 +49,7 @@ Config: `.github/workflows/ci.yml`
 ### Nightly/scheduled (cron + workflow_dispatch)
 - Full Regression Sweep (`cargo xtask test full`)
 - Coverage (`cargo xtask coverage`, artifacts uploaded)
-- MSRV (1.83) check
+- MSRV (1.85) check
 - Benchmarks Compile + Benchmarks Observe (artifacts uploaded)
 
 ### xtask
@@ -65,7 +65,8 @@ Config: `.github/workflows/ci.yml`
 ### MSRV Notes
 - Benchmarks excluded from MSRV check (criterion deps have high MSRV)
 - Cargo.lock committed and MSRV uses `--locked` to pin dependency versions
-- No dependency pins needed at MSRV 1.83
+- MSRV is 1.85, raised from 1.83 because `cqels-storage-rocksdb`'s
+  `librocksdb-sys` (via `rocksdb` 0.24) requires rustc 1.85
 
 ## Code Conventions
 

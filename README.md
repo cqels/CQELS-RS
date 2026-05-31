@@ -126,7 +126,7 @@ issue-regression rules, and CI process.
 
 ## Requirements
 
-- Rust 1.83+
+- Rust 1.85+
 - Edition 2021
 
 ## License
