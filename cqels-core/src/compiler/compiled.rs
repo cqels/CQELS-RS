@@ -546,9 +546,17 @@ impl ContinuousQuery for CompiledCqelsQuery {
                         }
                     }
 
-                    // ORDER BY + LIMIT
-                    results =
-                        apply_order_and_limit(results, &order_by_expressions, &evaluator2, limit);
+                    // ORDER BY (+ LIMIT, unless DISTINCT will collapse rows;
+                    // SPARQL 1.1 §18.2.5 SolutionModifier order is
+                    // ORDER -> PROJECT -> DISTINCT -> LIMIT, so when DISTINCT
+                    // is set we defer the LIMIT until after apply_distinct).
+                    let order_limit = if distinct { None } else { limit };
+                    results = apply_order_and_limit(
+                        results,
+                        &order_by_expressions,
+                        &evaluator2,
+                        order_limit,
+                    );
 
                     futures::stream::iter(results)
                 });
@@ -561,7 +569,12 @@ impl ContinuousQuery for CompiledCqelsQuery {
             };
 
             if distinct {
-                apply_distinct(projected)
+                let distinct_stream = apply_distinct(projected);
+                match limit {
+                    Some(n) => Box::pin(distinct_stream.take(n as usize))
+                        as Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
+                    None => distinct_stream,
+                }
             } else {
                 projected
             }
@@ -1532,8 +1545,16 @@ impl ContinuousQuery for CompiledCypherQuery {
                         }
                     }
 
-                    results =
-                        apply_order_and_limit(results, &order_by_expressions, &evaluator4, limit);
+                    // ORDER BY (+ LIMIT, deferred past DISTINCT per
+                    // SPARQL 1.1 §18.2.5 — see the matching comment on the
+                    // SPARQL path in CompiledCqelsQuery::execute).
+                    let order_limit = if distinct { None } else { limit };
+                    results = apply_order_and_limit(
+                        results,
+                        &order_by_expressions,
+                        &evaluator4,
+                        order_limit,
+                    );
 
                     futures::stream::iter(results)
                 });
@@ -1546,7 +1567,12 @@ impl ContinuousQuery for CompiledCypherQuery {
                 };
 
             if distinct {
-                apply_distinct(projected)
+                let distinct_stream = apply_distinct(projected);
+                match limit {
+                    Some(n) => Box::pin(distinct_stream.take(n as usize))
+                        as Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
+                    None => distinct_stream,
+                }
             } else {
                 projected
             }
@@ -2091,5 +2117,109 @@ mod tests {
                  contains(v)={has_v} contains(p)={has_p}"
             );
         }
+    }
+
+    /// SPARQL 1.1 §18.2.5 SolutionModifier order is
+    /// ORDER -> PROJECT -> DISTINCT -> LIMIT. Before this fix, the
+    /// compiler applied LIMIT inside `apply_order_and_limit` BEFORE
+    /// PROJECT and DISTINCT, so `SELECT DISTINCT ?x ... LIMIT N` over
+    /// a stream where the first N rows shared a value would return
+    /// fewer than N distinct rows (or, in the worst case, just one).
+    ///
+    /// This regression test stages 5 events binding the same `?temp`
+    /// value followed by 2 events with distinct values, then queries
+    /// `SELECT DISTINCT ?temp ... LIMIT 2`. The fixed pipeline must
+    /// dedup first and return 2 distinct rows; the pre-fix pipeline
+    /// would have truncated to 5 duplicates then deduped to 1 row.
+    #[tokio::test]
+    async fn select_distinct_limit_dedups_before_truncating() {
+        let definition = CqelsQueryDefinition {
+            name: None,
+            description: None,
+            query_type: CqelsQueryType::Select,
+            prefixes: HashMap::new(),
+            streams: vec![CqelsStreamDefinition::root("sensors", WindowSpec::now())],
+            named_windows: vec![],
+            static_graphs: vec![],
+            named_graphs: vec![],
+            select_elements: vec![SelectElement::Variable("?temp".to_string())],
+            distinct: true,
+            pattern_groups: vec![CqelsPatternGroup::Stream {
+                source: "sensors".to_string(),
+                patterns: vec![TriplePattern {
+                    subject: "?sensor".to_string(),
+                    predicate: "<http://example.org/temp>".to_string(),
+                    object: "?temp".to_string(),
+                }],
+            }],
+            aggregates: vec![],
+            group_by_variables: vec![],
+            order_by_conditions: vec![],
+            limit: Some(2),
+            operator_hints: OperatorHints::default(),
+            stream_semantics: StreamSemantics::default(),
+            construct_template: vec![],
+            seq_constraint: None,
+        };
+
+        let query = CompiledCqelsQuery {
+            query_string: "SELECT DISTINCT ?temp FROM STREAM sensors [NOW] WHERE { ?sensor <http://example.org/temp> ?temp . } LIMIT 2".to_string(),
+            query_id: "test-distinct-limit".to_string(),
+            definition: Arc::new(definition),
+            filter_expressions: Arc::new(vec![]),
+            bind_expressions: Arc::new(vec![]),
+            order_by_expressions: Arc::new(vec![]),
+            having_expressions: Arc::new(vec![]),
+            aggregate_specs: Arc::new(vec![]),
+            evaluator: Arc::new(ExpressionEvaluator::new()),
+            select_vars: Arc::new(vec!["temp".to_string()]),
+            rdf_store: None,
+            self_join_hints: Arc::new(vec![]),
+        };
+
+        // 5 duplicate readings at temp=42, then 2 distinct readings at 35 and 99.
+        // Pre-fix: LIMIT 2 keeps only the first 2 events (both temp=42) -> DISTINCT
+        // collapses to 1 row. Post-fix: DISTINCT collapses all 7 to {42, 35, 99} ->
+        // LIMIT 2 keeps the first 2 -> {42, 35}.
+        let temp_event = |sensor: &str, temp: &str, ts: i64| {
+            StreamElement::Rdf(RdfStreamElement::new(
+                Statement::new(
+                    Term::Iri(IriTerm::new(format!("http://example.org/{sensor}"))),
+                    IriTerm::new("http://example.org/temp"),
+                    Term::Literal(LiteralTerm::new(temp)),
+                ),
+                ts,
+            ))
+        };
+        let elements = vec![
+            temp_event("s1", "42", 1000),
+            temp_event("s2", "42", 1100),
+            temp_event("s3", "42", 1200),
+            temp_event("s4", "42", 1300),
+            temp_event("s5", "42", 1400),
+            temp_event("s6", "35", 1500),
+            temp_event("s7", "99", 1600),
+        ];
+
+        let mut inputs = QueryInputs::new();
+        inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+        let results: Vec<BindingSet> = query.execute(inputs).collect().await;
+
+        assert_eq!(
+            results.len(),
+            2,
+            "SELECT DISTINCT ?temp LIMIT 2 over 5 duplicates + 2 distinct values \
+             must yield 2 distinct rows, not LIMIT-then-DISTINCT's 1"
+        );
+        let temps: Vec<String> = results
+            .iter()
+            .map(|bs| bs.get("temp").map(|v| v.to_string()).unwrap_or_default())
+            .collect();
+        // First-seen order: 42 then 35 (99 is filtered by post-distinct LIMIT 2).
+        // Pre-fix, this would be just ["42"] (LIMIT 2 -> {42,42} -> DISTINCT -> {42}).
+        assert_eq!(temps.len(), 2);
+        assert_eq!(temps[0], "42");
+        assert_eq!(temps[1], "35");
     }
 }
