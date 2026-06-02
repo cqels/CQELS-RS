@@ -1,40 +1,168 @@
 name: CI
 
 # ──────────────────────────────────────────────────────────────────────
-# GitHub-hosted runner triggers are disabled while the HiveIntel org
-# Actions account is billing-blocked. Every push / pull_request / cron
-# event was being scheduled and then instantly failing with
-# "recent account payments have failed or your spending limit needs
-# to be increased", which left dozens of red ✗ checks across the PR
-# history without ever running any of the jobs.
+# CI compute layout (HiveIntel Actions account is billing-blocked):
 #
-# Local CI is the gate in the meantime — `cargo xtask test pr` runs
-# the equivalent fmt + clippy + workspace tests + doc suite, and PR
-# descriptions document its results.
+#   • PR-required jobs run on a self-hosted runner labelled
+#     [self-hosted, cqels-local] — a Mac registered to this repo.
+#     They fire on push / pull_request just like normal CI.
 #
-# To restore GitHub-hosted CI after the billing block clears, put
-# back:
-#     push:
-#       branches: [main]
-#     pull_request:
-#       branches: [main]
-#     schedule:
-#       - cron: "0 5 * * *"
+#   • test-windows + nightly jobs still target GitHub-hosted runners
+#     (`windows-latest`, `ubuntu-latest`). They are gated to
+#     workflow_dispatch only so they stay dormant — manually
+#     dispatching them after the billing block clears is enough to
+#     restore the full matrix without another workflow edit.
+#
+# Local pre-push hook (`cargo xtask test pr`) is still the first
+# gate; the self-hosted runner is the second, identical pipeline.
 # ──────────────────────────────────────────────────────────────────────
 on:
+  push:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      pr_ref:
+        description: >-
+          Optional. Pass `refs/pull/<N>/head` to make actions/checkout fetch
+          the fork's actual head SHA on the self-hosted runner — useful for
+          maintainer eyes-on validation of fork-PR code before merging.
+          NOTE: GitHub attaches dispatch check runs to the dispatched
+          branch's SHA, not the PR head, so this DOES NOT update the PR's
+          required-check status. Fully automating fork-PR validation
+          requires the Checks API — out of scope for this PR. See
+          comments above.
+        required: false
+        type: string
+        default: ''
+
+# Cancel in-progress runs for the same source branch on the same source
+# repository, so:
+#   - push + pull_request:synchronize on the same commit share one
+#     cancellation group;
+#   - a fork PR opened from a branch with the same name as one in this
+#     repo (e.g. `main`) does NOT cancel our in-progress push runs.
+#
+# `github.ref` differs between events on the same head (push:
+# refs/heads/<b>, PR sync: refs/pull/<n>/merge). Keying on
+# `head_ref || ref_name` makes both events on the same branch share a
+# group. Prefixing the head repo (or this repo, on push) keeps a fork
+# PR's group distinct from ours even when branch names collide
+# (codex review on cqels-rs#77, P2).
+concurrency:
+  # Key includes:
+  #   event_name — keep push and pull_request runs on the same commit in
+  #     separate groups. push validates the head ref directly; PR validates
+  #     the merge commit. Sharing a group would let a later push cancel
+  #     the merge-commit validation (codex round-4 P2 on cqels-rs#77).
+  #   head repo  — fork PRs get their own group even when the branch
+  #     name collides with one in this repo (round-3 P2).
+  #   branch     — head_ref on PR / ref_name on push: stable across
+  #     synchronize and re-pushes to the same branch.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  fmt:
+  # Fork-PR safety gate (P1, codex review on PR #77):
+  # Self-hosted runner is a persistent machine on the maintainer's workstation,
+  # not an ephemeral GitHub-hosted VM. A PR from a fork could push arbitrary
+  # code that would execute on that machine. Block fork PRs from the
+  # self-hosted runner — push events from inside this repo, PR events
+  # whose head repo == this repo, and workflow_dispatch all pass.
+  #
+  # External-fork PRs to this repo would need either:
+  #   - GitHub-hosted CI restored (after billing block clears), OR
+  #   - a maintainer to re-run after review via workflow_dispatch.
+  #
+  # ── Required-check semantics (codex P1 follow-up, round 3) ────────
+  # GitHub treats a job skipped via job-level `if:` as `success` for
+  # required-status purposes. For fork PRs the existing PR-required
+  # jobs (fmt, clippy, …) all skip — appearing green to branch
+  # protection. The blockers below each share a `name:` with one of
+  # the real PR-required jobs, so for fork PRs GitHub sees the named
+  # required check as: [real job: skipped=success] + [blocker:
+  # failure]. Any failure under a required-check name fails the
+  # whole required check.
+  #
+  # ── Known limitation: fork-PR re-validation ───────────────────────
+  # Once a fork PR is blocked here, the `pr_ref` workflow_dispatch
+  # input lets a maintainer fetch the fork head to the self-hosted
+  # runner for eyes-on validation, but GitHub attaches dispatch
+  # check runs to the dispatched branch's SHA — not to the PR head.
+  # So the PR's required-check status stays failed even after a
+  # manual run. Fully automating this requires the GitHub Checks API
+  # (POST /repos/{owner}/{repo}/check-runs with head_sha = PR head)
+  # which is deferred as a follow-up since the repo currently has
+  # no fork-PR workflow in flight. The cleanest long-term resolution
+  # is restoring GitHub-hosted CI (the original ubuntu-latest path).
+  #
+  # Why 8 explicit jobs and not a `matrix:` — when an `if:` at job
+  # level evaluates false (the same-repo case), GitHub does NOT
+  # expand the matrix, leaving the unsubstituted `${{ matrix.x }}`
+  # template as the check run name. Per-name blocker jobs sidestep
+  # that quirk and give one clearly-named skipped check per existing
+  # required job on the same-repo path.
+  fork-pr-blocker-fmt:
     name: Format
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
+      - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
+  fork-pr-blocker-clippy:
+    name: Clippy
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
+  fork-pr-blocker-doc:
+    name: Documentation
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
+  fork-pr-blocker-pr-impact:
+    name: PR Impact Suite
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
+  fork-pr-blocker-pr-fast:
+    name: Fast Workspace Tests
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
+  fork-pr-blocker-deny:
+    name: Cargo Deny
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
+  fork-pr-blocker-test-macos:
+    name: Tests (macOS)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
+  fork-pr-blocker-wasm:
+    name: WASM Check
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
+
+  fmt:
+    name: Format
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cqels-local]
+    steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -42,10 +170,12 @@ jobs:
 
   clippy:
     name: Clippy
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cqels-local]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -54,10 +184,12 @@ jobs:
 
   doc:
     name: Documentation
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cqels-local]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps
@@ -66,8 +198,8 @@ jobs:
 
   pr-impact:
     name: PR Impact Suite
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cqels-local]
     steps:
       # fetch-depth: 0 needed so `cargo xtask test impact --base origin/main`
       # can compute the diff against main. The default shallow checkout
@@ -75,6 +207,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.pr_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -84,10 +217,12 @@ jobs:
 
   pr-fast:
     name: Fast Workspace Tests
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cqels-local]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -97,30 +232,46 @@ jobs:
 
   deny:
     name: Cargo Deny
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cqels-local]
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          ref: ${{ inputs.pr_ref || github.ref }}
+      # cargo-deny shells out to `cargo metadata` to resolve the dep graph,
+      # so it needs cargo on PATH even though the binary is self-contained
+      # for its own parsing. Install rust here too.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo-deny check
 
   # ─── Cross-platform verification (PR-required) ──────────────────────
 
   test-macos:
     name: Tests (macOS)
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: macos-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cqels-local]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  # Windows coverage is dormant until the GitHub-hosted billing block
+  # clears. Trigger manually via `gh workflow run CI --ref <branch>` to
+  # re-run it once billing is restored.
   test-windows:
     name: Tests (Windows)
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
@@ -129,10 +280,12 @@ jobs:
 
   wasm:
     name: WASM Check
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cqels-local]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
