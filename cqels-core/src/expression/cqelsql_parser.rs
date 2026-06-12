@@ -6,6 +6,7 @@
 use pest::Parser;
 use pest_derive::Parser;
 
+use cqels_model::term::{IriTerm, Term};
 use cqels_model::Value;
 
 use super::ast::{AggregateExprFunction, BinaryOp, Expression, UnaryOp};
@@ -288,8 +289,15 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         Rule::literal => parse_literal(pair),
 
         Rule::iri_ref => {
-            let iri = pair.as_str().to_string();
-            Ok(Expression::Literal(Value::String(iri)))
+            // Strip the surrounding angle brackets. An IRI expression
+            // evaluates to an IRI TERM — matching Java's parseIriRef →
+            // RDF4J IRI — not a string literal of the IRI text.
+            // (parity unit 5)
+            let s = pair.as_str();
+            let iri = &s[1..s.len() - 1];
+            Ok(Expression::Literal(Value::Term(Term::Iri(IriTerm::new(
+                iri,
+            )))))
         }
 
         Rule::prefixed_name => {
