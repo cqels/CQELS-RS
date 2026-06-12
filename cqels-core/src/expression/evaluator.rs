@@ -95,7 +95,11 @@ impl ExpressionEvaluator {
                         }
                     }
                     UnaryOp::Negate => match val {
-                        Value::Integer(i) => Value::Integer(-i),
+                        // checked_neg: -i64::MIN overflows (numeric error →
+                        // Null), and `-i` would panic in debug builds.
+                        Value::Integer(i) => {
+                            i.checked_neg().map(Value::Integer).unwrap_or(Value::Null)
+                        }
                         Value::Float(f) => Value::Float(-f),
                         Value::Null => Value::Null,
                         _ => Value::Null,
@@ -204,10 +208,14 @@ impl ExpressionEvaluator {
             BinaryOp::Lte => Value::Boolean(lval <= rval),
             BinaryOp::Gte => Value::Boolean(lval >= rval),
 
-            // Arithmetic operators
-            BinaryOp::Add => eval_arithmetic(&lval, &rval, |a, b| a + b),
-            BinaryOp::Sub => eval_arithmetic(&lval, &rval, |a, b| a - b),
-            BinaryOp::Mul => eval_arithmetic(&lval, &rval, |a, b| a * b),
+            // Arithmetic operators (exact i64 fast-path first — the f64 path
+            // rounds beyond 2^53, so i64::MAX - 1 silently lost the unit)
+            BinaryOp::Add => eval_int_arithmetic(&lval, &rval, i64::checked_add)
+                .unwrap_or_else(|| eval_arithmetic(&lval, &rval, |a, b| a + b)),
+            BinaryOp::Sub => eval_int_arithmetic(&lval, &rval, i64::checked_sub)
+                .unwrap_or_else(|| eval_arithmetic(&lval, &rval, |a, b| a - b)),
+            BinaryOp::Mul => eval_int_arithmetic(&lval, &rval, i64::checked_mul)
+                .unwrap_or_else(|| eval_arithmetic(&lval, &rval, |a, b| a * b)),
             BinaryOp::Div => {
                 // Division by zero → null
                 match rval.as_numeric() {
@@ -338,6 +346,20 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         }
 
         _ => false,
+    }
+}
+
+/// Exact i64 fast-path for `+ - *` when both operands are integers, keeping
+/// results exact beyond f64's 2^53 integer window (parity unit 5). Overflow
+/// is a numeric error (Null) per XPath err:FOAR0002 — never silently rounded
+/// through the float path. Returns None when either operand is not an
+/// Integer so the caller falls back to float arithmetic.
+fn eval_int_arithmetic(a: &Value, b: &Value, op: fn(i64, i64) -> Option<i64>) -> Option<Value> {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => {
+            Some(op(*x, *y).map(Value::Integer).unwrap_or(Value::Null))
+        }
+        _ => None,
     }
 }
 
