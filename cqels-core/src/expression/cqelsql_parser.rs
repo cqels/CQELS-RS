@@ -255,6 +255,23 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
         return parse_negate(operand_pair);
     }
+    // Live unary-plus path (local review round 2 on cqels-rs#94): the inlined
+    // `+` prefix produces no pest pair — the same no-pair disease this PR
+    // fixed for the binary operators — so only this text-prefix branch can
+    // fire. Without it, `+expr` silently dropped the operator and
+    // UnaryOp::UnaryPlus (whose evaluator arm type-errors non-numerics to
+    // Null per XPath op:numeric-unary-plus) was unreachable from the grammar.
+    if text.starts_with('+') && children.len() == 1 {
+        let operand_pair = children
+            .into_iter()
+            .next()
+            .ok_or_else(|| ParseError::Syntax("missing unary plus operand".into()))?;
+        let operand = parse_primary(operand_pair)?;
+        return Ok(Expression::UnaryOp {
+            op: UnaryOp::UnaryPlus,
+            operand: Box::new(operand),
+        });
+    }
 
     let first = children
         .into_iter()

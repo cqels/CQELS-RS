@@ -95,9 +95,12 @@ impl ExpressionFixtureOperator for ExpressionEvalAdapter {
     fn canonicalize_expected(&self, expected_term: &str) -> EvalOutcome {
         // Round-trip the fixture's expected term through the same parse +
         // canonicalize path the actual value goes through, so the comparison is
-        // byte-vs-byte on canonical N-Triples regardless of the lexical form the
-        // fixture author wrote. A term that won't parse falls back to verbatim so
-        // a malformed expectation surfaces as a mismatch, not a panic.
+        // byte-vs-byte on canonical N-Triples. NOTE: only the datatypes the
+        // codec canonicalizes (double/float/decimal, xsd:string collapse) are
+        // lexical-form-insensitive — an integer expectation written "042" or
+        // "+4" stays verbatim and will mismatch the canonical actual; write
+        // integers canonically. A term that won't parse falls back to verbatim
+        // so a malformed expectation surfaces as a mismatch, not a panic.
         match parse_term_string(expected_term) {
             Ok(v) => Self::outcome(v),
             Err(_) => EvalOutcome::Value(expected_term.to_string()),
