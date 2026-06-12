@@ -15,6 +15,12 @@ pub enum Expression {
     Literal(Value),
     /// A variable reference (e.g., `?x` or `$x`).
     Variable(String),
+    /// A prefixed-name IRI constant (e.g., `ex:thing`), resolved against the
+    /// evaluator's prefix map at evaluation time (the parser doesn't know the
+    /// query's PREFIX declarations). Evaluates to an IRI term — the prefixed
+    /// twin of the angle-bracket `iri_ref` path. (parity unit 5, codex P2 +
+    /// local review on cqels-rs#94)
+    PrefixedIri(String),
     /// Property access on a variable (Cypher-style: `n.name`).
     PropertyAccess { variable: String, property: String },
     /// A binary operation.
@@ -51,6 +57,7 @@ impl fmt::Display for Expression {
         match self {
             Expression::Literal(v) => write!(f, "{v}"),
             Expression::Variable(v) => write!(f, "?{v}"),
+            Expression::PrefixedIri(name) => write!(f, "{name}"),
             Expression::PropertyAccess { variable, property } => {
                 write!(f, "{variable}.{property}")
             }

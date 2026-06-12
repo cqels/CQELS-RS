@@ -843,6 +843,8 @@ fn collect_variables(expr: &Expression) -> Vec<String> {
             Expression::PropertyAccess { variable, .. } => {
                 out.push(variable.trim_start_matches(['?', '$']).to_string());
             }
+            // Constant IRI — contributes no variables.
+            Expression::PrefixedIri(_) => {}
             Expression::BinaryOp { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);

@@ -331,8 +331,11 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         }
 
         Rule::prefixed_name => {
+            // Resolved against the evaluator's prefix map at eval time —
+            // matching the iri_ref arm's Term semantics rather than the old
+            // raw-text Value::String (which could never equal an IRI binding).
             let name = pair.as_str().to_string();
-            Ok(Expression::Literal(Value::String(name)))
+            Ok(Expression::PrefixedIri(name))
         }
 
         Rule::expression => parse_expression(pair),

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use cqels_model::{BindingSet, Value};
+use cqels_model::{BindingSet, IriTerm, Term, Value};
 
 use super::ast::{AggregateExprFunction, BinaryOp, Expression, UnaryOp};
 use super::functions::{call_builtin, value_to_bool};
@@ -65,6 +65,12 @@ impl ExpressionEvaluator {
     pub fn evaluate(&self, expr: &Expression, bindings: &BindingSet) -> Value {
         match expr {
             Expression::Literal(v) => v.clone(),
+            Expression::PrefixedIri(name) => {
+                // Same fallback contract as prefixed FUNCTION names: unknown
+                // prefixes keep the raw text (a CURIE like `ex:x` is itself a
+                // syntactically valid IRI with scheme `ex`).
+                Value::Term(Term::Iri(IriTerm::new(self.resolve_prefixed_name(name))))
+            }
 
             Expression::Variable(name) => {
                 let var_name = name
@@ -419,6 +425,36 @@ mod tests {
             bs.insert(*name, val.clone());
         }
         bs
+    }
+
+    #[test]
+    fn test_prefixed_iri_resolves_to_term_via_prefix_map() {
+        // codex P2 + local review on cqels-rs#94: `ex:x` primaries previously
+        // evaluated to Value::String("ex:x") and could never equal an IRI
+        // binding; they must resolve through the evaluator's prefix map to
+        // the same Term the angle-bracket iri_ref path produces.
+        let mut prefixes = HashMap::new();
+        prefixes.insert("ex".to_string(), "http://example.org/".to_string());
+        let eval = ExpressionEvaluator::with_prefixes(prefixes);
+
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Eq,
+            left: Box::new(Expression::Variable("p".to_string())),
+            right: Box::new(Expression::PrefixedIri("ex:x".to_string())),
+        };
+        let bs = make_bindings(&[(
+            "p",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/x"))),
+        )]);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Boolean(true));
+
+        // Unknown prefix keeps the raw text (CURIE is itself a valid IRI) —
+        // same fallback contract as prefixed function names.
+        let raw = Expression::PrefixedIri("nope:x".to_string());
+        assert_eq!(
+            eval.evaluate(&raw, &make_bindings(&[])),
+            Value::Term(Term::Iri(IriTerm::new("nope:x")))
+        );
     }
 
     #[test]
