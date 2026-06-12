@@ -165,7 +165,11 @@ pub fn term_to_value(term: &Term) -> Value {
         Term::Iri(iri) => Value::Term(Term::Iri(iri.clone())),
         Term::BlankNode(bn) => Value::Term(Term::BlankNode(bn.clone())),
         Term::Literal(lit) => {
-            // Try to parse numeric literals
+            // Lift only literals whose DATATYPE is numeric/boolean. A plain or
+            // xsd:string literal stays a string even when its lexical form
+            // parses as a number: per SPARQL 1.1 §17.2.2 the EBV of "0" is
+            // true (nonempty), and arithmetic on it is a type error — lifting
+            // it to Integer(0) silently changed both. (parity unit 5)
             let val = lit.value();
             if let Some(dt) = lit.datatype() {
                 match dt {
@@ -188,13 +192,6 @@ pub fn term_to_value(term: &Term) -> Value {
                     }
                     _ => {}
                 }
-            }
-            // Try numeric parsing for untyped literals
-            if let Ok(i) = val.parse::<i64>() {
-                return Value::Integer(i);
-            }
-            if let Ok(f) = val.parse::<f64>() {
-                return Value::Float(f);
             }
             Value::String(val.to_string())
         }

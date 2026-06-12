@@ -2186,7 +2186,10 @@ mod tests {
                 Statement::new(
                     Term::Iri(IriTerm::new(format!("http://example.org/{sensor}"))),
                     IriTerm::new("http://example.org/temp"),
-                    Term::Literal(LiteralTerm::new(temp)),
+                    Term::Literal(
+                        LiteralTerm::new(temp)
+                            .with_datatype("http://www.w3.org/2001/XMLSchema#integer"),
+                    ),
                 ),
                 ts,
             ))

@@ -87,6 +87,23 @@ pub fn stream_elem_literal(subj: &str, pred: &str, obj_val: &str, ts: i64) -> St
     ))
 }
 
+/// Like [`stream_elem_literal`] but with an xsd:integer-typed object literal.
+/// Plain literals are no longer lifted to numbers by the pipeline (SPARQL
+/// 1.1 §17.2.2 — a plain "42" is a string), so numeric FILTER tests must
+/// feed properly typed data.
+pub fn stream_elem_int_literal(subj: &str, pred: &str, obj_val: &str, ts: i64) -> StreamElement {
+    StreamElement::Rdf(RdfStreamElement::new(
+        Statement::new(
+            iri(subj),
+            iri_pred(pred),
+            Term::Literal(
+                LiteralTerm::new(obj_val).with_datatype("http://www.w3.org/2001/XMLSchema#integer"),
+            ),
+        ),
+        ts,
+    ))
+}
+
 pub fn stream_elem_iri(subj: &str, pred: &str, obj: &str, ts: i64) -> StreamElement {
     StreamElement::Rdf(RdfStreamElement::new(stmt(subj, pred, obj), ts))
 }

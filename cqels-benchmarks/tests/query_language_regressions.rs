@@ -229,19 +229,19 @@ async fn test_e2e_cqelsql_with_filter() {
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
     let elements = vec![
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s1",
             "http://example.org/temp",
             "42",
             1000,
         ),
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s2",
             "http://example.org/temp",
             "25",
             2000,
         ),
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s3",
             "http://example.org/temp",
             "35",
