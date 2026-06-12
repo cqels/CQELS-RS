@@ -29,9 +29,13 @@ mod minus_operator_adapter;
 #[path = "parity/distinct_operator_adapter.rs"]
 mod distinct_operator_adapter;
 
+#[path = "parity/expression_eval_adapter.rs"]
+mod expression_eval_adapter;
+
 use std::path::{Path, PathBuf};
 
 use distinct_operator_adapter::DistinctOperatorAdapter;
+use expression_eval_adapter::ExpressionEvalAdapter;
 use minus_operator_adapter::MinusOperatorAdapter;
 use oxrdf_backend::OxRdfBackend;
 use parity_fixture_harness::{FixtureOperator, Harness, Terminal};
@@ -188,6 +192,33 @@ fn distinct_operator_parity() {
     for f in cases {
         let mut adapter = DistinctOperatorAdapter::new();
         h.run_solution_case(&f, &mut adapter)
+            .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
+    }
+}
+
+/// Unit 5: SPARQL expression evaluation. Drives the `expression` payload kind
+/// (`run_expression_case`) with `ExpressionEvalAdapter` — each `do_evaluate`
+/// step parses an expression string, evaluates it against a binding set, and
+/// compares the canonical result. If no cases exist yet, the test no-ops with a
+/// printed skip.
+#[test]
+fn expression_evaluation_parity() {
+    if skip_if_no_fixtures("expression_evaluation_parity") {
+        return;
+    }
+    let backend = OxRdfBackend;
+    let h = Harness::new(&backend);
+    let cases = case_files("expression-evaluation");
+    if cases.is_empty() {
+        eprintln!(
+            "[parity_runner] expression_evaluation_parity: no fixtures under \
+             parity/fixtures/expression-evaluation/ yet; skipping."
+        );
+        return;
+    }
+    for f in cases {
+        let mut adapter = ExpressionEvalAdapter::new();
+        h.run_expression_case(&f, &mut adapter)
             .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
     }
 }

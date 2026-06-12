@@ -150,8 +150,17 @@ fn is_variable(term: &str) -> bool {
     term.starts_with('?') || term.starts_with('$')
 }
 
-/// Converts an RDF Term to a Value.
-fn term_to_value(term: &Term) -> Value {
+/// Converts an RDF Term to a [`Value`], lifting typed RDF literals to native
+/// numeric/boolean/string variants (xsd:integer/int/long → `Value::Integer`,
+/// xsd:double/float/decimal → `Value::Float`, xsd:boolean → `Value::Boolean`,
+/// otherwise `Value::String`; IRIs and blank nodes stay `Value::Term`).
+///
+/// This is the binding-construction lifter used throughout pattern matching, so
+/// the bindings reaching the expression evaluator hold native `Value` variants
+/// rather than `Value::Term(Literal)`. Exposed `pub` so the parity
+/// expression-evaluation adapter can build binding sets the same way production
+/// does (otherwise arithmetic on RDF-typed bindings spuriously yields null).
+pub fn term_to_value(term: &Term) -> Value {
     match term {
         Term::Iri(iri) => Value::Term(Term::Iri(iri.clone())),
         Term::BlankNode(bn) => Value::Term(Term::BlankNode(bn.clone())),

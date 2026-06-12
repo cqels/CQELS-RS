@@ -85,6 +85,50 @@ pub trait SolutionFixtureOperator {
     }
 }
 
+/// Outcome of evaluating one SPARQL expression against one binding set.
+///
+/// Two-way, not three-way: SPARQL theoretically distinguishes UNBOUND from a
+/// type-error (e.g. `1 + "abc"`), but NEITHER cqels engine does — both collapse
+/// error and unbound to a null result. So the parity surface is `Value` | `Null`
+/// (spec deviation D-E1). `Value` carries the canonical N-Triples term string.
+#[allow(dead_code)] // used by the expression-evaluation parity unit + future expr consumers
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalOutcome {
+    /// A bound result, canonicalized to an N-Triples term string.
+    Value(String),
+    /// UNBOUND or type-error — the engines do not distinguish these (D-E1).
+    Null,
+}
+
+/// Adapt a SPARQL expression evaluator to the harness.
+///
+/// Parallel to [`SolutionFixtureOperator`] but for the `expression` payload
+/// kind — used by `do_evaluate` steps. Far simpler than the solution surface:
+/// expression evaluation is a pure function (no streaming, no terminal). Each
+/// `evaluate` call: parse `expr` with the engine's OWN parser, evaluate against
+/// `bindings` (the solution wire format), canonicalize the result. Cases that
+/// drive an [`ExpressionFixtureOperator`] declare `"payload_kind": "expression"`.
+#[allow(dead_code)] // used by the expression-evaluation parity unit
+pub trait ExpressionFixtureOperator {
+    /// Receives the fixture's `config` (e.g. `config.prefixes`) once before any
+    /// `evaluate`. Adapters that need PREFIX mappings read them here.
+    fn configure(&mut self, config: &Value);
+
+    /// Parse `expr` (a standalone CqelsQL/SPARQL expression string), evaluate it
+    /// against `bindings`, and return the canonicalized outcome. A parse failure,
+    /// unbound result, or type-error all map to [`EvalOutcome::Null`].
+    fn evaluate(&mut self, expr: &str, bindings: &Solution) -> EvalOutcome;
+
+    /// Round-trips a fixture's expected term string through the engine's parser +
+    /// canonicalizer so the comparator sees byte-identical N-Triples on both the
+    /// expected and actual side (same role as `canonicalize_solution`). The
+    /// default normalizes nothing — adapters whose engine emits a normalized form
+    /// (e.g. `"foo"^^xsd:string` → `"foo"`) override it.
+    fn canonicalize_expected(&self, expected_term: &str) -> EvalOutcome {
+        EvalOutcome::Value(expected_term.to_string())
+    }
+}
+
 #[derive(Debug)]
 pub struct ParityMismatch(pub String);
 
@@ -418,6 +462,90 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
         Ok(())
     }
 
+    /// Run one case driving an [`ExpressionFixtureOperator`].
+    ///
+    /// Parallel to [`Self::run_solution_case`] but for the `expression` payload
+    /// kind. No streaming/terminal bookkeeping — each `do_evaluate` step is an
+    /// independent pure evaluation compared against its own `expect` /
+    /// `expect_kind`. The case must declare `"payload_kind": "expression"`.
+    #[allow(dead_code)] // used by the expression-evaluation parity unit
+    pub fn run_expression_case<O: ExpressionFixtureOperator>(
+        &self,
+        case_file: &Path,
+        op: &mut O,
+    ) -> Result<(), ParityMismatch> {
+        let text = std::fs::read_to_string(case_file)
+            .map_err(|e| ParityMismatch(format!("read {}: {e}", case_file.display())))?;
+        let doc: Value =
+            serde_json::from_str(&text).map_err(|e| ParityMismatch(format!("parse json: {e}")))?;
+
+        validate_payload_kind(&doc, "expression")?;
+
+        op.configure(doc.get("config").unwrap_or(&Value::Null));
+        let script = doc["script"]
+            .as_array()
+            .ok_or_else(|| ParityMismatch("script is not an array".into()))?;
+
+        for (idx, step) in script.iter().enumerate() {
+            let action = step.get("do").and_then(Value::as_str);
+            if action != Some("evaluate") {
+                return Err(ParityMismatch(format!(
+                    "step[{idx}]: only 'do: evaluate' is valid in an expression-payload \
+                     script, got {action:?}"
+                )));
+            }
+            let expr = step.get("expr").and_then(Value::as_str).ok_or_else(|| {
+                ParityMismatch(format!("step[{idx}] 'evaluate' missing string 'expr'"))
+            })?;
+            // bindings is optional — an absent or empty object means no bindings.
+            let bindings = match step.get("bindings") {
+                Some(b) => {
+                    let obj = b.as_object().ok_or_else(|| {
+                        ParityMismatch(format!("step[{idx}] 'bindings' is not a JSON object"))
+                    })?;
+                    object_to_solution(obj, &format!("step[{idx}].bindings"))?
+                }
+                None => Solution::new(),
+            };
+
+            let actual = op.evaluate(expr, &bindings);
+
+            // Exactly one of `expect` (a term string) or `expect_kind: "null"`.
+            let has_expect = step.get("expect").and_then(Value::as_str).is_some();
+            let has_expect_kind = step.get("expect_kind").and_then(Value::as_str).is_some();
+            if has_expect == has_expect_kind {
+                return Err(ParityMismatch(format!(
+                    "step[{idx}] must have exactly one of 'expect' or 'expect_kind' \
+                     (expr: {expr})"
+                )));
+            }
+
+            let expected = if let Some(term) = step.get("expect").and_then(Value::as_str) {
+                // Run the expected term through the adapter's canonicalizer so the
+                // fixture author can write any equivalent lexical form.
+                op.canonicalize_expected(term)
+            } else {
+                match step.get("expect_kind").and_then(Value::as_str) {
+                    Some("null") => EvalOutcome::Null,
+                    other => {
+                        return Err(ParityMismatch(format!(
+                            "step[{idx}] unknown expect_kind {other:?} (only \"null\" is valid)"
+                        )));
+                    }
+                }
+            };
+
+            if actual != expected {
+                return Err(ParityMismatch(format!(
+                    "expression mismatch [step {idx}]\n  expr:     {expr}\n  bindings: {}\n  \
+                     expected: {expected:?}\n  actual:   {actual:?}",
+                    solution_canonical_string(&bindings),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn drain_into<O: FixtureOperator>(&self, op: &mut O, pending: &mut VecDeque<String>) {
         pending.extend(op.drain_emissions());
     }
@@ -525,7 +653,7 @@ fn validate_payload_kind(doc: &Value, expected: &str) -> Result<(), ParityMismat
         if kind != expected {
             return Err(ParityMismatch(format!(
                 "payload_kind '{kind}' on the case does not match this run method (expected '{expected}'). \
-                 Use run_case for 'quads' and run_solution_case for 'solutions'."
+                 Use run_case for 'quads', run_solution_case for 'solutions', run_expression_case for 'expression'."
             )));
         }
     }
