@@ -558,8 +558,24 @@ mod tests {
     }
 
     #[test]
+    fn test_subtraction() {
+        // Regression: the multiplicative/additive operators were inlined in the
+        // grammar (not surfaced as child pairs), so the parser never saw "-" and
+        // fell back to Add. Now `additive_op`/`multiplicative_op` are named rules.
+        assert_binop("?x - 1", BinaryOp::Sub);
+        assert_binop("?x - ?y", BinaryOp::Sub);
+    }
+
+    #[test]
     fn test_multiplication() {
         assert_binop("?x * 2", BinaryOp::Mul);
+    }
+
+    #[test]
+    fn test_division() {
+        // Regression (same root cause as subtraction): "/" used to parse as Mul.
+        assert_binop("?x / 2", BinaryOp::Div);
+        assert_binop("?x / ?y", BinaryOp::Div);
     }
 
     // ─── Logical operators ───────────────────────────────────────────────
