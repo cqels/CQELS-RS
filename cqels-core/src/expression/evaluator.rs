@@ -225,13 +225,23 @@ impl ExpressionEvaluator {
                 .unwrap_or_else(|| eval_arithmetic(&lval, &rval, |a, b| a - b)),
             BinaryOp::Mul => eval_int_arithmetic(&lval, &rval, i64::checked_mul)
                 .unwrap_or_else(|| eval_arithmetic(&lval, &rval, |a, b| a * b)),
-            BinaryOp::Div => {
-                // Division by zero → null
-                match rval.as_numeric() {
+            BinaryOp::Div => match (&lval, &rval) {
+                // Exact integer division: a whole quotient stays integer and
+                // must not round through f64 (9223372036854775806 / 1 lost
+                // precision). checked_rem is None for rhs == 0 (division by
+                // zero → null) and for the i64::MIN / -1 overflow (numeric
+                // error → null), covering both edge cases in one match.
+                (Value::Integer(a), Value::Integer(b)) => match a.checked_rem(*b) {
+                    Some(0) => a.checked_div(*b).map(Value::Integer).unwrap_or(Value::Null),
+                    Some(_) => Value::Float(*a as f64 / *b as f64),
+                    None => Value::Null,
+                },
+                _ => match rval.as_numeric() {
+                    // Division by zero → null
                     Some(0.0) => Value::Null,
                     _ => eval_arithmetic(&lval, &rval, |a, b| a / b),
-                }
-            }
+                },
+            },
             BinaryOp::Mod => match rval.as_numeric() {
                 Some(0.0) => Value::Null,
                 _ => eval_arithmetic(&lval, &rval, |a, b| a % b),
