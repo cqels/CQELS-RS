@@ -242,9 +242,20 @@ impl ExpressionEvaluator {
                     _ => eval_arithmetic(&lval, &rval, |a, b| a / b),
                 },
             },
-            BinaryOp::Mod => match rval.as_numeric() {
-                Some(0.0) => Value::Null,
-                _ => eval_arithmetic(&lval, &rval, |a, b| a % b),
+            BinaryOp::Mod => match (&lval, &rval) {
+                // Same exact-i64 treatment as Add/Sub/Mul/Div (local review on
+                // cqels-rs#94): the f64 path loses exactness beyond 2^53.
+                // checked_rem is None for rhs == 0 and the i64::MIN % -1
+                // overflow — both numeric errors → null. Unreachable from the
+                // CqelsQL grammar today (no `%` in multiplicative_op) but kept
+                // consistent so it's correct the day a dialect exposes it.
+                (Value::Integer(a), Value::Integer(b)) => {
+                    a.checked_rem(*b).map(Value::Integer).unwrap_or(Value::Null)
+                }
+                _ => match rval.as_numeric() {
+                    Some(0.0) => Value::Null,
+                    _ => eval_arithmetic(&lval, &rval, |a, b| a % b),
+                },
             },
 
             // String operators

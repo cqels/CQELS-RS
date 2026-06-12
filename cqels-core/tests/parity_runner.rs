@@ -208,11 +208,22 @@ fn expression_evaluation_parity() {
     }
     let backend = OxRdfBackend;
     let h = Harness::new(&backend);
-    let cases = case_files("expression-evaluation");
+    // `case_files` panics on a MISSING subdir (read_dir unwrap) — the
+    // empty-dir tolerance alone doesn't cover a parity-root checkout that
+    // predates the expression corpus (local review on cqels-rs#94: running
+    // the suite against an older fixture pin aborted instead of skipping).
+    let subdir_present = fixtures_dir()
+        .map(|d| d.join("expression-evaluation").is_dir())
+        .unwrap_or(false);
+    let cases = if subdir_present {
+        case_files("expression-evaluation")
+    } else {
+        Vec::new()
+    };
     if cases.is_empty() {
         eprintln!(
-            "[parity_runner] expression_evaluation_parity: no fixtures under \
-             parity/fixtures/expression-evaluation/ yet; skipping."
+            "[parity_runner] expression_evaluation_parity: corpus absent or empty at \
+             parity/fixtures/expression-evaluation/; skipping (pre-merge tolerance)."
         );
         return;
     }

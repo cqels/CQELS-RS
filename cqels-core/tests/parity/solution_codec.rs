@@ -68,18 +68,6 @@ pub(crate) fn parse_term_string(s: &str) -> Result<Value, String> {
     Ok(Value::Term(Term::from(triple.object)))
 }
 
-/// Serializes a [`Value`] to N-Triples-style notation matching the fixture
-/// format. `xsd:string`-typed plain literals collapse to bare `"foo"` (RDF
-/// 1.1 canonical form); other typed/lang literals serialize verbatim via
-/// [`cqels_model::Term`]'s `Display` impl.
-///
-/// Defensive on `Value::Null`: per spec D5 (parity-root, 2026-05-27), the
-/// parity surface uses absence-only UNBOUND — `Value::Null` is not a valid
-/// binding value in this adapter's pipeline. Hits `unreachable!` with a
-/// diagnostic rather than silently emitting the literal string `"null"`
-/// (cqels-rs#78). Today's fixtures never produce `Value::Null` because all
-/// term-strings parse to `Value::Term`; if a future code path leaks a null
-/// binding through, this fails loudly.
 const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
 const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
@@ -97,6 +85,18 @@ fn canonical_double(f: f64) -> String {
     }
 }
 
+/// Serializes a [`Value`] to N-Triples-style notation matching the fixture
+/// format. `xsd:string`-typed plain literals collapse to bare `"foo"` (RDF
+/// 1.1 canonical form); other typed/lang literals serialize verbatim via
+/// [`cqels_model::Term`]'s `Display` impl.
+///
+/// Defensive on `Value::Null`: per spec D5 (parity-root, 2026-05-27), the
+/// parity surface uses absence-only UNBOUND — `Value::Null` is not a valid
+/// binding value in this adapter's pipeline. Hits `unreachable!` with a
+/// diagnostic rather than silently emitting the literal string `"null"`
+/// (cqels-rs#78). Today's fixtures never produce `Value::Null` because all
+/// term-strings parse to `Value::Term`; if a future code path leaks a null
+/// binding through, this fails loudly.
 pub(crate) fn value_to_canonical_nt(v: &Value) -> String {
     let term = match v {
         Value::Term(t) => t.clone(),
