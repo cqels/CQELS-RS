@@ -203,6 +203,15 @@ impl ExpressionEvaluator {
             // Comparison operators
             BinaryOp::Eq => Value::Boolean(values_equal(&lval, &rval)),
             BinaryOp::Neq => Value::Boolean(!values_equal(&lval, &rval)),
+            // Ordering on IRIs/blank nodes is a SPARQL type error (§17.3
+            // defines no ordering for them) → null per D-E1; do NOT fall
+            // through to Value::PartialOrd's lexicographic Term ordering.
+            // parity unit 5.
+            BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Lte | BinaryOp::Gte
+                if matches!(lval, Value::Term(_)) || matches!(rval, Value::Term(_)) =>
+            {
+                Value::Null
+            }
             BinaryOp::Lt => Value::Boolean(lval < rval),
             BinaryOp::Gt => Value::Boolean(lval > rval),
             BinaryOp::Lte => Value::Boolean(lval <= rval),
@@ -335,15 +344,11 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Integer(x), Value::Float(y)) => (*x as f64) == *y,
         (Value::Float(x), Value::Integer(y)) => *x == (*y as f64),
 
-        // Term equality
+        // Term equality (SPARQL RDFterm-equal / sameTerm). A string literal
+        // and an IRI are DIFFERENT term kinds and never equal — the old
+        // String-Term text comparison made "http://x" = <http://x> true,
+        // which both SPARQL and the Java engine reject. parity unit 5.
         (Value::Term(x), Value::Term(y)) => x == y,
-
-        // String-Term comparison
-        (Value::String(s), Value::Term(t)) | (Value::Term(t), Value::String(s)) => {
-            t.to_string()
-                .trim_matches(|c| c == '<' || c == '>' || c == '"')
-                == s.as_str()
-        }
 
         _ => false,
     }
