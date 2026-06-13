@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use cqels_core::compiler::pipeline::term_to_value;
 use cqels_core::expression::ast::Expression;
 use cqels_core::expression::evaluator::ExpressionEvaluator;
 use cqels_core::expression::parser::ExpressionParser;
@@ -337,29 +338,6 @@ fn merge_event_variables(
                 Value::Term(Term::Iri(element.statement.predicate.clone())),
             );
         }
-    }
-}
-
-/// Convert an oxrdf-style [`Term`] into a typed [`Value`] for expression
-/// evaluation. Numeric / boolean / string literals are coerced into their
-/// typed variants so SPARQL comparisons work as expected.
-fn term_to_value(term: &Term) -> Value {
-    match term {
-        Term::Literal(lit) => {
-            let raw = lit.value();
-            if let Ok(i) = raw.parse::<i64>() {
-                Value::Integer(i)
-            } else if let Ok(f) = raw.parse::<f64>() {
-                Value::Float(f)
-            } else if raw == "true" {
-                Value::Boolean(true)
-            } else if raw == "false" {
-                Value::Boolean(false)
-            } else {
-                Value::String(raw.to_string())
-            }
-        }
-        other => Value::Term(other.clone()),
     }
 }
 
@@ -698,11 +676,18 @@ mod tests {
     // ─── FILTER predicate wiring (Java parity, follow-up) ─────────────────────
 
     fn numeric_event(subject: &str, predicate: &str, n: i64, ts: i64) -> RdfStreamElement {
+        // Typed xsd:integer literal: the canonical term_to_value lifter only
+        // lifts literals with an explicit numeric/boolean datatype (issue #97),
+        // so plain "80" would stay Value::String and numeric FILTERs would
+        // silently degrade to string comparison.
         RdfStreamElement::new(
             Statement::new(
                 Term::Iri(IriTerm::new(subject)),
                 IriTerm::new(predicate),
-                Term::Literal(cqels_model::LiteralTerm::new(n.to_string())),
+                Term::Literal(
+                    cqels_model::LiteralTerm::new(n.to_string())
+                        .with_datatype("http://www.w3.org/2001/XMLSchema#integer"),
+                ),
             ),
             ts,
         )
