@@ -211,9 +211,13 @@ relational_expr = { additive_expr ~ (relational_op ~ additive_expr)? }
 
 relational_op = { "<=" | ">=" | "!=" | "=" | "<" | ">" }
 
-additive_expr = { multiplicative_expr ~ (("+" | "-") ~ multiplicative_expr)* }
+additive_expr = { multiplicative_expr ~ (additive_op ~ multiplicative_expr)* }
 
-multiplicative_expr = { unary_expr ~ (("*" | "/") ~ unary_expr)* }
+additive_op = { "+" | "-" }
+
+multiplicative_expr = { unary_expr ~ (multiplicative_op ~ unary_expr)* }
+
+multiplicative_op = { "*" | "/" }
 
 unary_expr = { ("!" | "+" | "-")? ~ primary_expr }
 

@@ -229,19 +229,19 @@ async fn test_e2e_cqelsql_with_filter() {
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
     let elements = vec![
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s1",
             "http://example.org/temp",
             "42",
             1000,
         ),
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s2",
             "http://example.org/temp",
             "25",
             2000,
         ),
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s3",
             "http://example.org/temp",
             "35",
@@ -302,20 +302,24 @@ async fn test_e2e_cqelsql_group_by_avg() {
     let definition = CqelsQlParser::parse(query_str).expect("parse failed");
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
+    // Typed integer literals: since the unit-5 conformance fix, plain
+    // (untyped) literals are no longer lifted numerically, so AVG over them
+    // computes 0.0 — a length-only assertion masked exactly that (local
+    // review on cqels-rs#94). Typed data + value assertions pin the contract.
     let elements = vec![
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s1",
             "http://example.org/temp",
             "40",
             1000,
         ),
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s1",
             "http://example.org/temp",
             "50",
             2000,
         ),
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s2",
             "http://example.org/temp",
             "30",
@@ -328,6 +332,20 @@ async fn test_e2e_cqelsql_group_by_avg() {
 
     let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
     assert_eq!(results.len(), 2);
+    let avg_for = |sensor: &str| -> f64 {
+        results
+            .iter()
+            .find(|bs| {
+                bs.get("sensor")
+                    .and_then(|v| v.as_string().map(|s| s.contains(sensor)))
+                    .unwrap_or(false)
+            })
+            .and_then(|bs| bs.get("avg_temp"))
+            .and_then(|v| v.as_numeric())
+            .unwrap_or_else(|| panic!("no numeric avg_temp for {sensor}"))
+    };
+    assert_eq!(avg_for("s1"), 45.0, "AVG(40, 50)");
+    assert_eq!(avg_for("s2"), 30.0, "AVG(30)");
 }
 
 #[tokio::test]
@@ -347,20 +365,24 @@ async fn test_e2e_cqelsql_order_by_desc_limit() {
     let definition = CqelsQlParser::parse(query_str).expect("parse failed");
     let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
+    // Typed integer literals + ordering assertions: plain literals now sort
+    // as strings ("9" > "30") and the TopK score path treats them as 0.0, so
+    // the old length-only assertion verified nothing about ORDER (local
+    // review on cqels-rs#94).
     let elements = vec![
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s1",
             "http://example.org/temp",
             "10",
             1000,
         ),
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s2",
             "http://example.org/temp",
             "50",
             2000,
         ),
-        stream_elem_literal(
+        stream_elem_int_literal(
             "http://example.org/s3",
             "http://example.org/temp",
             "30",
@@ -373,6 +395,15 @@ async fn test_e2e_cqelsql_order_by_desc_limit() {
 
     let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
     assert_eq!(results.len(), 2);
+    let temps: Vec<i64> = results
+        .iter()
+        .map(|bs| {
+            bs.get("temp")
+                .and_then(|v| v.as_integer())
+                .expect("numeric temp binding")
+        })
+        .collect();
+    assert_eq!(temps, vec![50, 30], "DESC order, top 2 of [10, 50, 30]");
 }
 
 #[tokio::test]

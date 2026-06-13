@@ -258,10 +258,12 @@ pub fn bindings_to_ntriples(
             continue;
         }
 
-        // Predicate must be an IRI.
+        // Predicate must be an IRI. A Value::String is a literal binding (the
+        // pipeline lifts plain/xsd:string literals to String), and coercing
+        // literal text into a predicate IRI would fabricate triples like
+        // `<s> <42> <o>` — skip it like any other non-IRI binding.
         let pred_iri = match pred_val {
             Value::Term(Term::Iri(iri)) => iri.clone(),
-            Value::String(s) => IriTerm::new(s.as_str()),
             _ => continue,
         };
 
@@ -596,7 +598,10 @@ mod tests {
     }
 
     #[test]
-    fn test_bindings_to_ntriples_string_predicate() {
+    fn test_bindings_to_ntriples_string_predicate_skipped() {
+        // A Value::String binding is a literal (the pipeline lifts plain and
+        // xsd:string literals to String), so it must NOT be coerced into a
+        // predicate IRI — even when its text looks like one.
         let mut bs = BindingSet::new(0);
         bs.insert(
             "s",
@@ -605,7 +610,7 @@ mod tests {
         bs.insert("p", Value::String("http://example.org/p".into()));
         bs.insert("o", Value::String("hello".into()));
         let nt = bindings_to_ntriples(&[bs], "s", "p", "o");
-        assert!(nt.contains("<http://example.org/p>"));
+        assert!(nt.is_empty());
     }
 
     #[test]

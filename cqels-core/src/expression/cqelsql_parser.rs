@@ -6,6 +6,7 @@
 use pest::Parser;
 use pest_derive::Parser;
 
+use cqels_model::term::{IriTerm, Term};
 use cqels_model::Value;
 
 use super::ast::{AggregateExprFunction, BinaryOp, Expression, UnaryOp};
@@ -222,11 +223,7 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             .into_iter()
             .last()
             .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
-        let operand = parse_primary(operand_pair)?;
-        return Ok(Expression::UnaryOp {
-            op: UnaryOp::Negate,
-            operand: Box::new(operand),
-        });
+        return parse_negate(operand_pair);
     }
     if first_text == "+" && children.len() > 1 {
         let operand_pair = children
@@ -256,9 +253,22 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             .into_iter()
             .next()
             .ok_or_else(|| ParseError::Syntax("missing negation operand".into()))?;
+        return parse_negate(operand_pair);
+    }
+    // Live unary-plus path (local review round 2 on cqels-rs#94): the inlined
+    // `+` prefix produces no pest pair — the same no-pair disease this PR
+    // fixed for the binary operators — so only this text-prefix branch can
+    // fire. Without it, `+expr` silently dropped the operator and
+    // UnaryOp::UnaryPlus (whose evaluator arm type-errors non-numerics to
+    // Null per XPath op:numeric-unary-plus) was unreachable from the grammar.
+    if text.starts_with('+') && children.len() == 1 {
+        let operand_pair = children
+            .into_iter()
+            .next()
+            .ok_or_else(|| ParseError::Syntax("missing unary plus operand".into()))?;
         let operand = parse_primary(operand_pair)?;
         return Ok(Expression::UnaryOp {
-            op: UnaryOp::Negate,
+            op: UnaryOp::UnaryPlus,
             operand: Box::new(operand),
         });
     }
@@ -268,6 +278,27 @@ fn parse_unary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         .next()
         .ok_or_else(|| ParseError::Syntax("missing unary operand".into()))?;
     parse_primary(first)
+}
+
+/// Builds the negation of a unary operand, folding `-<digits>` whose
+/// magnitude alone does not fit i64 into a single signed constant. The
+/// magnitude of i64::MIN (9223372036854775808) overflows i64 unsigned, so
+/// parsing the literal before applying the sign would reject the lower
+/// boundary that Java's BigInteger path accepts (spec D-E4 is
+/// boundary-inclusive). Ordinary negations keep the UnaryOp::Negate shape.
+fn parse_negate(operand_pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let text = operand_pair.as_str().trim();
+    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) && text.parse::<i64>().is_err()
+    {
+        if let Ok(i) = format!("-{text}").parse::<i64>() {
+            return Ok(Expression::Literal(Value::Integer(i)));
+        }
+    }
+    let operand = parse_primary(operand_pair)?;
+    Ok(Expression::UnaryOp {
+        op: UnaryOp::Negate,
+        operand: Box::new(operand),
+    })
 }
 
 fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
@@ -288,13 +319,23 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         Rule::literal => parse_literal(pair),
 
         Rule::iri_ref => {
-            let iri = pair.as_str().to_string();
-            Ok(Expression::Literal(Value::String(iri)))
+            // Strip the surrounding angle brackets. An IRI expression
+            // evaluates to an IRI TERM — matching Java's parseIriRef →
+            // RDF4J IRI — not a string literal of the IRI text.
+            // (parity unit 5)
+            let s = pair.as_str();
+            let iri = &s[1..s.len() - 1];
+            Ok(Expression::Literal(Value::Term(Term::Iri(IriTerm::new(
+                iri,
+            )))))
         }
 
         Rule::prefixed_name => {
+            // Resolved against the evaluator's prefix map at eval time —
+            // matching the iri_ref arm's Term semantics rather than the old
+            // raw-text Value::String (which could never equal an IRI binding).
             let name = pair.as_str().to_string();
-            Ok(Expression::Literal(Value::String(name)))
+            Ok(Expression::PrefixedIri(name))
         }
 
         Rule::expression => parse_expression(pair),
@@ -558,8 +599,24 @@ mod tests {
     }
 
     #[test]
+    fn test_subtraction() {
+        // Regression: the multiplicative/additive operators were inlined in the
+        // grammar (not surfaced as child pairs), so the parser never saw "-" and
+        // fell back to Add. Now `additive_op`/`multiplicative_op` are named rules.
+        assert_binop("?x - 1", BinaryOp::Sub);
+        assert_binop("?x - ?y", BinaryOp::Sub);
+    }
+
+    #[test]
     fn test_multiplication() {
         assert_binop("?x * 2", BinaryOp::Mul);
+    }
+
+    #[test]
+    fn test_division() {
+        // Regression (same root cause as subtraction): "/" used to parse as Mul.
+        assert_binop("?x / 2", BinaryOp::Div);
+        assert_binop("?x / ?y", BinaryOp::Div);
     }
 
     // ─── Logical operators ───────────────────────────────────────────────

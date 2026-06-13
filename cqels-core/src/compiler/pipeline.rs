@@ -150,19 +150,49 @@ fn is_variable(term: &str) -> bool {
     term.starts_with('?') || term.starts_with('$')
 }
 
-/// Converts an RDF Term to a Value.
-fn term_to_value(term: &Term) -> Value {
+/// Converts an RDF Term to a [`Value`], lifting typed RDF literals to native
+/// numeric/boolean/string variants (xsd:integer/int/long → `Value::Integer`,
+/// xsd:double/float/decimal → `Value::Float`, xsd:boolean → `Value::Boolean`,
+/// otherwise `Value::String`; IRIs and blank nodes stay `Value::Term`).
+///
+/// This is the binding-construction lifter used throughout pattern matching, so
+/// the bindings reaching the expression evaluator hold native `Value` variants
+/// rather than `Value::Term(Literal)`. Exposed `pub` so the parity
+/// expression-evaluation adapter can build binding sets the same way production
+/// does (otherwise arithmetic on RDF-typed bindings spuriously yields null).
+pub fn term_to_value(term: &Term) -> Value {
     match term {
         Term::Iri(iri) => Value::Term(Term::Iri(iri.clone())),
         Term::BlankNode(bn) => Value::Term(Term::BlankNode(bn.clone())),
         Term::Literal(lit) => {
-            // Try to parse numeric literals
+            // Lift only literals whose DATATYPE is numeric/boolean. A plain or
+            // xsd:string literal stays a string even when its lexical form
+            // parses as a number: per SPARQL 1.1 §17.2.2 the EBV of "0" is
+            // true (nonempty), and arithmetic on it is a type error — lifting
+            // it to Integer(0) silently changed both. (parity unit 5)
             let val = lit.value();
             if let Some(dt) = lit.datatype() {
                 match dt {
+                    // The full XSD integer-derived hierarchy (XSD 1.1 §3.4) —
+                    // codex P2 on cqels-rs#94: enumerating only integer/int/long
+                    // dropped xsd:short, xsd:byte, the (non)Negative/Positive
+                    // family, and the unsigned family to Value::String, breaking
+                    // FILTER/arithmetic over standard stream datatypes. Values
+                    // whose magnitude exceeds i64 (e.g. large xsd:unsignedLong)
+                    // fall through to String, same as out-of-range xsd:integer.
                     "http://www.w3.org/2001/XMLSchema#integer"
                     | "http://www.w3.org/2001/XMLSchema#int"
-                    | "http://www.w3.org/2001/XMLSchema#long" => {
+                    | "http://www.w3.org/2001/XMLSchema#long"
+                    | "http://www.w3.org/2001/XMLSchema#short"
+                    | "http://www.w3.org/2001/XMLSchema#byte"
+                    | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger"
+                    | "http://www.w3.org/2001/XMLSchema#nonPositiveInteger"
+                    | "http://www.w3.org/2001/XMLSchema#negativeInteger"
+                    | "http://www.w3.org/2001/XMLSchema#positiveInteger"
+                    | "http://www.w3.org/2001/XMLSchema#unsignedLong"
+                    | "http://www.w3.org/2001/XMLSchema#unsignedInt"
+                    | "http://www.w3.org/2001/XMLSchema#unsignedShort"
+                    | "http://www.w3.org/2001/XMLSchema#unsignedByte" => {
                         if let Ok(i) = val.parse::<i64>() {
                             return Value::Integer(i);
                         }
@@ -179,13 +209,6 @@ fn term_to_value(term: &Term) -> Value {
                     }
                     _ => {}
                 }
-            }
-            // Try numeric parsing for untyped literals
-            if let Ok(i) = val.parse::<i64>() {
-                return Value::Integer(i);
-            }
-            if let Ok(f) = val.parse::<f64>() {
-                return Value::Float(f);
             }
             Value::String(val.to_string())
         }
@@ -1667,6 +1690,52 @@ mod tests {
             predicate: predicate.to_string(),
             object: object.to_string(),
         }
+    }
+
+    #[test]
+    fn test_term_to_value_lifts_xsd_integer_derived_subtypes() {
+        // codex P2 on cqels-rs#94: enumerating only integer/int/long dropped
+        // the derived subtypes to Value::String after the untyped-numeric
+        // fallback was removed, breaking FILTER/arithmetic over standard
+        // stream datatypes.
+        for dt in [
+            "http://www.w3.org/2001/XMLSchema#short",
+            "http://www.w3.org/2001/XMLSchema#byte",
+            "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+            "http://www.w3.org/2001/XMLSchema#nonPositiveInteger",
+            "http://www.w3.org/2001/XMLSchema#negativeInteger",
+            "http://www.w3.org/2001/XMLSchema#positiveInteger",
+            "http://www.w3.org/2001/XMLSchema#unsignedLong",
+            "http://www.w3.org/2001/XMLSchema#unsignedInt",
+            "http://www.w3.org/2001/XMLSchema#unsignedShort",
+            "http://www.w3.org/2001/XMLSchema#unsignedByte",
+        ] {
+            let term = Term::Literal(LiteralTerm::new("31").with_datatype(dt));
+            assert_eq!(term_to_value(&term), Value::Integer(31), "datatype {dt}");
+        }
+    }
+
+    #[test]
+    fn test_term_to_value_plain_and_string_literals_stay_strings() {
+        // The other half of the unit-5 contract (commit 6f3524e): plain and
+        // xsd:string literals must NOT lift numerically even when the lexical
+        // form parses — SPARQL §17.2.2 EBV of "0" is true (nonempty string).
+        let plain = Term::Literal(LiteralTerm::new("0"));
+        assert_eq!(term_to_value(&plain), Value::String("0".to_string()));
+        let typed = Term::Literal(
+            LiteralTerm::new("0").with_datatype("http://www.w3.org/2001/XMLSchema#string"),
+        );
+        assert_eq!(term_to_value(&typed), Value::String("0".to_string()));
+        // Out-of-i64-range magnitude falls through to String (consistent with
+        // pre-existing xsd:integer behavior).
+        let huge = Term::Literal(
+            LiteralTerm::new("18446744073709551615")
+                .with_datatype("http://www.w3.org/2001/XMLSchema#unsignedLong"),
+        );
+        assert_eq!(
+            term_to_value(&huge),
+            Value::String("18446744073709551615".to_string())
+        );
     }
 
     #[test]

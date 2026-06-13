@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use cqels_model::{BindingSet, Value};
+use cqels_model::{BindingSet, IriTerm, Term, Value};
 
 use super::ast::{AggregateExprFunction, BinaryOp, Expression, UnaryOp};
 use super::functions::{call_builtin, value_to_bool};
@@ -65,6 +65,12 @@ impl ExpressionEvaluator {
     pub fn evaluate(&self, expr: &Expression, bindings: &BindingSet) -> Value {
         match expr {
             Expression::Literal(v) => v.clone(),
+            Expression::PrefixedIri(name) => {
+                // Same fallback contract as prefixed FUNCTION names: unknown
+                // prefixes keep the raw text (a CURIE like `ex:x` is itself a
+                // syntactically valid IRI with scheme `ex`).
+                Value::Term(Term::Iri(IriTerm::new(self.resolve_prefixed_name(name))))
+            }
 
             Expression::Variable(name) => {
                 let var_name = name
@@ -95,7 +101,11 @@ impl ExpressionEvaluator {
                         }
                     }
                     UnaryOp::Negate => match val {
-                        Value::Integer(i) => Value::Integer(-i),
+                        // checked_neg: -i64::MIN overflows (numeric error →
+                        // Null), and `-i` would panic in debug builds.
+                        Value::Integer(i) => {
+                            i.checked_neg().map(Value::Integer).unwrap_or(Value::Null)
+                        }
                         Value::Float(f) => Value::Float(-f),
                         Value::Null => Value::Null,
                         _ => Value::Null,
@@ -199,25 +209,59 @@ impl ExpressionEvaluator {
             // Comparison operators
             BinaryOp::Eq => Value::Boolean(values_equal(&lval, &rval)),
             BinaryOp::Neq => Value::Boolean(!values_equal(&lval, &rval)),
+            // Ordering on IRIs/blank nodes is a SPARQL type error (§17.3
+            // defines no ordering for them) → null per D-E1; do NOT fall
+            // through to Value::PartialOrd's lexicographic Term ordering.
+            // parity unit 5.
+            BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Lte | BinaryOp::Gte
+                if matches!(lval, Value::Term(_)) || matches!(rval, Value::Term(_)) =>
+            {
+                Value::Null
+            }
             BinaryOp::Lt => Value::Boolean(lval < rval),
             BinaryOp::Gt => Value::Boolean(lval > rval),
             BinaryOp::Lte => Value::Boolean(lval <= rval),
             BinaryOp::Gte => Value::Boolean(lval >= rval),
 
-            // Arithmetic operators
-            BinaryOp::Add => eval_arithmetic(&lval, &rval, |a, b| a + b),
-            BinaryOp::Sub => eval_arithmetic(&lval, &rval, |a, b| a - b),
-            BinaryOp::Mul => eval_arithmetic(&lval, &rval, |a, b| a * b),
-            BinaryOp::Div => {
-                // Division by zero → null
-                match rval.as_numeric() {
+            // Arithmetic operators (exact i64 fast-path first — the f64 path
+            // rounds beyond 2^53, so i64::MAX - 1 silently lost the unit)
+            BinaryOp::Add => eval_int_arithmetic(&lval, &rval, i64::checked_add)
+                .unwrap_or_else(|| eval_arithmetic(&lval, &rval, |a, b| a + b)),
+            BinaryOp::Sub => eval_int_arithmetic(&lval, &rval, i64::checked_sub)
+                .unwrap_or_else(|| eval_arithmetic(&lval, &rval, |a, b| a - b)),
+            BinaryOp::Mul => eval_int_arithmetic(&lval, &rval, i64::checked_mul)
+                .unwrap_or_else(|| eval_arithmetic(&lval, &rval, |a, b| a * b)),
+            BinaryOp::Div => match (&lval, &rval) {
+                // Exact integer division: a whole quotient stays integer and
+                // must not round through f64 (9223372036854775806 / 1 lost
+                // precision). checked_rem is None for rhs == 0 (division by
+                // zero → null) and for the i64::MIN / -1 overflow (numeric
+                // error → null), covering both edge cases in one match.
+                (Value::Integer(a), Value::Integer(b)) => match a.checked_rem(*b) {
+                    Some(0) => a.checked_div(*b).map(Value::Integer).unwrap_or(Value::Null),
+                    Some(_) => Value::Float(*a as f64 / *b as f64),
+                    None => Value::Null,
+                },
+                _ => match rval.as_numeric() {
+                    // Division by zero → null
                     Some(0.0) => Value::Null,
                     _ => eval_arithmetic(&lval, &rval, |a, b| a / b),
+                },
+            },
+            BinaryOp::Mod => match (&lval, &rval) {
+                // Same exact-i64 treatment as Add/Sub/Mul/Div (local review on
+                // cqels-rs#94): the f64 path loses exactness beyond 2^53.
+                // checked_rem is None for rhs == 0 and the i64::MIN % -1
+                // overflow — both numeric errors → null. Unreachable from the
+                // CqelsQL grammar today (no `%` in multiplicative_op) but kept
+                // consistent so it's correct the day a dialect exposes it.
+                (Value::Integer(a), Value::Integer(b)) => {
+                    a.checked_rem(*b).map(Value::Integer).unwrap_or(Value::Null)
                 }
-            }
-            BinaryOp::Mod => match rval.as_numeric() {
-                Some(0.0) => Value::Null,
-                _ => eval_arithmetic(&lval, &rval, |a, b| a % b),
+                _ => match rval.as_numeric() {
+                    Some(0.0) => Value::Null,
+                    _ => eval_arithmetic(&lval, &rval, |a, b| a % b),
+                },
             },
 
             // String operators
@@ -327,17 +371,27 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Integer(x), Value::Float(y)) => (*x as f64) == *y,
         (Value::Float(x), Value::Integer(y)) => *x == (*y as f64),
 
-        // Term equality
+        // Term equality (SPARQL RDFterm-equal / sameTerm). A string literal
+        // and an IRI are DIFFERENT term kinds and never equal — the old
+        // String-Term text comparison made "http://x" = <http://x> true,
+        // which both SPARQL and the Java engine reject. parity unit 5.
         (Value::Term(x), Value::Term(y)) => x == y,
 
-        // String-Term comparison
-        (Value::String(s), Value::Term(t)) | (Value::Term(t), Value::String(s)) => {
-            t.to_string()
-                .trim_matches(|c| c == '<' || c == '>' || c == '"')
-                == s.as_str()
-        }
-
         _ => false,
+    }
+}
+
+/// Exact i64 fast-path for `+ - *` when both operands are integers, keeping
+/// results exact beyond f64's 2^53 integer window (parity unit 5). Overflow
+/// is a numeric error (Null) per XPath err:FOAR0002 — never silently rounded
+/// through the float path. Returns None when either operand is not an
+/// Integer so the caller falls back to float arithmetic.
+fn eval_int_arithmetic(a: &Value, b: &Value, op: fn(i64, i64) -> Option<i64>) -> Option<Value> {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => {
+            Some(op(*x, *y).map(Value::Integer).unwrap_or(Value::Null))
+        }
+        _ => None,
     }
 }
 
@@ -371,6 +425,36 @@ mod tests {
             bs.insert(*name, val.clone());
         }
         bs
+    }
+
+    #[test]
+    fn test_prefixed_iri_resolves_to_term_via_prefix_map() {
+        // codex P2 + local review on cqels-rs#94: `ex:x` primaries previously
+        // evaluated to Value::String("ex:x") and could never equal an IRI
+        // binding; they must resolve through the evaluator's prefix map to
+        // the same Term the angle-bracket iri_ref path produces.
+        let mut prefixes = HashMap::new();
+        prefixes.insert("ex".to_string(), "http://example.org/".to_string());
+        let eval = ExpressionEvaluator::with_prefixes(prefixes);
+
+        let expr = Expression::BinaryOp {
+            op: BinaryOp::Eq,
+            left: Box::new(Expression::Variable("p".to_string())),
+            right: Box::new(Expression::PrefixedIri("ex:x".to_string())),
+        };
+        let bs = make_bindings(&[(
+            "p",
+            Value::Term(Term::Iri(IriTerm::new("http://example.org/x"))),
+        )]);
+        assert_eq!(eval.evaluate(&expr, &bs), Value::Boolean(true));
+
+        // Unknown prefix keeps the raw text (CURIE is itself a valid IRI) —
+        // same fallback contract as prefixed function names.
+        let raw = Expression::PrefixedIri("nope:x".to_string());
+        assert_eq!(
+            eval.evaluate(&raw, &make_bindings(&[])),
+            Value::Term(Term::Iri(IriTerm::new("nope:x")))
+        );
     }
 
     #[test]

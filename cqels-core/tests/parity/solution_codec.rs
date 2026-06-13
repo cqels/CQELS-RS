@@ -68,6 +68,23 @@ pub(crate) fn parse_term_string(s: &str) -> Result<Value, String> {
     Ok(Value::Term(Term::from(triple.object)))
 }
 
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+
+/// Shared canonical lexical form for a double-valued result so the Rust engine's
+/// `"4"` and the Java engine's `"4.0"` (both xsd:double 4.0) compare equal at the
+/// VALUE level (parity unit 5). Whole numbers get a trailing `.0`; others use the
+/// shortest round-trippable decimal. The matching Java side is
+/// `ExpressionEvalAdapter.canonicalDouble`.
+fn canonical_double(f: f64) -> String {
+    if f.is_finite() && f == f.floor() {
+        format!("{f:.1}")
+    } else {
+        format!("{f}")
+    }
+}
+
 /// Serializes a [`Value`] to N-Triples-style notation matching the fixture
 /// format. `xsd:string`-typed plain literals collapse to bare `"foo"` (RDF
 /// 1.1 canonical form); other typed/lang literals serialize verbatim via
@@ -83,6 +100,10 @@ pub(crate) fn parse_term_string(s: &str) -> Result<Value, String> {
 pub(crate) fn value_to_canonical_nt(v: &Value) -> String {
     let term = match v {
         Value::Term(t) => t.clone(),
+        // A native float result: canonicalize to a shared double lexical form.
+        Value::Float(f) => {
+            return format!("\"{}\"^^<{XSD_DOUBLE}>", canonical_double(*f));
+        }
         Value::Null => unreachable!(
             "Value::Null in solutions-payload adapter output — parity surface uses \
              absence-only UNBOUND (spec D5, cqels-rs#78). All fixture inputs parse to \
@@ -99,6 +120,16 @@ pub(crate) fn value_to_canonical_nt(v: &Value) -> String {
     if let Term::Literal(lit) = &term {
         if lit.language().is_none() && lit.datatype() == Some(XSD_STRING) {
             return format!("\"{}\"", lit.value());
+        }
+        // A double/float/decimal-typed literal (e.g. the parsed `expected` term):
+        // route it through the same double canonicalizer so expected vs actual
+        // compare on identical lexical form regardless of engine serialization.
+        if let Some(dt) = lit.datatype() {
+            if dt == XSD_DOUBLE || dt == XSD_FLOAT || dt == XSD_DECIMAL {
+                if let Ok(f) = lit.value().parse::<f64>() {
+                    return format!("\"{}\"^^<{XSD_DOUBLE}>", canonical_double(f));
+                }
+            }
         }
     }
     term.to_string()
