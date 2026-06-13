@@ -802,19 +802,43 @@ fn run_parity_sweep(mut args: VecDeque<String>) -> Result<()> {
         &java_log,
     );
 
-    // The summary table is the artifact. Per-fixture pass/fail status
-    // is right there — anything that needs gating (CI, pre-commit
-    // hooks, etc.) can grep the table or invoke a specific fixture.
-    // The command exits 0 as long as both runners *executed* (build
-    // succeeded and we got per-fixture status for every fixture).
-    // Build / setup failures already bail() earlier in run_rust_side /
-    // run_java_side. Fixture-level failures (FAIL / ERR) are signal
-    // for the developer reading the table, not a regression gate
-    // here — until each fixture's expected pass/fail status lives in
-    // its `metadata.toml`, distinguishing real regressions from
+    // Exit-code contract (#82): FAIL (mismatch) stays informational —
+    // until each fixture's expected pass/fail status lives in its
+    // `metadata.toml`, distinguishing real regressions from
     // known-failing fixtures requires upstream context the xtask
-    // doesn't have.
+    // doesn't have. But ERR (runner crash) and LOAD (fixture data
+    // didn't load) are never expected: they mean the sweep didn't
+    // actually measure parity for that fixture, so automated gating
+    // (CI, hooks) must not see exit 0.
+    let broken = unexpected_failures(&rust_results, &java_results);
+    if !broken.is_empty() {
+        bail!(
+            "parity sweep had unexpected runner/load failures (ERR/LOAD): {} — \
+             see the table above and logs under target/xtask/parity/",
+            broken.join(", ")
+        );
+    }
     Ok(())
+}
+
+/// Fixtures whose status on either side is an unexpected failure — the runner
+/// crashed (`ERR`) or fixture data failed to load (`LOAD`). `FAIL` (output
+/// mismatch) and `skip` are NOT included: mismatches are informational until
+/// expected-status metadata exists, and skips are deliberate.
+fn unexpected_failures(
+    rust_results: &[(String, RunStatus)],
+    java_results: &[(String, RunStatus)],
+) -> Vec<String> {
+    let is_broken = |s: &RunStatus| matches!(s, RunStatus::EngineError | RunStatus::LoadError);
+    let mut names: Vec<String> = rust_results
+        .iter()
+        .chain(java_results.iter())
+        .filter(|(_, s)| is_broken(s))
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn discover_fixtures() -> Result<Vec<String>> {
@@ -1362,4 +1386,45 @@ fn update_ground_truth(path: &std::path::Path, new_value: &str) -> Result<()> {
     // ends in '\n' is the conventional shape for hand-edited TOML.
     fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn results(pairs: &[(&str, RunStatus)]) -> Vec<(String, RunStatus)> {
+        pairs.iter().map(|(n, s)| (n.to_string(), *s)).collect()
+    }
+
+    #[test]
+    fn unexpected_failures_empty_for_ok_and_mismatch_and_skip() {
+        // FAIL (mismatch) is informational until expected-status metadata
+        // exists; skip is deliberate. Neither may flip the exit code (#82).
+        let rust = results(&[
+            ("a", RunStatus::Ok),
+            ("b", RunStatus::Mismatch),
+            ("c", RunStatus::Skipped),
+        ]);
+        let java = results(&[
+            ("a", RunStatus::Mismatch),
+            ("b", RunStatus::Ok),
+            ("c", RunStatus::Skipped),
+        ]);
+        assert!(unexpected_failures(&rust, &java).is_empty());
+    }
+
+    #[test]
+    fn unexpected_failures_flags_engine_error_on_either_side() {
+        let rust = results(&[("a", RunStatus::Ok), ("b", RunStatus::EngineError)]);
+        let java = results(&[("a", RunStatus::EngineError), ("b", RunStatus::Ok)]);
+        assert_eq!(unexpected_failures(&rust, &java), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn unexpected_failures_flags_load_error_and_dedups_across_sides() {
+        // Same fixture broken on both sides reports once.
+        let rust = results(&[("a", RunStatus::LoadError), ("b", RunStatus::Ok)]);
+        let java = results(&[("a", RunStatus::EngineError), ("b", RunStatus::Mismatch)]);
+        assert_eq!(unexpected_failures(&rust, &java), vec!["a"]);
+    }
 }
