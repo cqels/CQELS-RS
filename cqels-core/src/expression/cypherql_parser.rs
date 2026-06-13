@@ -272,23 +272,29 @@ fn parse_multiply(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> 
 }
 
 fn parse_power(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
-    let mut children: Vec<pest::iterators::Pair<Rule>> = pair.into_inner().collect();
-    if children.is_empty() {
-        return Err(ParseError::Syntax("empty power expression".into()));
-    }
-    let first = children.remove(0);
+    let mut iter = pair.into_inner();
+    let first = iter
+        .next()
+        .ok_or_else(|| ParseError::Syntax("empty power expression".into()))?;
     let base = parse_unary(first)?;
-    // If there's a "^" and a right operand, emit as a power() function call
-    if children.len() >= 2 {
-        // Skip the "^" token
-        children.remove(0);
-        let exponent = parse_unary(children.remove(0))?;
-        Ok(Expression::FunctionCall {
-            name: "power".to_string(),
-            args: vec![base, exponent],
-        })
-    } else {
-        Ok(base)
+
+    // The grammar surfaces an optional `power_op` ("^") pair followed by the
+    // exponent operand: `unary_expression ~ (power_op ~ unary_expression)?`.
+    // Consume the operator pair by content (like parse_add/parse_multiply — no
+    // index games) and the exponent that follows it. Single-exponent only: the
+    // grammar uses `?`, not a repeat, so there is no chaining at this level.
+    match iter.next() {
+        Some(next) if next.as_str() == "^" => {
+            let exponent_pair = iter
+                .next()
+                .ok_or_else(|| ParseError::Syntax("missing power exponent".into()))?;
+            let exponent = parse_unary(exponent_pair)?;
+            Ok(Expression::FunctionCall {
+                name: "power".to_string(),
+                args: vec![base, exponent],
+            })
+        }
+        _ => Ok(base),
     }
 }
 
@@ -746,21 +752,69 @@ mod tests {
     }
 
     // ─── Power operator ──────────────────────────────────────────────────
+    //
+    // Regression (#100, same inlined-operator disease as #94/#96): the grammar
+    // inlined the `^` as a string literal, so it surfaced no pest pair. The old
+    // `parse_power` did `children.remove(0)` to "skip the ^ token" that wasn't
+    // there, its `children.len() >= 2` guard then failed (only the exponent pair
+    // remained, len 1), and the exponent was silently dropped — `a ^ b` parsed
+    // as bare `a`. Naming the operator (`power_op = { "^" }`) surfaces it as a
+    // pair so the parser's content dispatch can consume it. The old tolerant
+    // catch-all test masked the drop; replaced here with exact assertions.
 
     #[test]
-    fn test_power_operator() {
-        // Power with parenthesized operands to avoid ambiguity
+    fn test_power_operator_captures_exponent() {
+        // The exponent must actually be captured: a power() call with BOTH
+        // operands, not a bare base. (x) ^ (2) → power(x, 2).
         match parse_ok("(x) ^ (2)") {
             Expression::FunctionCall { name, args } => {
                 assert_eq!(name, "power");
-                assert_eq!(args.len(), 2);
+                assert_eq!(
+                    args.len(),
+                    2,
+                    "exponent was dropped — only the base survived"
+                );
             }
-            // If the grammar doesn't support ^, it may parse differently
-            other => {
-                // At minimum, parsing should succeed
-                let _ = other;
-            }
+            other => panic!("expected power() FunctionCall with 2 args, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_eval_power() {
+        // CypherQL power dispatches to the `power`/`pow` builtin, which computes
+        // f64 base.powf(exp) → Value::Float (NOT the #94 checked-integer Pow).
+        match eval_const("2 ^ 3") {
+            Value::Float(f) => assert!(
+                (f - 8.0).abs() < f64::EPSILON,
+                "2 ^ 3 should be 8.0, got {f}"
+            ),
+            other => panic!("expected Float(8.0), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_eval_power_zero_exponent() {
+        match eval_const("2 ^ 0") {
+            Value::Float(f) => assert!(
+                (f - 1.0).abs() < f64::EPSILON,
+                "2 ^ 0 should be 1.0, got {f}"
+            ),
+            other => panic!("expected Float(1.0), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_power_is_single_exponent_only() {
+        // The grammar uses `(power_op ~ unary_expression)?` — an *optional*
+        // single exponent, not a repeat. So `2 ^ 3 ^ 2` is neither left- nor
+        // right-associative: the trailing `^ 2` cannot be consumed and, because
+        // standalone_expression requires EOI, it is a hard parse error. This
+        // pins the grammar's actual (single-power) intent; chaining is not
+        // supported. Use explicit nesting — power(2, power(3, 2)) — if needed.
+        assert!(
+            parse("2 ^ 3 ^ 2").is_err(),
+            "chained `^` is single-exponent-only and must be a parse error"
+        );
     }
 
     // ─── Logical operators ───────────────────────────────────────────────

@@ -184,7 +184,9 @@ multiply_expression = { power_expression ~ (multiplicative_op ~ power_expression
 
 multiplicative_op = { "*" | "/" | "%" }
 
-power_expression = { unary_expression ~ ("^" ~ unary_expression)? }
+power_expression = { unary_expression ~ (power_op ~ unary_expression)? }
+
+power_op = { "^" }
 
 unary_expression = { ("+" | "-")? ~ atom }
 
