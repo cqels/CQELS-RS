@@ -176,9 +176,13 @@ starts_with_kw = { ^"starts" ~ ^"with" }
 ends_with_kw   = { ^"ends" ~ ^"with" }
 in_kw          = @{ ^"in" ~ !(ASCII_ALPHANUMERIC | "_") }
 
-add_expression = { multiply_expression ~ (("+" | "-") ~ multiply_expression)* }
+add_expression = { multiply_expression ~ (additive_op ~ multiply_expression)* }
 
-multiply_expression = { power_expression ~ (("*" | "/" | "%") ~ power_expression)* }
+additive_op = { "+" | "-" }
+
+multiply_expression = { power_expression ~ (multiplicative_op ~ power_expression)* }
+
+multiplicative_op = { "*" | "/" | "%" }
 
 power_expression = { unary_expression ~ ("^" ~ unary_expression)? }
 

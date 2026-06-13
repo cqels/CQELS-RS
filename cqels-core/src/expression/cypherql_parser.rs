@@ -675,8 +675,74 @@ mod tests {
     }
 
     #[test]
+    fn test_subtraction() {
+        // Regression (#96): the additive/multiplicative operators were inlined
+        // in the grammar (not surfaced as child pairs), so the parser never saw
+        // "-" and fell back to Add. Now `additive_op`/`multiplicative_op` are
+        // named rules (same fix as #94 for cqelsql.pest).
+        assert_binop("x - 1", BinaryOp::Sub);
+        assert_binop("x - y", BinaryOp::Sub);
+    }
+
+    #[test]
     fn test_multiplication() {
         assert_binop("x * 2", BinaryOp::Mul);
+    }
+
+    #[test]
+    fn test_division() {
+        // Regression (#96, same root cause as subtraction): "/" used to parse as Mul.
+        assert_binop("x / 2", BinaryOp::Div);
+        assert_binop("x / y", BinaryOp::Div);
+    }
+
+    #[test]
+    fn test_modulo() {
+        // Regression (#96, same root cause): "%" used to parse as Mul.
+        assert_binop("x % 2", BinaryOp::Mod);
+    }
+
+    // ─── Arithmetic evaluation (regression for #96) ──────────────────────
+    //
+    // Before the grammar fix, '7 - 3' evaluated to 10 (parsed as Add),
+    // '7 / 2' and '7 % 2' to 14 (parsed as Mul). Pin the corrected results
+    // end-to-end through the evaluator.
+
+    fn eval_const(input: &str) -> Value {
+        use crate::expression::evaluator::ExpressionEvaluator;
+        use cqels_model::BindingSet;
+
+        let expr = parse_ok(input);
+        ExpressionEvaluator::new().evaluate(&expr, &BindingSet::new(0))
+    }
+
+    #[test]
+    fn test_eval_subtraction() {
+        assert_eq!(eval_const("7 - 3"), Value::Integer(4));
+    }
+
+    #[test]
+    fn test_eval_division_non_whole_is_float() {
+        // The #94 whole-quotient rule: non-whole integer division → Float.
+        match eval_const("7 / 2") {
+            Value::Float(f) => assert!((f - 3.5).abs() < f64::EPSILON),
+            other => panic!("expected Float(3.5), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_eval_modulo() {
+        assert_eq!(eval_const("7 % 2"), Value::Integer(1));
+    }
+
+    #[test]
+    fn test_eval_precedence() {
+        assert_eq!(eval_const("2 + 3 * 4"), Value::Integer(14));
+    }
+
+    #[test]
+    fn test_eval_subtraction_left_associative() {
+        assert_eq!(eval_const("2 - 3 - 4"), Value::Integer(-5));
     }
 
     // ─── Power operator ──────────────────────────────────────────────────
