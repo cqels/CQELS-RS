@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 
@@ -281,21 +281,15 @@ impl ReactiveStreamEngine {
 
         for name in streams.keys() {
             let rx = streams[name].sender.subscribe();
-            let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
-            let stream = futures::StreamExt::filter_map(stream, |result| {
-                futures::future::ready(result.ok())
-            });
-            inputs.add_stream(name.clone(), Box::pin(stream));
+            let stream = bridge_broadcast(rx, name.clone(), None);
+            inputs.add_stream(name.clone(), stream);
         }
 
         for (synthetic, source) in aliases {
             if let Some(s) = streams.get(source) {
                 let rx = s.sender.subscribe();
-                let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
-                let stream = futures::StreamExt::filter_map(stream, |result| {
-                    futures::future::ready(result.ok())
-                });
-                inputs.add_stream(synthetic.clone(), Box::pin(stream));
+                let stream = bridge_broadcast(rx, synthetic.clone(), None);
+                inputs.add_stream(synthetic.clone(), stream);
             }
         }
 
@@ -584,14 +578,52 @@ impl StreamEngine for ReactiveStreamEngine {
     }
 }
 
+/// Bridges a broadcast receiver into a `Stream`, handling consumer lag
+/// explicitly instead of dropping it silently.
+///
+/// `tokio::sync::broadcast` signals a slow consumer with
+/// `BroadcastStreamRecvError::Lagged(n)` — `n` stream elements were evicted
+/// before this receiver read them. The previous `result.ok()` discarded that
+/// error with no trace, so query inputs could silently lose events (#84). This
+/// logs every lag event with the stream name and dropped count, and — when a
+/// counter is supplied — records the cumulative dropped count for programmatic
+/// observability. Surviving elements pass through and the stream keeps running
+/// (lag is degraded delivery, not a fatal error).
+fn bridge_broadcast(
+    rx: broadcast::Receiver<StreamElement>,
+    stream_name: String,
+    dropped: Option<Arc<AtomicU64>>,
+) -> Pin<Box<dyn Stream<Item = StreamElement> + Send>> {
+    use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
+    let stream = futures::StreamExt::filter_map(stream, move |result| {
+        let item = match result {
+            Ok(item) => Some(item),
+            Err(BroadcastStreamRecvError::Lagged(n)) => {
+                tracing::warn!(
+                    stream = %stream_name,
+                    dropped = n,
+                    "broadcast receiver lagged; dropped stream elements"
+                );
+                if let Some(counter) = &dropped {
+                    counter.fetch_add(n, Ordering::Relaxed);
+                }
+                None
+            }
+        };
+        futures::future::ready(item)
+    });
+    Box::pin(stream)
+}
+
 /// Bridge a broadcast receiver into a Stream.
+///
+/// Lag is logged rather than silently dropped (see `bridge_broadcast`).
 pub fn receiver_to_stream(
     rx: broadcast::Receiver<StreamElement>,
 ) -> Pin<Box<dyn Stream<Item = StreamElement> + Send>> {
-    let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
-    let stream =
-        futures::StreamExt::filter_map(stream, |result| futures::future::ready(result.ok()));
-    Box::pin(stream)
+    bridge_broadcast(rx, "broadcast".to_string(), None)
 }
 
 /// Helper: Create an mpsc-based stream pair for feeding data into the engine.
@@ -629,6 +661,41 @@ mod tests {
             ),
             ts,
         ))
+    }
+
+    #[tokio::test]
+    async fn bridge_broadcast_observes_and_survives_lag() {
+        use std::sync::atomic::Ordering;
+        // Capacity 2; send 5 elements before draining so the receiver lags by 3.
+        let (tx, rx) = broadcast::channel::<StreamElement>(2);
+        for i in 0..5 {
+            tx.send(make_rdf_element(
+                "http://ex/s",
+                "http://ex/p",
+                &i.to_string(),
+                i,
+            ))
+            .unwrap();
+        }
+        drop(tx); // close so the bridged stream terminates
+
+        let dropped = Arc::new(AtomicU64::new(0));
+        let stream = bridge_broadcast(rx, "test".to_string(), Some(dropped.clone()));
+        let items: Vec<StreamElement> = stream.collect().await;
+
+        // The 3 oldest elements were evicted by the lag; the 2 most-recent
+        // survive, and the lag is recorded (observable) rather than silently
+        // dropped (#84).
+        assert_eq!(
+            items.len(),
+            2,
+            "the two most-recent elements should survive the lag"
+        );
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            3,
+            "a lag of 3 elements must be recorded, not silently dropped"
+        );
     }
 
     #[tokio::test]
