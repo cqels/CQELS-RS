@@ -1160,34 +1160,54 @@ pub fn is_swag_compatible(aggregates: &[PipelineAggregateSpec]) -> bool {
     })
 }
 
-/// Extracts an `f64` from a [`Value`], returning `0.0` for non-numeric values.
+/// Extracts an `f64` from a numeric [`Value`]. Callers (the SWAG numeric
+/// aggregates) pass only `Integer`/`Float` — non-numeric inputs are excluded
+/// upstream per SPARQL type-error semantics (#98) — so the `0.0` fallback is
+/// unreachable in practice.
 fn value_as_f64(v: &Value) -> f64 {
     v.as_numeric().unwrap_or(0.0)
 }
 
 /// Computes an aggregate using the SWAG (Sliding Window AGgregation) backend.
 ///
-/// Supports COUNT, SUM, AVG, MIN, and MAX via `TwoStacksLiteWindow`.
+/// COUNT/SUM/AVG run through the `TwoStacksLiteWindow`; MIN/MAX use it for
+/// all-numeric input and otherwise fall back to the ORDER BY total ordering so
+/// they support any orderable RDF term, not just numerics.
 fn compute_aggregate_swag(function: AggregateExprFunction, values: &[Value]) -> Value {
     use crate::operator::swag::*;
 
-    match function {
-        AggregateExprFunction::Count => {
-            let op = SwagCountOp::<Value>::new();
-            let mut window = TwoStacksLiteWindow::new(op);
-            for v in values {
-                window.push(v);
-            }
-            Value::Integer(window.query())
+    // COUNT tallies every (non-null) binding regardless of datatype, so it
+    // runs over the raw values.
+    if matches!(function, AggregateExprFunction::Count) {
+        let op = SwagCountOp::<Value>::new();
+        let mut window = TwoStacksLiteWindow::new(op);
+        for v in values {
+            window.push(v);
         }
+        return Value::Integer(window.query());
+    }
+
+    // SUM and AVG are numeric aggregates: non-numeric inputs (e.g. plain
+    // untyped literals, which are `Value::String` after #94) are a SPARQL type
+    // error, not zero — exclude them instead of silently coercing to 0.0 (#98).
+    // AVG then divides by the count of numeric inputs.
+    //
+    // MIN and MAX are NOT numeric-only — SPARQL/Cypher order any RDF term. For
+    // all-numeric input they keep the fast f64 window (preserving int/float
+    // result typing); when any non-numeric term is present they compare the raw
+    // values via the ORDER BY total ordering and return the actual extreme term,
+    // rather than coercing to f64 (which collapsed strings to 0.0 and lost the
+    // real min/max).
+    match function {
         AggregateExprFunction::Sum => {
-            if values.is_empty() {
+            let numeric: Vec<Value> = values.iter().filter(|v| v.is_numeric()).cloned().collect();
+            if numeric.is_empty() {
                 return Value::Integer(0);
             }
-            let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+            let all_integers = numeric.iter().all(|v| matches!(v, Value::Integer(_)));
             let op = SwagSumOp::new(value_as_f64);
             let mut window = TwoStacksLiteWindow::new(op);
-            for v in values {
+            for v in &numeric {
                 window.push(v);
             }
             let sum = window.query();
@@ -1198,54 +1218,69 @@ fn compute_aggregate_swag(function: AggregateExprFunction, values: &[Value]) -> 
             }
         }
         AggregateExprFunction::Avg => {
-            if values.is_empty() {
+            let numeric: Vec<Value> = values.iter().filter(|v| v.is_numeric()).cloned().collect();
+            if numeric.is_empty() {
                 return Value::Null;
             }
             let op = SwagMeanOp::new(value_as_f64);
             let mut window = TwoStacksLiteWindow::new(op);
-            for v in values {
+            for v in &numeric {
                 window.push(v);
             }
             Value::Float(window.query())
         }
         AggregateExprFunction::Min => {
-            if values.is_empty() {
-                return Value::Null;
-            }
-            let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
-            let op = SwagMinOp::new(value_as_f64);
-            let mut window = TwoStacksLiteWindow::new(op);
-            for v in values {
-                window.push(v);
-            }
-            let min = window.query();
-            if min == f64::INFINITY {
-                return Value::Null;
-            }
-            if all_integers {
-                Value::Integer(min as i64)
+            if values.iter().all(|v| v.is_numeric()) {
+                // All-numeric fast path: preserve the existing int/float result
+                // typing (a mixed int/float set yields a Float).
+                if values.is_empty() {
+                    return Value::Null;
+                }
+                let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+                let op = SwagMinOp::new(value_as_f64);
+                let mut window = TwoStacksLiteWindow::new(op);
+                for v in values {
+                    window.push(v);
+                }
+                let min = window.query();
+                if all_integers {
+                    Value::Integer(min as i64)
+                } else {
+                    Value::Float(min)
+                }
             } else {
-                Value::Float(min)
+                // Any non-numeric term present: order via the SPARQL total
+                // ordering and return the actual minimum term (#98).
+                values
+                    .iter()
+                    .min_by(|a, b| sparql_total_cmp(a, b))
+                    .cloned()
+                    .unwrap_or(Value::Null)
             }
         }
         AggregateExprFunction::Max => {
-            if values.is_empty() {
-                return Value::Null;
-            }
-            let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
-            let op = SwagMaxOp::new(value_as_f64);
-            let mut window = TwoStacksLiteWindow::new(op);
-            for v in values {
-                window.push(v);
-            }
-            let max = window.query();
-            if max == f64::NEG_INFINITY {
-                return Value::Null;
-            }
-            if all_integers {
-                Value::Integer(max as i64)
+            if values.iter().all(|v| v.is_numeric()) {
+                if values.is_empty() {
+                    return Value::Null;
+                }
+                let all_integers = values.iter().all(|v| matches!(v, Value::Integer(_)));
+                let op = SwagMaxOp::new(value_as_f64);
+                let mut window = TwoStacksLiteWindow::new(op);
+                for v in values {
+                    window.push(v);
+                }
+                let max = window.query();
+                if all_integers {
+                    Value::Integer(max as i64)
+                } else {
+                    Value::Float(max)
+                }
             } else {
-                Value::Float(max)
+                values
+                    .iter()
+                    .max_by(|a, b| sparql_total_cmp(a, b))
+                    .cloned()
+                    .unwrap_or(Value::Null)
             }
         }
         _ => unreachable!("non-SWAG function passed to compute_aggregate_swag"),
@@ -1294,6 +1329,45 @@ fn compute_aggregate(
     }
 }
 
+/// Ranks a [`Value`] by term category to give [`sparql_total_cmp`] a total
+/// order across types.
+///
+/// Loosely follows SPARQL 1.1 §15.1 (unbound sorts first, then RDF terms, then
+/// the literal value variants), enough to keep `LIMIT` truncation deterministic
+/// over mixed/unbound keys (#98). It deliberately does NOT implement the finer
+/// within-`Term` order (blank node < IRI < literal) or datatype-aware literal
+/// ordering — `Value::Term` is one bucket, tie-broken by display form in
+/// `sparql_total_cmp`. No current query path depends on that finer order;
+/// adding it means unifying `Value`'s literal variants with `Term::Literal`,
+/// which is out of scope here.
+fn value_order_rank(v: &Value) -> u8 {
+    match v {
+        Value::Null => 0,    // unbound sorts lowest
+        Value::Term(_) => 1, // blank nodes / IRIs precede literals
+        Value::Boolean(_) => 2,
+        Value::Integer(_) | Value::Float(_) => 3,
+        Value::String(_) => 4,
+        _ => 5,
+    }
+}
+
+/// Total SPARQL ORDER BY comparator over [`Value`].
+///
+/// [`Value`]'s `PartialOrd` only compares within a single type and returns
+/// `None` across types (e.g. `Null` vs `Integer`), so a raw
+/// `partial_cmp(..).unwrap_or(Equal)` is *not* a total order — incomparable
+/// rows collapse to "equal" and can survive a `LIMIT` truncation ahead of
+/// comparable ones (#98). This restores a total order: comparable values use
+/// their natural comparison; otherwise rows are ranked by term category and
+/// tie-broken by display form so the result is deterministic.
+fn sparql_total_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    a.partial_cmp(b).unwrap_or_else(|| {
+        value_order_rank(a)
+            .cmp(&value_order_rank(b))
+            .then_with(|| a.to_string().cmp(&b.to_string()))
+    })
+}
+
 /// Applies ORDER BY and LIMIT to a collected batch of binding sets.
 ///
 /// When the query has a single ORDER BY key and a LIMIT, uses `TopKOperator`
@@ -1305,27 +1379,39 @@ pub fn apply_order_and_limit(
     evaluator: &ExpressionEvaluator,
     limit: Option<u64>,
 ) -> Vec<BindingSet> {
-    // TopK optimization: single ORDER BY key + LIMIT
+    // TopK optimization: single ORDER BY key + LIMIT.
+    //
+    // `TopKOperator` scores each row as an `f64`, so it is only valid when
+    // every sort key is numeric. Plain untyped literals are `Value::String`
+    // after #94 — scoring them would coerce to 0.0 and scramble the ranking
+    // (#98). When any key is non-numeric, fall through to the full
+    // `Value::partial_cmp` sort below, which orders every RDF term type
+    // SPARQL-correctly (at O(N log N) rather than O(N log K)).
     if let (1, Some(limit_val)) = (order_by.len(), limit) {
-        let k = limit_val as usize;
         let (ref expr, direction) = order_by[0];
-        let evaluator_ref = evaluator;
-        let topk_direction = match direction {
-            SortDirection::Ascending => crate::operator::ranking::SortDirection::Ascending,
-            SortDirection::Descending => crate::operator::ranking::SortDirection::Descending,
-        };
+        let all_numeric = elements
+            .iter()
+            .all(|bs| evaluator.evaluate(expr, bs).is_numeric());
+        if all_numeric {
+            let k = limit_val as usize;
+            let evaluator_ref = evaluator;
+            let topk_direction = match direction {
+                SortDirection::Ascending => crate::operator::ranking::SortDirection::Ascending,
+                SortDirection::Descending => crate::operator::ranking::SortDirection::Descending,
+            };
 
-        let mut topk = crate::operator::ranking::TopKOperator::new(
-            k,
-            |bs: &BindingSet| evaluator_ref.evaluate(expr, bs).as_numeric().unwrap_or(0.0),
-            topk_direction,
-        );
+            let mut topk = crate::operator::ranking::TopKOperator::new(
+                k,
+                |bs: &BindingSet| evaluator_ref.evaluate(expr, bs).as_numeric().unwrap_or(0.0),
+                topk_direction,
+            );
 
-        for bs in elements {
-            topk.add(bs);
+            for bs in elements {
+                topk.add(bs);
+            }
+
+            return topk.get_top_k().into_iter().cloned().collect();
         }
-
-        return topk.get_top_k().into_iter().cloned().collect();
     }
 
     // Full sort for multi-key ORDER BY or no LIMIT
@@ -1335,9 +1421,7 @@ pub fn apply_order_and_limit(
                 let val_a = evaluator.evaluate(expr, a);
                 let val_b = evaluator.evaluate(expr, b);
 
-                let cmp = val_a
-                    .partial_cmp(&val_b)
-                    .unwrap_or(std::cmp::Ordering::Equal);
+                let cmp = sparql_total_cmp(&val_a, &val_b);
 
                 let cmp = match direction {
                     SortDirection::Ascending => cmp,
@@ -2008,6 +2092,212 @@ mod tests {
             compute_aggregate(AggregateExprFunction::Avg, &values, None),
             Value::Float(20.0)
         );
+    }
+
+    // --- #98: numeric aggregates exclude non-numeric input instead of
+    // silently coercing it to 0.0 ---
+
+    #[test]
+    fn sum_excludes_non_numeric_input() {
+        let values = vec![
+            Value::Integer(1),
+            Value::String("abc".to_string()),
+            Value::Integer(2),
+        ];
+        // "abc" must not contribute 0.0; SUM is over {1, 2}.
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Sum, &values, None),
+            Value::Integer(3)
+        );
+    }
+
+    #[test]
+    fn sum_of_all_non_numeric_is_empty_zero() {
+        let values = vec![
+            Value::String("a".to_string()),
+            Value::String("b".to_string()),
+        ];
+        // No numeric inputs → SUM of the empty multiset is 0 (not 0.0 coerced).
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Sum, &values, None),
+            Value::Integer(0)
+        );
+    }
+
+    #[test]
+    fn avg_excludes_non_numeric_input() {
+        let values = vec![
+            Value::Float(2.0),
+            Value::String("x".to_string()),
+            Value::Float(4.0),
+        ];
+        // AVG divides by the numeric count (2), not the total count (3).
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Avg, &values, None),
+            Value::Float(3.0)
+        );
+    }
+
+    #[test]
+    fn min_max_over_numeric_values() {
+        let values = vec![Value::Integer(5), Value::Integer(3), Value::Integer(8)];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Min, &values, None),
+            Value::Integer(3)
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Max, &values, None),
+            Value::Integer(8)
+        );
+    }
+
+    #[test]
+    fn min_max_over_string_values() {
+        // #98 review (Codex P2): MIN/MAX are not numeric-only — over string
+        // literals they must return the lexicographic min/max, not Null.
+        let values = vec![
+            Value::String("banana".to_string()),
+            Value::String("apple".to_string()),
+            Value::String("cherry".to_string()),
+        ];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Min, &values, None),
+            Value::String("apple".to_string())
+        );
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Max, &values, None),
+            Value::String("cherry".to_string())
+        );
+    }
+
+    #[test]
+    fn count_still_includes_non_numeric_input() {
+        // Regression guard: the numeric exclusion must not touch COUNT, which
+        // tallies every bound value regardless of datatype.
+        let values = vec![
+            Value::Integer(1),
+            Value::String("x".to_string()),
+            Value::Integer(2),
+        ];
+        assert_eq!(
+            compute_aggregate(AggregateExprFunction::Count, &values, None),
+            Value::Integer(3)
+        );
+    }
+
+    // --- #98: TopK (single key + LIMIT) falls back to Value ordering for
+    // non-numeric sort keys instead of collapsing every row to score 0.0 ---
+
+    fn bs_str(var: &str, val: &str) -> BindingSet {
+        let mut bs = BindingSet::new(0);
+        bs.insert(var, Value::String(val.to_string()));
+        bs
+    }
+
+    #[test]
+    fn topk_falls_back_to_value_order_for_non_numeric_keys() {
+        let evaluator = ExpressionEvaluator::new();
+        let make = || {
+            vec![
+                bs_str("v", "apple"),
+                bs_str("v", "cherry"),
+                bs_str("v", "banana"),
+            ]
+        };
+
+        let asc = apply_order_and_limit(
+            make(),
+            &[(
+                Expression::Variable("v".to_string()),
+                SortDirection::Ascending,
+            )],
+            &evaluator,
+            Some(2),
+        );
+        assert_eq!(asc.len(), 2);
+        assert_eq!(asc[0].get("v"), Some(&Value::String("apple".to_string())));
+        assert_eq!(asc[1].get("v"), Some(&Value::String("banana".to_string())));
+
+        let desc = apply_order_and_limit(
+            make(),
+            &[(
+                Expression::Variable("v".to_string()),
+                SortDirection::Descending,
+            )],
+            &evaluator,
+            Some(2),
+        );
+        assert_eq!(desc.len(), 2);
+        assert_eq!(desc[0].get("v"), Some(&Value::String("cherry".to_string())));
+        assert_eq!(desc[1].get("v"), Some(&Value::String("banana".to_string())));
+    }
+
+    #[test]
+    fn topk_numeric_fast_path_still_orders() {
+        let evaluator = ExpressionEvaluator::new();
+        let elements = vec![
+            {
+                let mut bs = BindingSet::new(0);
+                bs.insert("v", Value::Integer(3));
+                bs
+            },
+            {
+                let mut bs = BindingSet::new(0);
+                bs.insert("v", Value::Integer(1));
+                bs
+            },
+            {
+                let mut bs = BindingSet::new(0);
+                bs.insert("v", Value::Integer(2));
+                bs
+            },
+        ];
+        let top = apply_order_and_limit(
+            elements,
+            &[(
+                Expression::Variable("v".to_string()),
+                SortDirection::Descending,
+            )],
+            &evaluator,
+            Some(2),
+        );
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].get("v"), Some(&Value::Integer(3)));
+        assert_eq!(top[1].get("v"), Some(&Value::Integer(2)));
+    }
+
+    #[test]
+    fn topk_fallback_orders_unbound_keys_lowest() {
+        // #98 review (Codex P2): the non-numeric fallback must impose a *total*
+        // order. With a partial comparator, the unbound row is incomparable to
+        // the integers (collapses to "equal") and can survive the LIMIT ahead
+        // of a comparable numeric row.
+        let evaluator = ExpressionEvaluator::new();
+        let row = |id: &str, v: Value| {
+            let mut bs = BindingSet::new(0);
+            bs.insert("id", Value::String(id.to_string()));
+            bs.insert("v", v);
+            bs
+        };
+        let elements = vec![
+            row("a", Value::Integer(3)),
+            row("b", Value::Null),
+            row("c", Value::Integer(1)),
+        ];
+        let top = apply_order_and_limit(
+            elements,
+            &[(
+                Expression::Variable("v".to_string()),
+                SortDirection::Descending,
+            )],
+            &evaluator,
+            Some(2),
+        );
+        // Unbound sorts lowest, so DESC LIMIT 2 keeps the two numeric rows.
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].get("v"), Some(&Value::Integer(3)));
+        assert_eq!(top[1].get("v"), Some(&Value::Integer(1)));
+        assert!(top.iter().all(|bs| bs.get("v") != Some(&Value::Null)));
     }
 
     #[test]
