@@ -76,7 +76,12 @@ group_by_clause = { ^"group" ~ ^"by" ~ variable ~ (","? ~ variable)* }
 
 order_by_clause = { ^"order" ~ ^"by" ~ order_condition ~ (","? ~ order_condition)* }
 
-order_condition = { variable ~ (asc_kw | desc_kw)? }
+// Accepts both the postfix form (`?v`, `?v ASC`, `?v DESC`) and the SPARQL
+// function form (`ASC(?v)`, `DESC(?v)`). The function form is tried first
+// since it starts with a direction keyword rather than a variable.
+order_condition = { order_func | (variable ~ (asc_kw | desc_kw)?) }
+
+order_func = { (asc_kw | desc_kw) ~ "(" ~ variable ~ ")" }
 
 asc_kw  = { ^"asc" }
 desc_kw = { ^"desc" }

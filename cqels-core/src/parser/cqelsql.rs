@@ -986,7 +986,19 @@ fn parse_order_by(
             let mut expr = String::new();
             let mut direction = SortDirection::Ascending;
 
-            for part in inner.into_inner() {
+            // An order_condition is either the postfix form (a `variable`
+            // followed by an optional ASC/DESC keyword) or the function form
+            // (`order_func` = an ASC/DESC keyword wrapping the variable). Both
+            // carry the same variable + direction, so flatten one level into
+            // `order_func` when present and reuse the same arms.
+            let parts = inner.into_inner().flat_map(|part| {
+                if part.as_rule() == Rule::order_func {
+                    part.into_inner().collect::<Vec<_>>()
+                } else {
+                    vec![part]
+                }
+            });
+            for part in parts {
                 match part.as_rule() {
                     Rule::variable => {
                         expr = part.as_str().to_string();
@@ -1715,6 +1727,39 @@ mod tests {
         assert_eq!(
             result.order_by_conditions[1].direction,
             SortDirection::Descending
+        );
+    }
+
+    #[test]
+    fn test_parse_order_by_desc_function_form() {
+        // SPARQL function form `DESC(?v)` / `ASC(?v)`, in addition to the
+        // postfix form (`?v DESC`) the parser already accepted (#107).
+        let desc = r#"
+            SELECT ?sensor ?temp
+            FROM STREAM sensors [TRIPLES 5]
+            WHERE { ?sensor <http://ex.org/temp> ?temp . }
+            ORDER BY DESC(?temp)
+            LIMIT 2
+        "#;
+        let result = CqelsQlParser::parse(desc).unwrap();
+        assert_eq!(result.order_by_conditions.len(), 1);
+        assert_eq!(result.order_by_conditions[0].expression, "?temp");
+        assert_eq!(
+            result.order_by_conditions[0].direction,
+            SortDirection::Descending
+        );
+
+        let asc = r#"
+            SELECT ?x ?y
+            FROM STREAM s [NOW]
+            WHERE { ?x <http://ex.org/p> ?y . }
+            ORDER BY ASC(?x)
+        "#;
+        let asc_result = CqelsQlParser::parse(asc).unwrap();
+        assert_eq!(asc_result.order_by_conditions[0].expression, "?x");
+        assert_eq!(
+            asc_result.order_by_conditions[0].direction,
+            SortDirection::Ascending
         );
     }
 
