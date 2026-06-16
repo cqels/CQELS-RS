@@ -21,6 +21,10 @@ rand = "0.8"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 toml = "0.8"
+# Parses each fixture's `static.trig` for the parity benchmark, mirroring the
+# Rust parity runner. Uses the workspace dep (RocksDB backend disabled) to
+# avoid an oxrocksdb-sys conflict with cqels-storage-rocksdb.
+oxigraph.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

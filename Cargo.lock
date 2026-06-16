@@ -304,6 +304,7 @@ dependencies = [
  "cqels-reasoning",
  "criterion",
  "futures",
+ "oxigraph",
  "rand 0.8.6",
  "serde",
  "serde_json",
