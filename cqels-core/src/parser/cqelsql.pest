@@ -176,7 +176,10 @@ union_pattern = { "{" ~ pattern_group+ ~ "}" ~ ^"union" ~ "{" ~ pattern_group+ ~
 
 minus_pattern = { ^"minus" ~ "{" ~ triple_pattern+ ~ "}" }
 
-stream_pattern_group = { ^"stream" ~ identifier ~ "{" ~ triple_pattern+ ~ "}" }
+// A stream block may also contain OPTIONAL / UNION sub-patterns; the parser
+// lifts those to top-level groups (tagged to this stream) since the engine's
+// OPTIONAL/UNION collectors scan only top-level pattern groups.
+stream_pattern_group = { ^"stream" ~ identifier ~ "{" ~ (triple_pattern | optional_pattern | union_pattern)+ ~ "}" }
 
 // RSP-QL `WINDOW :W { ... }` — patterns scoped to a previously-declared
 // named window. The IRI must match a `from_named_window` declaration

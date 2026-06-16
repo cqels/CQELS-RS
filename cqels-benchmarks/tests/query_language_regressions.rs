@@ -826,67 +826,123 @@ async fn test_engine_stream_to_query_execution() {
 
 #[tokio::test]
 async fn test_optional_left_outer_join() {
-    use cqels_core::compiler::pipeline::apply_optional;
+    // #107: end-to-end OPTIONAL inside a STREAM block — a real left-join over
+    // the window. The optional variable binds when its triple is present and
+    // the row still appears (optional unbound) when it is absent.
+    let query_str = r#"
+        SELECT ?sensor ?temp ?room
+        FROM STREAM sensors [TRIPLES 3]
+        WHERE {
+            STREAM sensors {
+                ?sensor <http://ex.org/temp> ?temp .
+                OPTIONAL { ?sensor <http://ex.org/in_room> ?room . }
+            }
+        }
+    "#;
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
-    let evaluator = ExpressionEvaluator::new();
-    let prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // s1 has both temp and in_room; s2 has only temp.
+    let elements = vec![
+        StreamElement::Rdf(make_rdf_literal_element(
+            "http://ex.org/s1",
+            "http://ex.org/temp",
+            "21",
+            1000,
+        )),
+        StreamElement::Rdf(make_rdf_element(
+            "http://ex.org/s1",
+            "http://ex.org/in_room",
+            "http://ex.org/kitchen",
+            1100,
+        )),
+        StreamElement::Rdf(make_rdf_literal_element(
+            "http://ex.org/s2",
+            "http://ex.org/temp",
+            "22",
+            1200,
+        )),
+    ];
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
 
-    let mut bs1 = BindingSet::new(100);
-    bs1.insert("sensor", Value::String("http://ex.org/s1".into()));
-    let mut bs2 = BindingSet::new(200);
-    bs2.insert("sensor", Value::String("http://ex.org/s2".into()));
-
-    let stream = Box::pin(futures::stream::iter(vec![bs1.clone(), bs2.clone()]));
-    let optional_groups = vec![vec![cqels_core::parser::ast::CqelsPatternGroup::Default {
-        patterns: vec![cqels_core::parser::ast::TriplePattern {
-            subject: "?x".to_string(),
-            predicate: "?y".to_string(),
-            object: "?z".to_string(),
-        }],
-    }]];
-
-    let results: Vec<_> = apply_optional(stream, &optional_groups, &prefixes, &evaluator)
-        .collect()
-        .await;
-
-    assert_eq!(results.len(), 2);
-    assert!(results[0].get("x").is_none());
-    assert!(results[1].get("x").is_none());
+    assert_eq!(results.len(), 2, "both sensors produce a row");
+    let s1 = results
+        .iter()
+        .find(|b| b.get("sensor").map(|v| v.to_string().contains("s1")) == Some(true))
+        .expect("s1 row present");
+    assert!(s1.get("room").is_some(), "s1's OPTIONAL ?room is bound");
+    let s2 = results
+        .iter()
+        .find(|b| b.get("sensor").map(|v| v.to_string().contains("s2")) == Some(true))
+        .expect("s2 row present");
+    assert!(
+        s2.get("room").is_none(),
+        "s2 has no in_room → ?room unbound, row still present"
+    );
 }
 
 #[tokio::test]
 async fn test_union_two_branches() {
-    use cqels_core::compiler::pipeline::apply_union;
+    // #107: end-to-end UNION inside a STREAM block — both branches contribute
+    // their batch matches (mirrors the union-two-properties parity fixture).
+    let query_str = r#"
+        SELECT ?subject ?label
+        FROM STREAM facts [TRIPLES 4]
+        WHERE {
+            STREAM facts {
+                { ?subject <http://ex.org/name>  ?label . }
+                UNION
+                { ?subject <http://ex.org/alias> ?label . }
+            }
+        }
+    "#;
+    let definition = CqelsQlParser::parse(query_str).expect("parse failed");
+    let compiled = CqelsQueryCompiler::compile(query_str, definition).expect("compile failed");
 
-    let evaluator = ExpressionEvaluator::new();
-    let prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let elements = vec![
+        StreamElement::Rdf(make_rdf_literal_element(
+            "http://ex.org/a1",
+            "http://ex.org/name",
+            "Alice",
+            1000,
+        )),
+        StreamElement::Rdf(make_rdf_literal_element(
+            "http://ex.org/a1",
+            "http://ex.org/alias",
+            "Ally",
+            1100,
+        )),
+        StreamElement::Rdf(make_rdf_literal_element(
+            "http://ex.org/b1",
+            "http://ex.org/name",
+            "Bob",
+            1200,
+        )),
+        StreamElement::Rdf(make_rdf_literal_element(
+            "http://ex.org/c1",
+            "http://ex.org/alias",
+            "C-dawg",
+            1300,
+        )),
+    ];
+    let mut inputs = QueryInputs::new();
+    inputs.add_stream("facts", Box::pin(futures::stream::iter(elements)));
+    let results: Vec<BindingSet> = compiled.execute(inputs).collect().await;
 
-    let mut bs = BindingSet::new(100);
-    bs.insert("sensor", Value::String("http://ex.org/s1".into()));
-
-    let stream = Box::pin(futures::stream::iter(vec![bs]));
-    let union_blocks = vec![(
-        vec![cqels_core::parser::ast::CqelsPatternGroup::Default {
-            patterns: vec![cqels_core::parser::ast::TriplePattern {
-                subject: "?sensor".into(),
-                predicate: "<http://ex.org/temp>".into(),
-                object: "?temp".into(),
-            }],
-        }],
-        vec![cqels_core::parser::ast::CqelsPatternGroup::Default {
-            patterns: vec![cqels_core::parser::ast::TriplePattern {
-                subject: "?sensor".into(),
-                predicate: "<http://ex.org/humidity>".into(),
-                object: "?hum".into(),
-            }],
-        }],
-    )];
-
-    let results: Vec<_> = apply_union(stream, &union_blocks, &prefixes, &evaluator)
-        .collect()
-        .await;
-
-    assert_eq!(results.len(), 2);
+    // Both branches contribute: 4 labels across the 3 subjects.
+    assert_eq!(results.len(), 4);
+    let labels: std::collections::HashSet<String> = results
+        .iter()
+        .filter_map(|b| b.get("label").map(|v| v.to_string()))
+        .collect();
+    for expected in ["Alice", "Ally", "Bob", "C-dawg"] {
+        assert!(
+            labels.iter().any(|l| l.contains(expected)),
+            "union missing label {expected}"
+        );
+    }
 }
 
 #[tokio::test]

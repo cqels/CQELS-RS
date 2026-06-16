@@ -574,7 +574,7 @@ fn parse_where_clause(
     let mut groups: Vec<CqelsPatternGroup> = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::pattern_group {
-            groups.push(parse_pattern_group(inner)?);
+            groups.extend(parse_pattern_group_multi(inner)?);
         }
     }
 
@@ -650,8 +650,23 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPa
                     .to_string();
                 let mut patterns = Vec::new();
                 for tp in it {
-                    if tp.as_rule() == Rule::triple_pattern {
-                        patterns.extend(parse_triple_patterns(tp)?);
+                    match tp.as_rule() {
+                        Rule::triple_pattern => patterns.extend(parse_triple_patterns(tp)?),
+                        // OPTIONAL/UNION inside a STREAM block are only lifted to
+                        // the top level by `parse_pattern_group_multi`. This
+                        // recursive path is reached only when the STREAM block is
+                        // itself nested inside an OPTIONAL/UNION, where there is no
+                        // lifting step — reject rather than silently drop them so
+                        // the query fails loudly instead of returning wrong
+                        // results (#107 review).
+                        Rule::optional_pattern | Rule::union_pattern => {
+                            return Err(ParseError::Syntax(
+                                "OPTIONAL/UNION nested inside a STREAM block is only \
+                                 supported at the top level of the WHERE clause"
+                                    .into(),
+                            ));
+                        }
+                        _ => {}
                     }
                 }
                 return Ok(CqelsPatternGroup::Stream { source, patterns });
@@ -732,84 +747,10 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPa
                 });
             }
             Rule::optional_pattern => {
-                let mut groups = Vec::new();
-                for pg in inner.into_inner() {
-                    if pg.as_rule() == Rule::pattern_group {
-                        groups.push(parse_pattern_group(pg)?);
-                    }
-                }
-                return Ok(CqelsPatternGroup::Optional { groups });
+                return parse_optional_pattern(inner);
             }
             Rule::union_pattern => {
-                // union_pattern = { "{" ~ pattern_group+ ~ "}" ~ "UNION" ~ "{" ~ pattern_group+ ~ "}" }
-                // The pest rule captures two groups of pattern_groups separated by UNION keyword.
-                // We collect all pattern_groups and split them into left/right halves.
-                let all_groups: Vec<pest::iterators::Pair<Rule>> = inner
-                    .into_inner()
-                    .filter(|p| p.as_rule() == Rule::pattern_group)
-                    .collect();
-                // The grammar produces pattern_group+ UNION pattern_group+
-                // We need to find the split point. Since pest flattens, we parse
-                // the raw text to find where the split is.
-                // Actually, the pest grammar "{" ~ pattern_group+ ~ "}" ~ ^"union" ~ "{" ~ pattern_group+ ~ "}"
-                // will produce all pattern_groups in sequence. We need to split them.
-                // We'll use a different approach: track line positions.
-                // Simpler: parse the span to find "UNION" and split groups accordingly.
-                //
-                // Actually the simplest approach: since we know the structure is
-                // { left_groups } UNION { right_groups }, and pest will capture
-                // left_groups and right_groups in order, we can look at the spans
-                // to determine which groups are before/after UNION.
-                //
-                // But actually there's an even simpler way: reconstruct from the
-                // original pest pair structure. Let me use a state machine approach.
-                // Since all pattern_groups come in sequence and we can't easily
-                // distinguish left from right, let's split them evenly or use a
-                // different grammar approach.
-                //
-                // Better approach: Split at the midpoint where the "UNION" keyword
-                // appears in the source. The left groups have spans before UNION,
-                // right groups have spans after UNION.
-                if all_groups.is_empty() {
-                    return Err(ParseError::Syntax("empty UNION pattern".into()));
-                }
-                // Find where UNION appears in the source
-                // Each group's span position tells us which side it's on
-                // Since the grammar is { left+ } UNION { right+ }, we split
-                // at the first group whose start position is after the UNION keyword
-                let mut left = Vec::new();
-                let mut right = Vec::new();
-                let mut in_right = false;
-                // Count braces to detect the transition
-                // Actually, a simpler observation: the grammar defines
-                // two brace-delimited blocks. Pest parses pattern_groups
-                // from both blocks. We can detect the boundary by looking
-                // at span gaps between consecutive groups.
-                //
-                // Even simpler: just split in half if there are only 2 groups,
-                // or use the following heuristic: look at the source text
-                // between groups for the word "union".
-                for (i, pg) in all_groups.iter().enumerate() {
-                    if i > 0 && !in_right {
-                        let prev_end = all_groups[i - 1].as_span().end();
-                        let cur_start = pg.as_span().start();
-                        let between = &pg.as_span().get_input()[prev_end..cur_start];
-                        if between.to_uppercase().contains("UNION") {
-                            in_right = true;
-                        }
-                    }
-                    if in_right {
-                        right.push(parse_pattern_group(pg.clone())?);
-                    } else {
-                        left.push(parse_pattern_group(pg.clone())?);
-                    }
-                }
-                if right.is_empty() && left.len() >= 2 {
-                    // Fallback: split in half
-                    let mid = left.len() / 2;
-                    right = left.split_off(mid);
-                }
-                return Ok(CqelsPatternGroup::Union { left, right });
+                return parse_union_pattern(inner);
             }
             Rule::minus_pattern => {
                 let mut patterns = Vec::new();
@@ -828,6 +769,123 @@ fn parse_pattern_group(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPa
         }
     }
     Err(ParseError::Syntax("invalid pattern group".into()))
+}
+
+/// Parses an `OPTIONAL { ... }` pattern into an `Optional` group.
+fn parse_optional_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPatternGroup> {
+    let mut groups = Vec::new();
+    for pg in pair.into_inner() {
+        if pg.as_rule() == Rule::pattern_group {
+            groups.push(parse_pattern_group(pg)?);
+        }
+    }
+    Ok(CqelsPatternGroup::Optional { groups })
+}
+
+/// Parses a `{ ... } UNION { ... }` pattern into a `Union` group.
+///
+/// pest flattens the rule to `pattern_group+` across both arms, so left/right
+/// are split by finding the `UNION` keyword in the source gap between
+/// consecutive groups (with a split-in-half fallback).
+fn parse_union_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<CqelsPatternGroup> {
+    let all_groups: Vec<pest::iterators::Pair<Rule>> = pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::pattern_group)
+        .collect();
+    if all_groups.is_empty() {
+        return Err(ParseError::Syntax("empty UNION pattern".into()));
+    }
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    let mut in_right = false;
+    for (i, pg) in all_groups.iter().enumerate() {
+        if i > 0 && !in_right {
+            let prev_end = all_groups[i - 1].as_span().end();
+            let cur_start = pg.as_span().start();
+            let between = &pg.as_span().get_input()[prev_end..cur_start];
+            if between.to_uppercase().contains("UNION") {
+                in_right = true;
+            }
+        }
+        if in_right {
+            right.push(parse_pattern_group(pg.clone())?);
+        } else {
+            left.push(parse_pattern_group(pg.clone())?);
+        }
+    }
+    if right.is_empty() && left.len() >= 2 {
+        let mid = left.len() / 2;
+        right = left.split_off(mid);
+    }
+    Ok(CqelsPatternGroup::Union { left, right })
+}
+
+/// Parses a top-level `pattern_group`, lifting any OPTIONAL/UNION nested inside
+/// a `STREAM { ... }` block out to sibling top-level groups. The engine's
+/// OPTIONAL/UNION collectors scan only top-level pattern groups (see
+/// `compiler::compiled`), so a stream block keeps its triples in the `Stream`
+/// group while its nested OPTIONAL/UNION become separate top-level groups.
+/// Every other pattern group parses to a single group, as before.
+fn parse_pattern_group_multi(
+    pair: pest::iterators::Pair<Rule>,
+) -> ParseResult<Vec<CqelsPatternGroup>> {
+    let mut peek = pair.clone().into_inner();
+    if let Some(g) = peek.next() {
+        if g.as_rule() == Rule::stream_pattern_group {
+            let mut it = g.into_inner();
+            let source = it
+                .next()
+                .ok_or_else(|| ParseError::Syntax("expected stream name".into()))?
+                .as_str()
+                .to_string();
+            let mut patterns = Vec::new();
+            let mut lifted = Vec::new();
+            for child in it {
+                match child.as_rule() {
+                    Rule::triple_pattern => patterns.extend(parse_triple_patterns(child)?),
+                    Rule::optional_pattern => lifted.push(scope_lifted_to_stream(
+                        parse_optional_pattern(child)?,
+                        &source,
+                    )),
+                    Rule::union_pattern => {
+                        lifted.push(scope_lifted_to_stream(parse_union_pattern(child)?, &source))
+                    }
+                    _ => {}
+                }
+            }
+            let mut out = vec![CqelsPatternGroup::Stream { source, patterns }];
+            out.append(&mut lifted);
+            return Ok(out);
+        }
+    }
+    Ok(vec![parse_pattern_group(pair)?])
+}
+
+/// Tags a lifted OPTIONAL/UNION's bare (`Default`) inner groups with the
+/// enclosing stream `source`, so the batch matcher can scope each lifted block
+/// to its own stream in a multi-stream query (otherwise a block written under
+/// `STREAM a` would be matched against `STREAM b`'s data). Inner groups that
+/// already carry an explicit scope are left untouched.
+fn scope_lifted_to_stream(group: CqelsPatternGroup, source: &str) -> CqelsPatternGroup {
+    fn scope_one(g: CqelsPatternGroup, source: &str) -> CqelsPatternGroup {
+        match g {
+            CqelsPatternGroup::Default { patterns } => CqelsPatternGroup::Stream {
+                source: source.to_string(),
+                patterns,
+            },
+            other => other,
+        }
+    }
+    match group {
+        CqelsPatternGroup::Optional { groups } => CqelsPatternGroup::Optional {
+            groups: groups.into_iter().map(|g| scope_one(g, source)).collect(),
+        },
+        CqelsPatternGroup::Union { left, right } => CqelsPatternGroup::Union {
+            left: left.into_iter().map(|g| scope_one(g, source)).collect(),
+            right: right.into_iter().map(|g| scope_one(g, source)).collect(),
+        },
+        other => other,
+    }
 }
 
 fn parse_seq_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<SeqConstraint> {
@@ -1220,6 +1278,62 @@ mod tests {
             }
             _ => panic!("expected stream pattern group"),
         }
+    }
+
+    #[test]
+    fn test_parse_optional_inside_stream_block_is_lifted() {
+        // #107: OPTIONAL written inside a STREAM block parses, with the OPTIONAL
+        // lifted to a sibling top-level group (the stream keeps its triples).
+        let query = r#"
+            SELECT ?sensor ?temp ?room
+            FROM STREAM sensors [TRIPLES 6]
+            WHERE {
+                STREAM sensors {
+                    ?sensor <http://ex.org/temp> ?temp .
+                    OPTIONAL { ?sensor <http://ex.org/in_room> ?room . }
+                }
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        let streams = result
+            .pattern_groups
+            .iter()
+            .filter(|g| matches!(g, CqelsPatternGroup::Stream { .. }))
+            .count();
+        let optionals = result
+            .pattern_groups
+            .iter()
+            .filter(|g| matches!(g, CqelsPatternGroup::Optional { .. }))
+            .count();
+        assert_eq!(streams, 1, "stream triples stay in a Stream group");
+        assert_eq!(optionals, 1, "OPTIONAL is lifted to a top-level group");
+    }
+
+    #[test]
+    fn test_parse_union_inside_stream_block_is_lifted() {
+        // #107: UNION written inside a STREAM block parses, lifted to a
+        // top-level Union group with the two arms split correctly.
+        let query = r#"
+            SELECT ?subject ?label
+            FROM STREAM facts [TRIPLES 4]
+            WHERE {
+                STREAM facts {
+                    { ?subject <http://ex.org/name>  ?label . }
+                    UNION
+                    { ?subject <http://ex.org/alias> ?label . }
+                }
+            }
+        "#;
+        let result = CqelsQlParser::parse(query).unwrap();
+        let union = result
+            .pattern_groups
+            .iter()
+            .find_map(|g| match g {
+                CqelsPatternGroup::Union { left, right } => Some((left.len(), right.len())),
+                _ => None,
+            })
+            .expect("UNION is lifted to a top-level group");
+        assert_eq!(union, (1, 1), "UNION split into one group per arm");
     }
 
     #[test]

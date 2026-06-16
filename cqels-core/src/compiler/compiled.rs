@@ -27,8 +27,8 @@ use crate::store::RdfStore;
 
 use super::pipeline::{
     apply_binds, apply_distinct, apply_filters, apply_group_by_aggregates, apply_minus,
-    apply_optional, apply_order_and_limit, apply_projection, apply_union, join_binding_sets,
-    match_cypher_pattern, match_triple_pattern, PipelineAggregateSpec,
+    apply_order_and_limit, apply_projection, join_binding_sets, match_cypher_pattern,
+    match_triple_pattern, PipelineAggregateSpec,
 };
 
 /// A compiled CqelsQL query ready for execution.
@@ -398,6 +398,12 @@ impl ContinuousQuery for CompiledCqelsQuery {
         // selected pattern is mandatory: each must contribute at
         // least one match for the batch to produce results.
         let prefixes_clone = prefixes.clone();
+        // OPTIONAL/UNION are matched against the raw batch here in Phase 1 — the
+        // only place the window's RDF statements exist (#107). `optional_groups`
+        // and `union_blocks` are moved into the closure (the old post-stream
+        // Phase 3b/3c no longer runs); the evaluator is cloned for their inner
+        // FILTERs.
+        let evaluator_match = Arc::clone(&evaluator);
         let binding_stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>> =
             Box::pin(batch_stream.flat_map(move |(source, batch)| {
                 let mut stmts: Vec<(Statement, i64)> = Vec::new();
@@ -435,11 +441,18 @@ impl ContinuousQuery for CompiledCqelsQuery {
                     }
                 }
 
-                // Every pattern selected for this batch is mandatory:
-                // if any of them fails to contribute, the batch
-                // produces no bindings.
-                let results = if active_pattern_count == 0 || matched_count < active_pattern_count {
-                    vec![]
+                // Every mandatory (stream + default) pattern must contribute.
+                // With no mandatory patterns, seed the join identity (one empty
+                // binding) when there are OPTIONAL/UNION blocks to drive output
+                // — e.g. a stream block that is only a UNION — otherwise nothing.
+                let mut base: Vec<BindingSet> = if active_pattern_count == 0 {
+                    if optional_groups.is_empty() && union_blocks.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![BindingSet::new(0)]
+                    }
+                } else if matched_count < active_pattern_count {
+                    Vec::new()
                 } else {
                     let mut accumulated = pattern_results.remove(0);
                     for next_pattern_matches in pattern_results {
@@ -448,7 +461,104 @@ impl ContinuousQuery for CompiledCqelsQuery {
                     accumulated
                 };
 
-                futures::stream::iter(results)
+                // Known limitations of this first OPTIONAL/UNION execution
+                // (single-stream forms — the parity fixtures — are correct;
+                // these exotic combinations are not yet handled, #107):
+                //  - A top-level BIND introducing a variable that an OPTIONAL
+                //    then references: OPTIONAL runs here in Phase 1 (it needs the
+                //    raw RDF), before `apply_binds`, so the bound var is unseen.
+                //  - A UNION whose arms are scoped to *different* streams: the
+                //    batch wiring only registers top-level stream patterns, so an
+                //    arm's own stream may not be driven.
+                //  - A nested UNION/OPTIONAL *inside* a lifted OPTIONAL block:
+                //    `collect_block_parts` does not recurse into it.
+                //  - A UNION arm whose FILTER/BIND references a variable bound by
+                //    the mandatory part: the arm is matched/filtered before the
+                //    join, so that outer variable is unbound (SPARQL §18.2.2
+                //    scopes the arm filter to the arm — see
+                //    `match_groups_against_batch`; engines diverge on this edge).
+                // These need post-Phase-1 RDF access / per-arm stream wiring and
+                // are tracked as follow-ups rather than handled here.
+
+                // UNION: each block contributes the concatenation of its two
+                // branches' batch matches, joined into the conjunction (#107).
+                for (left, right) in &union_blocks {
+                    if base.is_empty() {
+                        break;
+                    }
+                    // Multi-stream scope: match each arm only against its own
+                    // stream's batches (a lifted arm carries its source; an
+                    // untagged arm applies to every batch). This keeps a
+                    // `{ STREAM a } UNION { STREAM b }` from dropping the `b`
+                    // arm on `b`'s window (#107 review).
+                    let arm_applies = |groups: &[CqelsPatternGroup]| {
+                        groups
+                            .iter()
+                            .find_map(|g| match g {
+                                CqelsPatternGroup::Stream { source: s, .. } => Some(s.as_str()),
+                                _ => None,
+                            })
+                            .is_none_or(|s| s == source.as_str())
+                    };
+                    let left_applies = arm_applies(left);
+                    let right_applies = arm_applies(right);
+                    if !left_applies && !right_applies {
+                        // Union is scoped entirely to other streams; its rows
+                        // arrive on those streams' batches, not this one.
+                        continue;
+                    }
+                    let mut union_rows = Vec::new();
+                    if left_applies {
+                        union_rows.extend(super::pipeline::match_groups_against_batch(
+                            left,
+                            &stmts,
+                            &prefixes_clone,
+                            &evaluator_match,
+                        ));
+                    }
+                    if right_applies {
+                        union_rows.extend(super::pipeline::match_groups_against_batch(
+                            right,
+                            &stmts,
+                            &prefixes_clone,
+                            &evaluator_match,
+                        ));
+                    }
+                    // Emit union branches in event-time order rather than
+                    // all-left-then-all-right, matching the reference engine for
+                    // an unordered UNION (#107). Stable so equal timestamps keep
+                    // left-before-right.
+                    union_rows.sort_by_key(|bs| bs.timestamp());
+                    base = join_binding_sets(&base, &union_rows);
+                }
+
+                // OPTIONAL: left-join the base with each optional block's batch
+                // matches — the base row passes through unchanged when the
+                // optional pattern is absent (#107).
+                for opt_groups in &optional_groups {
+                    if base.is_empty() {
+                        break;
+                    }
+                    // Multi-stream scope: an OPTIONAL lifted from `STREAM s` is
+                    // tagged with `s`; only apply it to that stream's batches.
+                    if let Some(src) = opt_groups.iter().find_map(|g| match g {
+                        CqelsPatternGroup::Stream { source: s, .. } => Some(s.as_str()),
+                        _ => None,
+                    }) {
+                        if src != source.as_str() {
+                            continue;
+                        }
+                    }
+                    base = super::pipeline::apply_optional_left_join(
+                        &base,
+                        opt_groups,
+                        &stmts,
+                        &prefixes_clone,
+                        &evaluator_match,
+                    );
+                }
+
+                futures::stream::iter(base)
             }));
 
         // Phase 1b: Join stream bindings with static bindings from RDF store.
@@ -491,25 +601,14 @@ impl ContinuousQuery for CompiledCqelsQuery {
             apply_binds(filtered, &bind_expressions, &evaluator)
         };
 
-        // Phase 3b: Apply OPTIONAL groups (left-outer-join)
-        let with_optionals = if optional_groups.is_empty() {
-            bound
-        } else {
-            apply_optional(bound, &optional_groups, &prefixes, &evaluator)
-        };
-
-        // Phase 3c: Apply UNION blocks
-        let with_unions = if union_blocks.is_empty() {
-            with_optionals
-        } else {
-            apply_union(with_optionals, &union_blocks, &prefixes, &evaluator)
-        };
+        // OPTIONAL and UNION are evaluated in Phase 1 (against the raw batch),
+        // not here — the post-stream binding view has no RDF to match against.
 
         // Phase 3d: Apply MINUS blocks (anti-join)
         let with_minus = if minus_blocks.is_empty() {
-            with_unions
+            bound
         } else {
-            apply_minus(with_unions, &minus_blocks, &prefixes)
+            apply_minus(bound, &minus_blocks, &prefixes)
         };
 
         // Phase 4: Collect, aggregate, order, limit, project

@@ -13,11 +13,12 @@
 //!    and drops non-matching bindings.
 //! 3. **Binding** — [`apply_binds`]: Computes BIND/RETURN expressions and
 //!    inserts new variable values.
-//! 4. **OPTIONAL** — [`apply_optional`]: Left-outer-join with optional pattern
-//!    groups. Extends bindings when patterns match, passes through unchanged
-//!    otherwise.
-//! 5. **UNION** — [`apply_union`]: Duplicates bindings across matching union
-//!    branches.
+//! 4. **OPTIONAL / UNION** — evaluated in the batch matcher (see
+//!    `compiler::compiled`), not here: OPTIONAL is a left-join of the
+//!    mandatory bindings against the optional block's batch matches
+//!    (`left_join_binding_sets`), and UNION concatenates its branches'
+//!    batch matches (`match_groups_against_batch`). They run there because
+//!    only the batch phase has the raw RDF statements to match against.
 //! 6. **MINUS** — [`apply_minus`]: Anti-join that removes bindings matching
 //!    MINUS patterns.
 //! 7. **Aggregation** — [`apply_group_by_aggregates`]: Groups bindings by
@@ -291,292 +292,6 @@ pub fn apply_binds(
         }
         bs
     }))
-}
-
-/// Applies OPTIONAL pattern groups (left-outer-join semantics).
-///
-/// For each incoming `BindingSet`, tries to match optional patterns against
-/// current bindings. If patterns match, extends the `BindingSet` with new
-/// variable bindings. If not, passes through unchanged.
-///
-/// # Streaming-mode limitation
-///
-/// In streaming mode without a materialized dataset, OPTIONAL matching
-/// checks variable overlap only — it verifies that the optional pattern
-/// shares at least one bound variable with the current bindings.
-/// Constant values in patterns are not checked against actual data.
-/// When an RDF store is available, static patterns should be resolved
-/// there first (see Phase 1b in the compiled query pipeline).
-pub fn apply_optional(
-    stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
-    optional_groups: &[Vec<CqelsPatternGroup>],
-    prefixes: &HashMap<String, String>,
-    evaluator: &ExpressionEvaluator,
-) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
-    let optional_groups = optional_groups.to_vec();
-    let prefixes = prefixes.clone();
-    let evaluator = evaluator.clone();
-
-    Box::pin(stream.map(move |bs| {
-        let mut result = bs;
-        for optional_block in &optional_groups {
-            result = try_match_optional_block(&result, optional_block, &prefixes, &evaluator);
-        }
-        result
-    }))
-}
-
-/// Tries to match a single OPTIONAL block against a binding set.
-/// Returns the extended binding set if patterns match, or the original unchanged.
-fn try_match_optional_block(
-    bs: &BindingSet,
-    groups: &[CqelsPatternGroup],
-    prefixes: &HashMap<String, String>,
-    evaluator: &ExpressionEvaluator,
-) -> BindingSet {
-    // Collect triple patterns and filters/binds from the optional block
-    let mut triple_patterns = Vec::new();
-    let mut filter_exprs = Vec::new();
-    let mut bind_exprs = Vec::new();
-
-    for group in groups {
-        match group {
-            CqelsPatternGroup::Stream { patterns, .. }
-            | CqelsPatternGroup::Static { patterns }
-            | CqelsPatternGroup::Default { patterns }
-            | CqelsPatternGroup::NamedGraph { patterns, .. } => {
-                triple_patterns.extend(patterns.iter().cloned());
-            }
-            CqelsPatternGroup::Filter { expression } => {
-                if let Ok(expr) =
-                    crate::expression::parser::ExpressionParser::parse_cqelsql(expression)
-                {
-                    filter_exprs.push(expr);
-                }
-            }
-            CqelsPatternGroup::Bind {
-                expression,
-                variable,
-            } => {
-                if let Ok(expr) =
-                    crate::expression::parser::ExpressionParser::parse_cqelsql(expression)
-                {
-                    bind_exprs.push((expr, variable.clone()));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Try to match triple patterns against current bindings.
-    // For intra-element OPTIONAL, we check if the current bindings already
-    // satisfy the optional patterns (variable consistency check).
-    let mut extended = bs.clone();
-    let mut all_matched = true;
-
-    for pattern in &triple_patterns {
-        if !try_satisfy_pattern_from_bindings(pattern, &extended, prefixes) {
-            all_matched = false;
-            break;
-        }
-    }
-
-    if all_matched && !triple_patterns.is_empty() {
-        // Apply filters from the optional block
-        let filters_pass = filter_exprs
-            .iter()
-            .all(|f| evaluator.evaluate_as_bool(f, &extended));
-        if filters_pass {
-            // Apply binds from the optional block
-            for (expr, var) in &bind_exprs {
-                let val = evaluator.evaluate(expr, &extended);
-                let var_name = var
-                    .strip_prefix('?')
-                    .or_else(|| var.strip_prefix('$'))
-                    .unwrap_or(var);
-                extended.insert(var_name, val);
-            }
-            return extended;
-        }
-    }
-
-    // Pattern didn't match — return original bindings unchanged
-    bs.clone()
-}
-
-/// Checks if a triple pattern can be satisfied from existing bindings.
-///
-/// Returns `true` only when at least one variable in the pattern is already
-/// bound in the binding set (i.e. the optional pattern is "connected" to the
-/// main query via a shared variable).  Disconnected optional patterns (no
-/// shared variables) return `false`, which causes the caller to pass through
-/// the original bindings unchanged — correct left-outer-join semantics.
-///
-/// # Streaming-mode limitation
-///
-/// Only variable presence is checked, not actual data matching against a
-/// materialized dataset. This is correct for pure streaming mode where no
-/// stored triples exist to query against.
-fn try_satisfy_pattern_from_bindings(
-    pattern: &TriplePattern,
-    bs: &BindingSet,
-    _prefixes: &HashMap<String, String>,
-) -> bool {
-    let components = [&pattern.subject, &pattern.predicate, &pattern.object];
-    let mut has_shared_variable = false;
-
-    for comp in &components {
-        if is_variable(comp) {
-            let var_name = comp
-                .strip_prefix('?')
-                .or_else(|| comp.strip_prefix('$'))
-                .unwrap_or(comp);
-            if bs.get(var_name).is_some() {
-                has_shared_variable = true;
-            }
-        }
-        // Constants are checked during actual pattern matching, not here
-    }
-
-    has_shared_variable
-}
-
-/// Applies UNION blocks to a stream.
-///
-/// For each incoming `BindingSet`, tries matching both left and right pattern
-/// branches. Emits results from either or both branches (true union).
-///
-/// # Streaming-mode limitation
-///
-/// Branch matching uses variable-overlap heuristics (`check_pattern_consistency`)
-/// rather than evaluating against a materialized dataset. Each branch "matches"
-/// if its patterns share at least one bound variable with the current bindings.
-pub fn apply_union(
-    stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
-    union_blocks: &[(Vec<CqelsPatternGroup>, Vec<CqelsPatternGroup>)],
-    prefixes: &HashMap<String, String>,
-    evaluator: &ExpressionEvaluator,
-) -> Pin<Box<dyn Stream<Item = BindingSet> + Send>> {
-    let union_blocks = union_blocks.to_vec();
-    let prefixes = prefixes.clone();
-    let evaluator = evaluator.clone();
-
-    Box::pin(stream.flat_map(move |bs| {
-        let mut results = Vec::new();
-
-        for (left_patterns, right_patterns) in &union_blocks {
-            let left_match = try_match_pattern_groups(&bs, left_patterns, &prefixes, &evaluator);
-            let right_match = try_match_pattern_groups(&bs, right_patterns, &prefixes, &evaluator);
-
-            match (left_match, right_match) {
-                (Some(l), Some(r)) => {
-                    results.push(l);
-                    results.push(r);
-                }
-                (Some(l), None) => results.push(l),
-                (None, Some(r)) => results.push(r),
-                (None, None) => {
-                    // Neither branch matched — pass through original
-                    results.push(bs.clone());
-                }
-            }
-        }
-
-        if results.is_empty() {
-            results.push(bs.clone());
-        }
-
-        futures::stream::iter(results)
-    }))
-}
-
-/// Tries to match a set of pattern groups against current bindings.
-fn try_match_pattern_groups(
-    bs: &BindingSet,
-    groups: &[CqelsPatternGroup],
-    prefixes: &HashMap<String, String>,
-    evaluator: &ExpressionEvaluator,
-) -> Option<BindingSet> {
-    let mut result = bs.clone();
-    let mut has_patterns = false;
-
-    for group in groups {
-        match group {
-            CqelsPatternGroup::Stream { patterns, .. }
-            | CqelsPatternGroup::Static { patterns }
-            | CqelsPatternGroup::Default { patterns }
-            | CqelsPatternGroup::NamedGraph { patterns, .. } => {
-                has_patterns = true;
-                for pattern in patterns {
-                    if !check_pattern_consistency(pattern, &result, prefixes) {
-                        return None;
-                    }
-                }
-            }
-            CqelsPatternGroup::Filter { expression } => {
-                if let Ok(expr) =
-                    crate::expression::parser::ExpressionParser::parse_cqelsql(expression)
-                {
-                    if !evaluator.evaluate_as_bool(&expr, &result) {
-                        return None;
-                    }
-                }
-            }
-            CqelsPatternGroup::Bind {
-                expression,
-                variable,
-            } => {
-                if let Ok(expr) =
-                    crate::expression::parser::ExpressionParser::parse_cqelsql(expression)
-                {
-                    let val = evaluator.evaluate(&expr, &result);
-                    let var_name = variable
-                        .strip_prefix('?')
-                        .or_else(|| variable.strip_prefix('$'))
-                        .unwrap_or(variable);
-                    result.insert(var_name, val);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if has_patterns {
-        Some(result)
-    } else {
-        None
-    }
-}
-
-/// Checks that a pattern is connected to the current bindings.
-///
-/// Returns `true` only when the pattern shares at least one bound variable
-/// with the binding set.  This ensures UNION branches only "match" when
-/// they are connected to the main query's bindings.
-///
-/// Note: in streaming mode without a separate dataset, we cannot verify
-/// constant values against actual data — we only check variable overlap.
-fn check_pattern_consistency(
-    pattern: &TriplePattern,
-    bs: &BindingSet,
-    _prefixes: &HashMap<String, String>,
-) -> bool {
-    let components = [&pattern.subject, &pattern.predicate, &pattern.object];
-    let mut has_shared_variable = false;
-
-    for comp in &components {
-        if is_variable(comp) {
-            let var_name = comp
-                .strip_prefix('?')
-                .or_else(|| comp.strip_prefix('$'))
-                .unwrap_or(comp);
-            if bs.get(var_name).is_some() {
-                has_shared_variable = true;
-            }
-        }
-    }
-
-    has_shared_variable
 }
 
 /// Applies MINUS blocks to a stream (anti-join semantics).
@@ -1751,6 +1466,164 @@ pub fn join_binding_sets(left: &[BindingSet], right: &[BindingSet]) -> Vec<Bindi
     results
 }
 
+/// Matches an OPTIONAL block or one UNION branch (a list of pattern groups)
+/// against a window's statements: inner-joins its triple patterns and applies
+/// any inner FILTERs. Returns the resulting bindings — empty when the block has
+/// no triple patterns or a mandatory inner pattern matched nothing.
+///
+/// Unlike the old variable-consistency stubs, this matches against the raw RDF
+/// (`stmts`), so OPTIONAL actually binds the optional variables and UNION
+/// actually produces its branch rows (#107).
+type BlockParts = (
+    Vec<crate::parser::ast::TriplePattern>,
+    Vec<(crate::expression::ast::Expression, String)>,
+    Vec<crate::expression::ast::Expression>,
+);
+
+/// Splits an OPTIONAL block / UNION branch into its triple patterns, BIND
+/// expressions, and FILTER expressions.
+fn collect_block_parts(groups: &[CqelsPatternGroup]) -> BlockParts {
+    use crate::expression::parser::ExpressionParser;
+    let mut triples = Vec::new();
+    let mut binds = Vec::new();
+    let mut filters = Vec::new();
+    for group in groups {
+        match group {
+            CqelsPatternGroup::Stream { patterns, .. }
+            | CqelsPatternGroup::Static { patterns }
+            | CqelsPatternGroup::Default { patterns }
+            | CqelsPatternGroup::NamedGraph { patterns, .. } => {
+                triples.extend(patterns.iter().cloned());
+            }
+            CqelsPatternGroup::Filter { expression } => {
+                if let Ok(e) = ExpressionParser::parse_cqelsql(expression) {
+                    filters.push(e);
+                }
+            }
+            CqelsPatternGroup::Bind {
+                expression,
+                variable,
+            } => {
+                if let Ok(e) = ExpressionParser::parse_cqelsql(expression) {
+                    binds.push((e, variable.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    (triples, binds, filters)
+}
+
+/// Inner-joins a list of triple patterns against the batch statements.
+fn match_triples(
+    patterns: &[crate::parser::ast::TriplePattern],
+    stmts: &[(Statement, i64)],
+    prefixes: &HashMap<String, String>,
+) -> Vec<BindingSet> {
+    let mut accumulated: Option<Vec<BindingSet>> = None;
+    for pattern in patterns {
+        let matches: Vec<BindingSet> = stmts
+            .iter()
+            .filter_map(|(stmt, ts)| match_triple_pattern(pattern, stmt, prefixes, *ts))
+            .collect();
+        accumulated = Some(match accumulated {
+            None => matches,
+            Some(acc) => join_binding_sets(&acc, &matches),
+        });
+    }
+    accumulated.unwrap_or_default()
+}
+
+fn insert_bind(bs: &mut BindingSet, var: &str, val: Value) {
+    let name = var
+        .strip_prefix('?')
+        .or_else(|| var.strip_prefix('$'))
+        .unwrap_or(var);
+    bs.insert(name, val);
+}
+
+/// Matches one UNION branch against the batch: inner-joins its triple patterns,
+/// then applies the branch's own BINDs and FILTERs.
+///
+/// The BIND/FILTER are evaluated on the *arm's own* solutions, before the arm is
+/// joined with the mandatory part of the enclosing block. This is intentional
+/// and matches SPARQL 1.1 §18.2.2: `{ P FILTER(F) } UNION { Q }` translates to
+/// `Union(Filter(F, P), Q)`, so `F` is scoped to `P` — a variable bound only by
+/// a joined *sibling* pattern is unbound here, and the arm drops. (This is
+/// unlike OPTIONAL, whose `LeftJoin` filter is the join condition and so runs on
+/// the joined row — see `apply_optional_left_join`.) An arm FILTER/BIND that
+/// references such an outer variable is therefore an exotic, spec-edge case
+/// where engines diverge; tracked as a #107 follow-up rather than handled here.
+pub(crate) fn match_groups_against_batch(
+    groups: &[CqelsPatternGroup],
+    stmts: &[(Statement, i64)],
+    prefixes: &HashMap<String, String>,
+    evaluator: &ExpressionEvaluator,
+) -> Vec<BindingSet> {
+    let (triples, binds, filters) = collect_block_parts(groups);
+    if triples.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = match_triples(&triples, stmts, prefixes);
+    // BIND before FILTER so a branch FILTER can reference the bound var.
+    for bs in rows.iter_mut() {
+        for (expr, var) in &binds {
+            let val = evaluator.evaluate(expr, bs);
+            insert_bind(bs, var, val);
+        }
+    }
+    if !filters.is_empty() {
+        rows.retain(|bs| filters.iter().all(|f| evaluator.evaluate_as_bool(f, bs)));
+    }
+    rows
+}
+
+/// SPARQL `LeftJoin` for an OPTIONAL block.
+///
+/// The block's BIND and FILTER are evaluated on the *joined* (left + right)
+/// binding, so they may reference variables bound by the mandatory left side
+/// (e.g. `OPTIONAL { ?s :room ?r . FILTER(?t > 20) }` where `?t` comes from the
+/// left). Each left binding is extended with every optional match whose FILTER
+/// holds; if none hold, the left binding passes through unchanged with the
+/// optional variables unbound. #107.
+pub(crate) fn apply_optional_left_join(
+    left: &[BindingSet],
+    opt_groups: &[CqelsPatternGroup],
+    stmts: &[(Statement, i64)],
+    prefixes: &HashMap<String, String>,
+    evaluator: &ExpressionEvaluator,
+) -> Vec<BindingSet> {
+    let (triples, binds, filters) = collect_block_parts(opt_groups);
+    let candidates = if triples.is_empty() {
+        Vec::new()
+    } else {
+        match_triples(&triples, stmts, prefixes)
+    };
+    let mut out = Vec::with_capacity(left.len());
+    for l in left {
+        let mut matched = false;
+        for r in &candidates {
+            if let Some(mut joined) = l.join(r) {
+                for (expr, var) in &binds {
+                    let val = evaluator.evaluate(expr, &joined);
+                    insert_bind(&mut joined, var, val);
+                }
+                if filters
+                    .iter()
+                    .all(|f| evaluator.evaluate_as_bool(f, &joined))
+                {
+                    out.push(joined);
+                    matched = true;
+                }
+            }
+        }
+        if !matched {
+            out.push(l.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2365,104 +2238,71 @@ mod tests {
     }
 
     #[test]
-    fn test_try_satisfy_pattern_bound_variable() {
-        // Pattern has ?s which is bound in bs → connected → true
-        let pattern = make_triple_pattern("?s", "<http://example.org/p>", "?o");
-        let mut bs = BindingSet::new(0);
-        bs.insert("s", Value::String("http://example.org/sensor1".into()));
-        let prefixes = HashMap::new();
-        assert!(try_satisfy_pattern_from_bindings(&pattern, &bs, &prefixes));
-    }
-
-    #[test]
-    fn test_try_satisfy_pattern_unbound_variable() {
-        // Pattern has ?x, ?y, ?z but binding has ?s → disconnected → false
-        let pattern = make_triple_pattern("?x", "?y", "?z");
-        let mut bs = BindingSet::new(0);
-        bs.insert("s", Value::String("http://example.org/sensor1".into()));
-        let prefixes = HashMap::new();
-        assert!(!try_satisfy_pattern_from_bindings(&pattern, &bs, &prefixes));
-    }
-
-    #[test]
-    fn test_check_pattern_consistency_shared() {
-        // Pattern ?s matches binding with ?s → consistent
-        let pattern = make_triple_pattern("?s", "?p", "?o");
-        let mut bs = BindingSet::new(0);
-        bs.insert("s", Value::String("http://example.org/sensor1".into()));
-        let prefixes = HashMap::new();
-        assert!(check_pattern_consistency(&pattern, &bs, &prefixes));
-    }
-
-    #[test]
-    fn test_check_pattern_consistency_no_shared() {
-        // Pattern ?x, ?y, ?z — no overlap with binding ?s → false
-        let pattern = make_triple_pattern("?x", "?y", "?z");
-        let mut bs = BindingSet::new(0);
-        bs.insert("s", Value::String("val".into()));
-        let prefixes = HashMap::new();
-        assert!(!check_pattern_consistency(&pattern, &bs, &prefixes));
-    }
-
-    #[tokio::test]
-    async fn test_apply_optional_passes_through_unmatched() {
-        use crate::parser::ast::CqelsPatternGroup;
-
+    fn optional_left_join_filters_on_joined_row() {
+        // #107: OPTIONAL left-join binds the optional var when present, keeps
+        // the row when absent, and evaluates the inner FILTER on the JOINED row
+        // so it can reference a left-side variable (?temp here).
         let evaluator = ExpressionEvaluator::new();
         let prefixes = HashMap::new();
 
-        let mut bs = BindingSet::new(100);
-        bs.insert("s", Value::String("http://example.org/sensor1".into()));
-
-        let stream = Box::pin(futures::stream::iter(vec![bs.clone()]));
-
-        // Optional block with disconnected variables — should pass through unchanged
-        let optional_groups = vec![vec![CqelsPatternGroup::Default {
-            patterns: vec![make_triple_pattern("?x", "?y", "?z")],
-        }]];
-
-        let result: Vec<_> = apply_optional(stream, &optional_groups, &prefixes, &evaluator)
-            .collect()
-            .await;
-
-        assert_eq!(result.len(), 1);
-        // Original bindings preserved unchanged
-        assert_eq!(
-            result[0].get("s"),
-            Some(&Value::String("http://example.org/sensor1".into()))
+        // Mandatory left side: s1 temp 25, s2 temp 10.
+        // ?sensor must use the same representation match_triple_pattern
+        // produces for an IRI (Value::Term), so the join key matches.
+        let mut l1 = BindingSet::new(0);
+        l1.insert(
+            "sensor",
+            Value::Term(Term::Iri(IriTerm::new("http://ex/s1"))),
         );
-        // Disconnected variables NOT added
-        assert!(result[0].get("x").is_none());
-    }
+        l1.insert("temp", Value::Integer(25));
+        let mut l2 = BindingSet::new(0);
+        l2.insert(
+            "sensor",
+            Value::Term(Term::Iri(IriTerm::new("http://ex/s2"))),
+        );
+        l2.insert("temp", Value::Integer(10));
+        let left = vec![l1, l2];
 
-    #[tokio::test]
-    async fn test_apply_union_both_branches() {
-        use crate::parser::ast::CqelsPatternGroup;
+        // Batch: both sensors have a room.
+        let stmts = vec![
+            (
+                make_statement("http://ex/s1", "http://ex/room", "kitchen"),
+                0i64,
+            ),
+            (
+                make_statement("http://ex/s2", "http://ex/room", "lounge"),
+                0i64,
+            ),
+        ];
 
-        let evaluator = ExpressionEvaluator::new();
-        let prefixes = HashMap::new();
+        // OPTIONAL { ?sensor <room> ?room . FILTER(?temp > 20) } — the FILTER
+        // references the LEFT-side ?temp, so it must run on the joined row.
+        let opt_groups = vec![
+            CqelsPatternGroup::Default {
+                patterns: vec![make_triple_pattern("?sensor", "<http://ex/room>", "?room")],
+            },
+            CqelsPatternGroup::Filter {
+                expression: "?temp > 20".to_string(),
+            },
+        ];
 
-        let mut bs = BindingSet::new(100);
-        bs.insert("s", Value::String("http://example.org/sensor1".into()));
-
-        let stream = Box::pin(futures::stream::iter(vec![bs.clone()]));
-
-        // Both branches share ?s with the binding → both match
-        let union_blocks = vec![(
-            vec![CqelsPatternGroup::Default {
-                patterns: vec![make_triple_pattern("?s", "?p1", "?o1")],
-            }],
-            vec![CqelsPatternGroup::Default {
-                patterns: vec![make_triple_pattern("?s", "?p2", "?o2")],
-            }],
-        )];
-
-        let result: Vec<_> = apply_union(stream, &union_blocks, &prefixes, &evaluator)
-            .collect()
-            .await;
-
-        // Both branches match → 2 results
-        assert_eq!(result.len(), 2);
+        let out = apply_optional_left_join(&left, &opt_groups, &stmts, &prefixes, &evaluator);
+        assert_eq!(out.len(), 2);
+        let s1 = out
+            .iter()
+            .find(|b| b.get("sensor").map(|v| v.to_string().contains("s1")) == Some(true))
+            .unwrap();
+        assert!(
+            s1.get("room").is_some(),
+            "s1 (temp 25 > 20) → optional room bound"
+        );
+        let s2 = out
+            .iter()
+            .find(|b| b.get("sensor").map(|v| v.to_string().contains("s2")) == Some(true))
+            .unwrap();
+        assert!(
+            s2.get("room").is_none(),
+            "s2 (temp 10 ≤ 20) → optional filtered out, row kept with room unbound"
+        );
     }
 
     #[tokio::test]
