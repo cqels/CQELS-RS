@@ -155,10 +155,14 @@ jobs:
     steps:
       - { run: 'echo "::error::Fork PR is blocked from the self-hosted runner. Fully automated fork-PR validation needs the Checks API (deferred follow-up). For now: restore GitHub-hosted CI, or eyes-on review the fork commits manually." && exit 1' }
 
+  # timeout-minutes on every self-hosted job: this is a SINGLE runner, so a
+  # hung job would otherwise hold it for GitHub's 6-hour default and block all
+  # other queued jobs. The caps below are ~2x the observed warm-cache runtime.
   fmt:
     name: Format
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, cqels-local]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -172,6 +176,7 @@ jobs:
     name: Clippy
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, cqels-local]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -186,6 +191,7 @@ jobs:
     name: Documentation
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, cqels-local]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -200,6 +206,7 @@ jobs:
     name: PR Impact Suite
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, cqels-local]
+    timeout-minutes: 40
     steps:
       # fetch-depth: 0 needed so `cargo xtask test impact --base origin/main`
       # can compute the diff against main. The default shallow checkout
@@ -219,6 +226,7 @@ jobs:
     name: Fast Workspace Tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, cqels-local]
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -234,6 +242,7 @@ jobs:
     name: Cargo Deny
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, cqels-local]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -253,6 +262,7 @@ jobs:
     name: Tests (macOS)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, cqels-local]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -282,6 +292,7 @@ jobs:
     name: WASM Check
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, cqels-local]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
