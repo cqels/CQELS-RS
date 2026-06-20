@@ -191,6 +191,22 @@ impl Value {
 
 impl Eq for Value {}
 
+impl Value {
+    /// The label string used for *comparison/ordering* semantics (SPARQL D-E5):
+    /// a plain `String` and a typed literal (`Value::Term(Term::Literal)`) both
+    /// compare by their lexical label, ignoring datatype and language tag. IRIs,
+    /// blank nodes, and the numeric/boolean/null variants have no label here.
+    /// (Identity/DISTINCT use the datatype-aware derived `PartialEq`/`Hash`
+    /// instead — sameTerm, D4 — so the two notions intentionally differ.)
+    fn order_label(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s),
+            Value::Term(Term::Literal(lit)) => Some(lit.value()),
+            _ => None,
+        }
+    }
+}
+
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
@@ -203,14 +219,21 @@ impl PartialOrd for Value {
             // Boolean comparison
             (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
 
-            // String comparison
-            (Value::String(a), Value::String(b)) => a.partial_cmp(b),
-
-            // Term comparison (IRI string comparison)
-            (Value::Term(a), Value::Term(b)) => a.to_string().partial_cmp(&b.to_string()),
-
             // Null is not comparable
             (Value::Null, _) | (_, Value::Null) => None,
+
+            // Label semantics (D-E5): a plain string and a typed literal compare
+            // by lexical label, datatype/lang ignored — so `"a"^^ex:tok < "b"` is
+            // lexicographic and `"a"@en`/`"a"^^ex:tok`/`"a"` sort together.
+            (a, b) if a.order_label().is_some() && b.order_label().is_some() => a
+                .order_label()
+                .unwrap()
+                .partial_cmp(b.order_label().unwrap()),
+
+            // IRI / blank-node terms: stable total order by serialization (used by
+            // ORDER BY; the evaluator treats `<` on them as a type error → null
+            // before reaching here — D-E1).
+            (Value::Term(a), Value::Term(b)) => a.to_string().partial_cmp(&b.to_string()),
 
             // Different incompatible types are not comparable
             _ => None,

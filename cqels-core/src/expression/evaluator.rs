@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use cqels_model::{BindingSet, IriTerm, Term, Value};
 
 use super::ast::{AggregateExprFunction, BinaryOp, Expression, UnaryOp};
-use super::functions::{call_builtin, value_to_bool};
+use super::functions::{call_builtin, filter_ebv, value_to_bool};
 
 /// Evaluates expression trees against variable bindings.
 ///
@@ -181,6 +181,18 @@ impl ExpressionEvaluator {
         value_to_bool(&val)
     }
 
+    /// Evaluates an expression to a boolean at the SPARQL **FILTER boundary**,
+    /// applying strict §17.2.2 EBV via [`filter_ebv`].
+    ///
+    /// Unlike [`evaluate_as_bool`](Self::evaluate_as_bool) — which maps a
+    /// non-literal (IRI / blank-node) result to `true`, matching the
+    /// `||`/`&&`/`!`/`IF` mirror used for unit-5 parity — a non-literal result
+    /// here is a type error and drops the solution. Used by `apply_filters`.
+    pub fn evaluate_as_filter_bool(&self, expr: &Expression, bindings: &BindingSet) -> bool {
+        let val = self.evaluate(expr, bindings);
+        filter_ebv(&val)
+    }
+
     /// Evaluates a binary operation with proper SPARQL semantics.
     fn eval_binary_op(
         &self,
@@ -211,10 +223,14 @@ impl ExpressionEvaluator {
             BinaryOp::Neq => Value::Boolean(!values_equal(&lval, &rval)),
             // Ordering on IRIs/blank nodes is a SPARQL type error (§17.3
             // defines no ordering for them) → null per D-E1; do NOT fall
-            // through to Value::PartialOrd's lexicographic Term ordering.
-            // parity unit 5.
+            // through to Value::PartialOrd's serialization-based Term ordering.
+            // Typed literals (Value::Term(Literal)) are NOT excluded here — they
+            // order by lexical label (D-E5), handled by PartialOrd. parity unit 5/6.
             BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Lte | BinaryOp::Gte
-                if matches!(lval, Value::Term(_)) || matches!(rval, Value::Term(_)) =>
+                if lval.is_iri()
+                    || lval.is_blank_node()
+                    || rval.is_iri()
+                    || rval.is_blank_node() =>
             {
                 Value::Null
             }
@@ -365,16 +381,26 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Integer(x), Value::Integer(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Boolean(x), Value::Boolean(y)) => x == y,
-        (Value::String(x), Value::String(y)) => x == y,
 
         // Numeric promotion
         (Value::Integer(x), Value::Float(y)) => (*x as f64) == *y,
         (Value::Float(x), Value::Integer(y)) => *x == (*y as f64),
 
-        // Term equality (SPARQL RDFterm-equal / sameTerm). A string literal
-        // and an IRI are DIFFERENT term kinds and never equal — the old
-        // String-Term text comparison made "http://x" = <http://x> true,
-        // which both SPARQL and the Java engine reject. parity unit 5.
+        // Label semantics (D-E5): plain strings and typed literals (xsd:dateTime,
+        // language-tagged, custom datatypes, malformed numerics) compare by their
+        // lexical label, ignoring datatype and language tag — `"a"^^ex:tok = "a"`
+        // and `"a"@en = "a"` are true. (DISTINCT instead uses the datatype-aware
+        // derived PartialEq/Hash — sameTerm, D4 — so the notions differ on purpose.)
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::String(x), Value::Term(Term::Literal(y))) => x == y.value(),
+        (Value::Term(Term::Literal(x)), Value::String(y)) => x.value() == y,
+        (Value::Term(Term::Literal(x)), Value::Term(Term::Literal(y))) => x.value() == y.value(),
+
+        // IRI / blank-node equality is sameTerm. A string literal and an IRI are
+        // DIFFERENT term kinds and never equal — the old String-Term text compare
+        // made "http://x" = <http://x> true, which both SPARQL and the Java engine
+        // reject; a typed literal vs an IRI/blank node likewise never matches here.
+        // parity unit 5.
         (Value::Term(x), Value::Term(y)) => x == y,
 
         _ => false,

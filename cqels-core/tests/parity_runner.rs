@@ -32,10 +32,14 @@ mod distinct_operator_adapter;
 #[path = "parity/expression_eval_adapter.rs"]
 mod expression_eval_adapter;
 
+#[path = "parity/filter_operator_adapter.rs"]
+mod filter_operator_adapter;
+
 use std::path::{Path, PathBuf};
 
 use distinct_operator_adapter::DistinctOperatorAdapter;
 use expression_eval_adapter::ExpressionEvalAdapter;
+use filter_operator_adapter::FilterOperatorAdapter;
 use minus_operator_adapter::MinusOperatorAdapter;
 use oxrdf_backend::OxRdfBackend;
 use parity_fixture_harness::{FixtureOperator, Harness, Terminal};
@@ -49,14 +53,30 @@ use tumbling_window_adapter::TumblingWindowAdapter;
 /// `cargo test` on cqels-rs does not fail just because the parity-root fixtures are absent.
 /// Set `PARITY_FIXTURES=/abs/path/to/parity/fixtures` to opt back in.
 fn fixtures_dir() -> Option<PathBuf> {
-    let candidate = if let Ok(p) = std::env::var("PARITY_FIXTURES") {
-        PathBuf::from(p)
+    // A blank/whitespace value counts as UNSET (matching Java's `!env.isBlank()`),
+    // so only a non-blank PARITY_FIXTURES is "explicitly configured" (H-D1).
+    if let Some(p) = std::env::var("PARITY_FIXTURES")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        // Explicitly configured → it MUST resolve. A set-but-invalid PARITY_FIXTURES
+        // is operator error and fails closed (matching the Java harness; harness
+        // deviation H-D1 closed), rather than silently skipping the parity tests.
+        Some(PathBuf::from(&p).canonicalize().unwrap_or_else(|e| {
+            panic!(
+                "PARITY_FIXTURES={p:?} is not a readable directory: {e}. \
+                 Point it at the parity-root parity/fixtures directory, or unset it \
+                 to use the submodule default."
+            )
+        }))
     } else {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../parity/fixtures")
-    };
-    // Canonicalize uniformly so a misconfigured PARITY_FIXTURES also triggers
-    // the skip path rather than panicking later in read_dir.
-    candidate.canonicalize().ok()
+        // Unset → submodule default; skip (None) if absent, so a standalone cqels-rs
+        // checkout's `cargo test` does not fail merely because parity-root is absent.
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../parity/fixtures")
+            .canonicalize()
+            .ok()
+    }
 }
 
 fn case_files(subdir: &str) -> Vec<PathBuf> {
@@ -181,14 +201,14 @@ fn distinct_operator_parity() {
     }
     let backend = OxRdfBackend;
     let h = Harness::new(&backend);
+    // Corpus is mandatory under a valid fixture root (harness deviation H-D2):
+    // an absent/empty distinct-operator dir is an incomplete checkout, not a skip.
     let cases = case_files("distinct-operator");
-    if cases.is_empty() {
-        eprintln!(
-            "[parity_runner] distinct_operator_parity: no fixtures under \
-             parity/fixtures/distinct-operator/ yet; skipping."
-        );
-        return;
-    }
+    assert!(
+        !cases.is_empty(),
+        "no distinct-operator fixtures found under parity/fixtures/distinct-operator/ \
+         (the corpus is required)"
+    );
     for f in cases {
         let mut adapter = DistinctOperatorAdapter::new();
         h.run_solution_case(&f, &mut adapter)
@@ -208,28 +228,50 @@ fn expression_evaluation_parity() {
     }
     let backend = OxRdfBackend;
     let h = Harness::new(&backend);
-    // `case_files` panics on a MISSING subdir (read_dir unwrap) — the
-    // empty-dir tolerance alone doesn't cover a parity-root checkout that
-    // predates the expression corpus (local review on cqels-rs#94: running
-    // the suite against an older fixture pin aborted instead of skipping).
-    let subdir_present = fixtures_dir()
-        .map(|d| d.join("expression-evaluation").is_dir())
-        .unwrap_or(false);
-    let cases = if subdir_present {
-        case_files("expression-evaluation")
-    } else {
-        Vec::new()
-    };
-    if cases.is_empty() {
-        eprintln!(
-            "[parity_runner] expression_evaluation_parity: corpus absent or empty at \
-             parity/fixtures/expression-evaluation/; skipping (pre-merge tolerance)."
-        );
-        return;
-    }
+    // Corpus is mandatory under a valid fixture root (harness deviation H-D2):
+    // an absent/empty expression-evaluation dir is an incomplete checkout and
+    // fails fast (case_files panics on a missing subdir; assert covers empty).
+    let cases = case_files("expression-evaluation");
+    assert!(
+        !cases.is_empty(),
+        "no expression-evaluation fixtures found under parity/fixtures/expression-evaluation/ \
+         (the corpus is required)"
+    );
     for f in cases {
         let mut adapter = ExpressionEvalAdapter::new();
         h.run_expression_case(&f, &mut adapter)
+            .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
+    }
+}
+
+/// Unit 6: SPARQL FILTER. Drives the solutions payload (`run_solution_case`)
+/// with `FilterOperatorAdapter` — each fixture carries a top-level
+/// `config.predicate` expression string that the adapter parses once and
+/// applies per row via `apply_filters`, which routes the predicate result
+/// through the strict SPARQL §17.2.2 `filter_ebv` (a non-literal / non-EBV /
+/// malformed-numeric result is a type error → the row drops). Mirrors
+/// `FixtureParityTest#filterOperatorParity` + Java
+/// `ExpressionEvaluator.effectiveBoolean` (cqels/claude#253). The corpus is
+/// REQUIRED (asserted non-empty) now that unit 6 is verified.
+#[test]
+fn filter_operator_parity() {
+    if skip_if_no_fixtures("filter_operator_parity") {
+        return;
+    }
+    let backend = OxRdfBackend;
+    let h = Harness::new(&backend);
+    // The filter-operator corpus is REQUIRED now that unit 6 is verified — no
+    // pre-merge tolerance (harness deviation H-D4 closed). Mirrors the Java side
+    // dropping "filter-operator" from FixtureParityTest.OPTIONAL_CORPORA.
+    let cases = case_files("filter-operator");
+    assert!(
+        !cases.is_empty(),
+        "no filter-operator fixtures found under parity/fixtures/filter-operator/ \
+         (the corpus is required since unit 6 is verified)"
+    );
+    for f in cases {
+        let mut adapter = FilterOperatorAdapter::new();
+        h.run_solution_case(&f, &mut adapter)
             .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
     }
 }

@@ -614,9 +614,46 @@ pub fn value_to_bool(value: &Value) -> bool {
         Value::Integer(i) => *i != 0,
         Value::Float(f) => *f != 0.0 && !f.is_nan(),
         Value::String(s) => !s.is_empty(),
+        // A typed literal (xsd:dateTime, custom datatype, malformed numeric)
+        // behaves as its label string in the lenient ||/&&/!/IF mirror — D-E5
+        // label semantics — so a non-empty lexical is true, matching how it
+        // behaved when such literals were lifted to Value::String. An IRI or
+        // blank node stays lenient `true` (unit-5 mirror).
+        Value::Term(Term::Literal(lit)) => !lit.value().is_empty(),
         Value::Term(_) => true,
         Value::Null => false,
         _ => false,
+    }
+}
+
+/// Strict SPARQL §17.2.2 effective boolean value for the **FILTER boundary**.
+///
+/// A predicate result that is any RDF term reaching this function has no usable
+/// EBV and is a SPARQL type error, so the FILTER eliminates the solution
+/// (`false` → drop):
+/// - a non-literal term (IRI or blank node);
+/// - a literal with a non-EBV datatype (xsd:dateTime, rdf:langString, a custom
+///   IRI, …);
+/// - a numeric literal with a **malformed** lexical (e.g. `"abc"^^xsd:int`).
+///   Note a *well-formed* integer beyond `i64` range is NOT dropped here:
+///   `term_to_value` keeps it as a `Value::String` (a non-empty string with a
+///   `true` EBV) so the FILTER passes it, matching Java's nonzero EBV for
+///   large magnitudes — only genuinely malformed lexicals reach this term arm.
+///
+/// Valid boolean / numeric / `xsd:string` / plain-literal EBV results never
+/// arrive as a [`Value::Term`] — `term_to_value` normalizes them to
+/// `Value::Boolean` / `Value::Integer` / `Value::Float` / `Value::String` — so
+/// those (and `null`) reuse the shared [`value_to_bool`] EBV unchanged.
+///
+/// Differs from [`value_to_bool`] (the `||`/`&&`/`!`/`IF` mirror, which maps a
+/// non-literal term to `true`) precisely at the term arm. Mirrors Java's
+/// `ExpressionEvaluator.effectiveBoolean` (cqels/claude#253): the FILTER boundary
+/// is stricter than the boolean operators, which keep the lenient Rust-mirror
+/// semantics for unit-5 parity.
+pub fn filter_ebv(value: &Value) -> bool {
+    match value {
+        Value::Term(_) => false,
+        other => value_to_bool(other),
     }
 }
 
@@ -862,6 +899,57 @@ mod tests {
         assert!(!value_to_bool(&Value::Null));
         assert!(value_to_bool(&Value::String("x".into())));
         assert!(!value_to_bool(&Value::String(String::new())));
+    }
+
+    #[test]
+    fn test_filter_ebv_drops_non_literal_but_value_to_bool_keeps_it() {
+        // The FILTER boundary (§17.2.2) drops a non-literal predicate result —
+        // an IRI or blank node has no EBV (type error → drop) — while the
+        // shared ||/&&/!/IF mirror (value_to_bool) maps it to true. This is the
+        // only case where the two disagree; parity with java#253.
+        let iri = Value::Term(Term::Iri(IriTerm::new("http://ex/thing")));
+        let bnode = Value::Term(Term::BlankNode(BlankNodeTerm::new("b0")));
+        assert!(!filter_ebv(&iri), "FILTER drops an IRI predicate");
+        assert!(!filter_ebv(&bnode), "FILTER drops a blank-node predicate");
+        assert!(
+            value_to_bool(&iri),
+            "the ||/&&/!/IF mirror keeps non-literals"
+        );
+
+        // A non-EBV-typed literal (xsd:dateTime) and a malformed numeric reach
+        // filter_ebv as Value::Term(Literal) — term_to_value preserves the
+        // datatype — and also drop, matching Java effectiveBoolean (#253).
+        let datetime = Value::Term(Term::Literal(
+            cqels_model::term::LiteralTerm::new("2020-01-01T00:00:00")
+                .with_datatype("http://www.w3.org/2001/XMLSchema#dateTime"),
+        ));
+        let malformed_int = Value::Term(Term::Literal(
+            cqels_model::term::LiteralTerm::new("abc")
+                .with_datatype("http://www.w3.org/2001/XMLSchema#int"),
+        ));
+        assert!(
+            !filter_ebv(&datetime),
+            "FILTER drops a non-EBV-typed literal"
+        );
+        assert!(
+            !filter_ebv(&malformed_int),
+            "FILTER drops a malformed numeric literal"
+        );
+
+        // Every EBV-typed result agrees with the shared mirror (no regression).
+        for v in [
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::Integer(5),
+            Value::Integer(0),
+            Value::Float(1.5),
+            Value::Float(0.0),
+            Value::String("hello".into()),
+            Value::String(String::new()),
+            Value::Null,
+        ] {
+            assert_eq!(filter_ebv(&v), value_to_bool(&v), "agree on {v:?}");
+        }
     }
 
     #[test]

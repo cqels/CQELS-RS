@@ -151,10 +151,24 @@ fn is_variable(term: &str) -> bool {
     term.starts_with('?') || term.starts_with('$')
 }
 
+/// True if `s` is a well-formed XSD integer lexical (optional leading sign then
+/// one or more ASCII digits), regardless of magnitude. Lets `term_to_value` tell
+/// a valid-but-out-of-i64-range integer (kept as a string so a FILTER passes it,
+/// matching Java's nonzero EBV) from a malformed lexical (a §17.2.2 type error
+/// the FILTER must drop).
+fn is_integer_lexical(s: &str) -> bool {
+    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Converts an RDF Term to a [`Value`], lifting typed RDF literals to native
 /// numeric/boolean/string variants (xsd:integer/int/long → `Value::Integer`,
 /// xsd:double/float/decimal → `Value::Float`, xsd:boolean → `Value::Boolean`,
-/// otherwise `Value::String`; IRIs and blank nodes stay `Value::Term`).
+/// xsd:string and plain literals → `Value::String`). IRIs and blank nodes stay
+/// `Value::Term`; so do literals with no usable EBV — a non-EBV datatype
+/// (xsd:dateTime, a custom IRI, …) or a malformed numeric lexical — so the FILTER
+/// boundary can drop them as SPARQL §17.2.2 type errors instead of seeing a bare
+/// passing string (parity-root#32).
 ///
 /// This is the binding-construction lifter used throughout pattern matching, so
 /// the bindings reaching the expression evaluator hold native `Value` variants
@@ -166,6 +180,15 @@ pub fn term_to_value(term: &Term) -> Value {
         Term::Iri(iri) => Value::Term(Term::Iri(iri.clone())),
         Term::BlankNode(bn) => Value::Term(Term::BlankNode(bn.clone())),
         Term::Literal(lit) => {
+            // A language-tagged literal (rdf:langString) has no effective boolean
+            // value — keep it a typed term so the FILTER boundary (filter_ebv)
+            // drops it as a §17.2.2 type error, matching Java effectiveBoolean.
+            // Comparison still treats it by label (datatype/lang ignored, D-E5),
+            // because values_equal / partial_cmp handle Value::Term(Literal) by
+            // label. (parity-root#32)
+            if lit.language().is_some() {
+                return Value::Term(Term::Literal(lit.clone()));
+            }
             // Lift only literals whose DATATYPE is numeric/boolean. A plain or
             // xsd:string literal stays a string even when its lexical form
             // parses as a number: per SPARQL 1.1 §17.2.2 the EBV of "0" is
@@ -178,9 +201,7 @@ pub fn term_to_value(term: &Term) -> Value {
                     // codex P2 on cqels-rs#94: enumerating only integer/int/long
                     // dropped xsd:short, xsd:byte, the (non)Negative/Positive
                     // family, and the unsigned family to Value::String, breaking
-                    // FILTER/arithmetic over standard stream datatypes. Values
-                    // whose magnitude exceeds i64 (e.g. large xsd:unsignedLong)
-                    // fall through to String, same as out-of-range xsd:integer.
+                    // FILTER/arithmetic over standard stream datatypes.
                     "http://www.w3.org/2001/XMLSchema#integer"
                     | "http://www.w3.org/2001/XMLSchema#int"
                     | "http://www.w3.org/2001/XMLSchema#long"
@@ -197,6 +218,19 @@ pub fn term_to_value(term: &Term) -> Value {
                         if let Ok(i) = val.parse::<i64>() {
                             return Value::Integer(i);
                         }
+                        // i64 overflow but a well-formed integer lexical (e.g. the
+                        // max xsd:unsignedLong): a valid, necessarily-nonzero number
+                        // — keep it a string so a FILTER still passes it (nonempty
+                        // EBV), matching Java's nonzero EBV and preserving the
+                        // pre-existing unit-5 behavior.
+                        if is_integer_lexical(val) {
+                            return Value::String(val.to_string());
+                        }
+                        // Genuinely malformed numeric lexical ("abc"^^xsd:int):
+                        // SPARQL §17.2.2 type error → keep the typed literal so the
+                        // FILTER boundary (filter_ebv) drops the row, matching Java
+                        // effectiveBoolean (parity-root#32).
+                        return Value::Term(Term::Literal(lit.clone()));
                     }
                     "http://www.w3.org/2001/XMLSchema#double"
                     | "http://www.w3.org/2001/XMLSchema#float"
@@ -204,13 +238,32 @@ pub fn term_to_value(term: &Term) -> Value {
                         if let Ok(f) = val.parse::<f64>() {
                             return Value::Float(f);
                         }
+                        // f64::parse accepts every finite/inf magnitude, so a parse
+                        // failure here is a malformed lexical ("abc"^^xsd:double):
+                        // §17.2.2 type error → keep the typed literal so the FILTER
+                        // boundary drops it, matching Java (parity-root#32).
+                        return Value::Term(Term::Literal(lit.clone()));
                     }
                     "http://www.w3.org/2001/XMLSchema#boolean" => {
                         return Value::Boolean(val == "true" || val == "1");
                     }
-                    _ => {}
+                    // A plain or xsd:string literal stays a string even when its
+                    // lexical parses as a number: per SPARQL §17.2.2 the EBV of
+                    // "0" is true (nonempty), and arithmetic on it is a type
+                    // error — lifting it to Integer(0) silently changed both.
+                    // (parity unit 5)
+                    "http://www.w3.org/2001/XMLSchema#string" => {
+                        return Value::String(val.to_string());
+                    }
+                    // Any other datatype (xsd:dateTime, rdf:langString, a custom
+                    // IRI, …) has no EBV and is not lifted: keep the typed literal
+                    // so the FILTER boundary drops it like Java, instead of
+                    // collapsing to a non-empty Value::String that would
+                    // spuriously pass the filter (parity-root#32).
+                    _ => return Value::Term(Term::Literal(lit.clone())),
                 }
             }
+            // Plain literal (no datatype) → string.
             Value::String(val.to_string())
         }
         _ => Value::Null,
@@ -253,8 +306,11 @@ fn match_constant(resolved: &str, term: &Term) -> bool {
 
 /// Applies FILTER expressions to a stream of binding sets.
 ///
-/// Each binding set is retained only if **all** filter expressions evaluate
-/// to `true`. Filters that reference unbound variables evaluate to `false`.
+/// Each binding set is retained only if **all** filter expressions evaluate to
+/// `true` under the strict SPARQL §17.2.2 FILTER effective boolean value (see
+/// [`ExpressionEvaluator::evaluate_as_filter_bool`]): a predicate that yields a
+/// non-literal (IRI / blank node), `null`, or an unbound reference is a type
+/// error and drops the solution.
 pub fn apply_filters(
     stream: Pin<Box<dyn Stream<Item = BindingSet> + Send>>,
     filters: &[Expression],
@@ -264,7 +320,9 @@ pub fn apply_filters(
     let evaluator = evaluator.clone();
 
     Box::pin(stream.filter(move |bs| {
-        let pass = filters.iter().all(|f| evaluator.evaluate_as_bool(f, bs));
+        let pass = filters
+            .iter()
+            .all(|f| evaluator.evaluate_as_filter_bool(f, bs));
         futures::future::ready(pass)
     }))
 }
@@ -1693,6 +1751,41 @@ mod tests {
             term_to_value(&huge),
             Value::String("18446744073709551615".to_string())
         );
+    }
+
+    #[test]
+    fn test_term_to_value_keeps_non_ebv_literals_as_terms() {
+        // Non-EBV-typed literals and malformed numeric lexicals keep their
+        // datatype (Value::Term) so the FILTER boundary drops them like Java
+        // (parity-root#32), instead of collapsing to a passing Value::String.
+        let datetime = Term::Literal(
+            LiteralTerm::new("2020-01-01T00:00:00")
+                .with_datatype("http://www.w3.org/2001/XMLSchema#dateTime"),
+        );
+        assert!(matches!(
+            term_to_value(&datetime),
+            Value::Term(Term::Literal(_))
+        ));
+        let custom =
+            Term::Literal(LiteralTerm::new("x").with_datatype("http://example.org/myType"));
+        assert!(matches!(
+            term_to_value(&custom),
+            Value::Term(Term::Literal(_))
+        ));
+        let malformed_int = Term::Literal(
+            LiteralTerm::new("abc").with_datatype("http://www.w3.org/2001/XMLSchema#int"),
+        );
+        assert!(matches!(
+            term_to_value(&malformed_int),
+            Value::Term(Term::Literal(_))
+        ));
+        let malformed_double = Term::Literal(
+            LiteralTerm::new("12x").with_datatype("http://www.w3.org/2001/XMLSchema#double"),
+        );
+        assert!(matches!(
+            term_to_value(&malformed_double),
+            Value::Term(Term::Literal(_))
+        ));
     }
 
     #[test]

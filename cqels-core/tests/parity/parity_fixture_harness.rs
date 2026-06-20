@@ -155,7 +155,14 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
 
         validate_payload_kind(&doc, "quads")?;
 
-        op.configure(doc.get("config").unwrap_or(&Value::Null));
+        // Absent top-level `config` is delivered as an empty JSON object (not
+        // null), matching the Java harness — harness deviation H-D3 closed; the
+        // absent-config contract is "adapter receives `{}`".
+        let config = doc
+            .get("config")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        op.configure(&config);
         let script = doc["script"]
             .as_array()
             .ok_or_else(|| ParityMismatch("script is not an array".into()))?;
@@ -285,7 +292,14 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
 
         validate_payload_kind(&doc, "solutions")?;
 
-        op.configure(doc.get("config").unwrap_or(&Value::Null));
+        // Absent top-level `config` is delivered as an empty JSON object (not
+        // null), matching the Java harness — harness deviation H-D3 closed; the
+        // absent-config contract is "adapter receives `{}`".
+        let config = doc
+            .get("config")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        op.configure(&config);
         let script = doc["script"]
             .as_array()
             .ok_or_else(|| ParityMismatch("script is not an array".into()))?;
@@ -481,7 +495,14 @@ impl<'a, B: RdfBackend> Harness<'a, B> {
 
         validate_payload_kind(&doc, "expression")?;
 
-        op.configure(doc.get("config").unwrap_or(&Value::Null));
+        // Absent top-level `config` is delivered as an empty JSON object (not
+        // null), matching the Java harness — harness deviation H-D3 closed; the
+        // absent-config contract is "adapter receives `{}`".
+        let config = doc
+            .get("config")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        op.configure(&config);
         let script = doc["script"]
             .as_array()
             .ok_or_else(|| ParityMismatch("script is not an array".into()))?;
