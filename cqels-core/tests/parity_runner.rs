@@ -290,7 +290,10 @@ fn expression_evaluation_parity() {
 /// malformed-numeric result is a type error → the row drops). Mirrors
 /// `FixtureParityTest#filterOperatorParity` + Java
 /// `ExpressionEvaluator.effectiveBoolean` (cqels/claude#253). The corpus is
-/// REQUIRED (asserted non-empty) now that unit 6 is verified.
+/// OPTIONAL again (absent → skip): unit 6 is not currently marked verified
+/// (open cross-engine divergences OD-F1/OD-F2 in the filter spec), so the
+/// fixtures are not guaranteed present on every parity-root pin. Mirrors the
+/// Java side keeping "filter-operator" in FixtureParityTest.OPTIONAL_CORPORA.
 #[test]
 fn filter_operator_parity() {
     if skip_if_no_fixtures("filter_operator_parity") {
@@ -298,15 +301,21 @@ fn filter_operator_parity() {
     }
     let backend = OxRdfBackend;
     let h = Harness::new(&backend);
-    // The filter-operator corpus is REQUIRED now that unit 6 is verified — no
-    // pre-merge tolerance (harness deviation H-D4 closed). Mirrors the Java side
-    // dropping "filter-operator" from FixtureParityTest.OPTIONAL_CORPORA.
-    let cases = case_files("filter-operator");
-    assert!(
-        !cases.is_empty(),
-        "no filter-operator fixtures found under parity/fixtures/filter-operator/ \
-         (the corpus is required since unit 6 is verified)"
-    );
+    let subdir_present = fixtures_dir()
+        .map(|d| d.join("filter-operator").is_dir())
+        .unwrap_or(false);
+    let cases = if subdir_present {
+        case_files("filter-operator")
+    } else {
+        Vec::new()
+    };
+    if cases.is_empty() {
+        eprintln!(
+            "[parity_runner] filter_operator_parity: corpus absent or empty at \
+             parity/fixtures/filter-operator/; skipping (filter unit not verified)."
+        );
+        return;
+    }
     for f in cases {
         let mut adapter = FilterOperatorAdapter::new();
         h.run_solution_case(&f, &mut adapter)
