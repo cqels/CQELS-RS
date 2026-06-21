@@ -342,11 +342,10 @@ pub fn apply_binds(
     Box::pin(stream.map(move |mut bs| {
         for (expr, var) in &binds {
             let val = evaluator.evaluate(expr, &bs);
-            let var_name = var
-                .strip_prefix('?')
-                .or_else(|| var.strip_prefix('$'))
-                .unwrap_or(var);
-            bs.insert(var_name, val);
+            // Shared insertion point: leaves the variable UNBOUND on a null
+            // (error/unbound) result per SPARQL §10.2, rather than binding a
+            // present-null. See `bind_insert`.
+            bind_insert(&mut bs, var, val);
         }
         bs
     }))
@@ -1592,7 +1591,22 @@ fn match_triples(
     accumulated.unwrap_or_default()
 }
 
-fn insert_bind(bs: &mut BindingSet, var: &str, val: Value) {
+/// Inserts a BIND result `val` under `var` (with a leading `?`/`$` stripped),
+/// **skipping the insert when `val` is `Value::Null`**.
+///
+/// SPARQL 1.1 §10.2 `BIND(expr AS ?var)` *extends* a solution with
+/// `?var = eval(expr, μ)`; if the expression errors or is unbound the variable
+/// is **left UNBOUND (absent)** and the solution still passes. Inserting a
+/// present-`Value::Null` binding instead would diverge from that contract (it
+/// makes the variable "bound to null" rather than absent), which is the
+/// `sparql.operator.BindOperator` parity divergence. This is the single shared
+/// insertion point for *every* BIND site in this module — top-level
+/// [`apply_binds`] and the nested `CqelsPatternGroup::Bind` evaluations in
+/// [`match_groups_against_batch`] / [`apply_optional_left_join`].
+fn bind_insert(bs: &mut BindingSet, var: &str, val: Value) {
+    if val.is_null() {
+        return;
+    }
     let name = var
         .strip_prefix('?')
         .or_else(|| var.strip_prefix('$'))
@@ -1627,7 +1641,7 @@ pub(crate) fn match_groups_against_batch(
     for bs in rows.iter_mut() {
         for (expr, var) in &binds {
             let val = evaluator.evaluate(expr, bs);
-            insert_bind(bs, var, val);
+            bind_insert(bs, var, val);
         }
     }
     if !filters.is_empty() {
@@ -1664,7 +1678,7 @@ pub(crate) fn apply_optional_left_join(
             if let Some(mut joined) = l.join(r) {
                 for (expr, var) in &binds {
                     let val = evaluator.evaluate(expr, &joined);
-                    insert_bind(&mut joined, var, val);
+                    bind_insert(&mut joined, var, val);
                 }
                 if filters
                     .iter()
@@ -1685,6 +1699,7 @@ pub(crate) fn apply_optional_left_join(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expression::parser::ExpressionParser;
     use cqels_model::term::LiteralTerm;
 
     fn make_statement(subject: &str, predicate: &str, object: &str) -> Statement {
@@ -1751,6 +1766,83 @@ mod tests {
             term_to_value(&huge),
             Value::String("18446744073709551615".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_apply_binds_skips_null_result_leaving_var_unbound() {
+        // SPARQL §10.2: a BIND whose expression is unbound/errors leaves the
+        // target variable UNBOUND (absent), and the row still passes — it is
+        // NOT bound to a present null. Regression for the
+        // sparql.operator.BindOperator parity divergence (Rust was inserting
+        // Value::Null unconditionally). `?missing` is not in the binding set,
+        // so evaluation is null and `bound` must stay absent.
+        let mut bs = BindingSet::new(0);
+        bs.insert("present", Value::Integer(1));
+        let stream = Box::pin(futures::stream::iter(vec![bs]));
+
+        let bind_expr = ExpressionParser::parse_cqelsql("?missing").unwrap();
+        let binds = vec![(bind_expr, "bound".to_string())];
+        let evaluator = ExpressionEvaluator::new();
+
+        let result: Vec<_> = apply_binds(stream, &binds, &evaluator).collect().await;
+
+        assert_eq!(result.len(), 1, "BIND must never drop the solution");
+        assert!(
+            result[0].get("bound").is_none(),
+            "errored/unbound BIND must leave the variable absent, not present-null"
+        );
+        // The row otherwise passes through unchanged.
+        assert_eq!(result[0].get("present"), Some(&Value::Integer(1)));
+    }
+
+    #[tokio::test]
+    async fn test_apply_binds_value_result_is_inserted() {
+        // The positive companion: a BIND with a bound result DOES extend the
+        // solution (so the null-skip guard does not over-prune). `?present + 1`
+        // is 2 and must be bound under `sum`.
+        let mut bs = BindingSet::new(0);
+        bs.insert("present", Value::Integer(1));
+        let stream = Box::pin(futures::stream::iter(vec![bs]));
+
+        let bind_expr = ExpressionParser::parse_cqelsql("?present + 1").unwrap();
+        let binds = vec![(bind_expr, "sum".to_string())];
+        let evaluator = ExpressionEvaluator::new();
+
+        let result: Vec<_> = apply_binds(stream, &binds, &evaluator).collect().await;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].get("sum"), Some(&Value::Integer(2)));
+    }
+
+    #[test]
+    fn test_nested_bind_in_block_skips_null_result() {
+        // The same null-skip contract on the nested `CqelsPatternGroup::Bind`
+        // site reached through `match_groups_against_batch` (the block-matching
+        // helper used by UNION/OPTIONAL). A matched row is extended by a BIND
+        // whose expression references a variable not bound on the row, so the
+        // result is null and the target var must stay absent — NOT present-null.
+        let stmts = vec![(make_statement("http://ex/s", "http://ex/p", "o"), 0_i64)];
+        let groups = vec![
+            CqelsPatternGroup::Default {
+                patterns: vec![make_triple_pattern("?s", "http://ex/p", "?o")],
+            },
+            CqelsPatternGroup::Bind {
+                expression: "?missing".to_string(),
+                variable: "derived".to_string(),
+            },
+        ];
+        let prefixes = HashMap::new();
+        let evaluator = ExpressionEvaluator::new();
+
+        let rows = match_groups_against_batch(&groups, &stmts, &prefixes, &evaluator);
+
+        assert_eq!(rows.len(), 1, "the matched row must survive the BIND");
+        assert!(
+            rows[0].get("derived").is_none(),
+            "nested errored/unbound BIND must leave the variable absent, not present-null"
+        );
+        // The pattern-matched binding is still present.
+        assert!(rows[0].get("o").is_some());
     }
 
     #[test]

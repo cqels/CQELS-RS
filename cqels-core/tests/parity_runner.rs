@@ -38,8 +38,12 @@ mod expression_eval_adapter;
 #[path = "parity/filter_operator_adapter.rs"]
 mod filter_operator_adapter;
 
+#[path = "parity/bind_operator_adapter.rs"]
+mod bind_operator_adapter;
+
 use std::path::{Path, PathBuf};
 
+use bind_operator_adapter::BindOperatorAdapter;
 use distinct_operator_adapter::DistinctOperatorAdapter;
 use expression_eval_adapter::ExpressionEvalAdapter;
 use filter_operator_adapter::FilterOperatorAdapter;
@@ -318,6 +322,41 @@ fn filter_operator_parity() {
     }
     for f in cases {
         let mut adapter = FilterOperatorAdapter::new();
+        h.run_solution_case(&f, &mut adapter)
+            .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
+    }
+}
+
+/// Unit 7: SPARQL `BIND(expr AS ?var)` (per-solution extend). Same
+/// solutions-payload dispatch as `minus_operator_parity` /
+/// `distinct_operator_parity`, but with `BindOperatorAdapter` driving
+/// `apply_binds` over the `config.binds` program. If the corpus is absent (a
+/// parity-root pin predating the bind fixtures), the test skips cleanly rather
+/// than failing fast.
+#[test]
+fn bind_operator_parity() {
+    if skip_if_no_fixtures("bind_operator_parity") {
+        return;
+    }
+    let backend = OxRdfBackend;
+    let h = Harness::new(&backend);
+    let subdir_present = fixtures_dir()
+        .map(|d| d.join("bind-operator").is_dir())
+        .unwrap_or(false);
+    let cases = if subdir_present {
+        case_files("bind-operator")
+    } else {
+        Vec::new()
+    };
+    if cases.is_empty() {
+        eprintln!(
+            "[parity_runner] bind_operator_parity: corpus absent or empty at \
+             parity/fixtures/bind-operator/; skipping (pre-merge tolerance)."
+        );
+        return;
+    }
+    for f in cases {
+        let mut adapter = BindOperatorAdapter::new();
         h.run_solution_case(&f, &mut adapter)
             .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
     }
