@@ -29,6 +29,9 @@ mod minus_operator_adapter;
 #[path = "parity/distinct_operator_adapter.rs"]
 mod distinct_operator_adapter;
 
+#[path = "parity/projection_operator_adapter.rs"]
+mod projection_operator_adapter;
+
 #[path = "parity/expression_eval_adapter.rs"]
 mod expression_eval_adapter;
 
@@ -43,6 +46,7 @@ use filter_operator_adapter::FilterOperatorAdapter;
 use minus_operator_adapter::MinusOperatorAdapter;
 use oxrdf_backend::OxRdfBackend;
 use parity_fixture_harness::{FixtureOperator, Harness, Terminal};
+use projection_operator_adapter::ProjectionOperatorAdapter;
 use sliding_window_adapter::SlidingWindowAdapter;
 use tumbling_window_adapter::TumblingWindowAdapter;
 
@@ -211,6 +215,40 @@ fn distinct_operator_parity() {
     );
     for f in cases {
         let mut adapter = DistinctOperatorAdapter::new();
+        h.run_solution_case(&f, &mut adapter)
+            .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
+    }
+}
+
+/// Parity corpus for `sparql.operator.ProjectionOperator` (SPARQL 1.1 §18.2.4
+/// SELECT-variable projection over solution mappings). Same dispatch shape as
+/// `distinct_operator_parity` but with `ProjectionOperatorAdapter`, which reads
+/// the ordered projection var list from `config.project`. Projection is
+/// bag-preserving (no dedupe) — that's what separates it from Distinct.
+#[test]
+fn projection_operator_parity() {
+    if skip_if_no_fixtures("projection_operator_parity") {
+        return;
+    }
+    let backend = OxRdfBackend;
+    let h = Harness::new(&backend);
+    let subdir_present = fixtures_dir()
+        .map(|d| d.join("projection-operator").is_dir())
+        .unwrap_or(false);
+    let cases = if subdir_present {
+        case_files("projection-operator")
+    } else {
+        Vec::new()
+    };
+    if cases.is_empty() {
+        eprintln!(
+            "[parity_runner] projection_operator_parity: corpus absent or empty at \
+             parity/fixtures/projection-operator/; skipping (pre-merge tolerance)."
+        );
+        return;
+    }
+    for f in cases {
+        let mut adapter = ProjectionOperatorAdapter::new();
         h.run_solution_case(&f, &mut adapter)
             .unwrap_or_else(|e| panic!("parity case failed: {} :: {}", f.display(), e.0));
     }
