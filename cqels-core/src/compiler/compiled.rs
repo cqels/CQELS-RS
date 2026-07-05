@@ -175,7 +175,9 @@ impl ContinuousQuery for CompiledCqelsQuery {
             })
             .collect();
 
-        // Collect default patterns only (for stream matching)
+        // Collect default patterns. With no FROM graph they retain the
+        // historical stream-batch behavior; with FROM static graphs they are
+        // evaluated against those graphs' union below.
         let default_patterns: Vec<crate::parser::ast::TriplePattern> = definition
             .pattern_groups
             .iter()
@@ -185,6 +187,18 @@ impl ContinuousQuery for CompiledCqelsQuery {
             })
             .flatten()
             .collect();
+        let from_static_graphs: Vec<String> = definition
+            .static_graphs
+            .iter()
+            .map(|graph| graph.uri.clone())
+            .collect();
+        let default_patterns_from_static = !from_static_graphs.is_empty();
+        let stream_default_patterns: Vec<crate::parser::ast::TriplePattern> =
+            if default_patterns_from_static {
+                Vec::new()
+            } else {
+                default_patterns.clone()
+            };
 
         // Collect static patterns (for RDF store lookup)
         let static_patterns: Vec<crate::parser::ast::TriplePattern> = definition
@@ -336,10 +350,12 @@ impl ContinuousQuery for CompiledCqelsQuery {
                 .or_default()
                 .extend(patterns.iter().cloned());
         }
-        // `default_patterns` is already in scope from the earlier
-        // collection. Unscoped triples in the WHERE clause apply to
-        // every batch regardless of its source — they're added to
-        // each source's pattern set inside the matcher below.
+        // `stream_default_patterns` is already in scope from the earlier
+        // collection. When no FROM graph is declared, unscoped triples in the
+        // WHERE clause apply to every batch regardless of its source — they're
+        // added to each source's pattern set inside the matcher below. When a
+        // FROM graph is declared, those same default-position triples are
+        // resolved through the RDF store instead.
 
         // Pre-compute static bindings from RDF store (if available).
         //
@@ -349,7 +365,9 @@ impl ContinuousQuery for CompiledCqelsQuery {
         // a mandatory pattern matched nothing, in which case the whole query
         // produces no results (#81).
         let rdf_store = self.rdf_store.clone();
-        let has_static_patterns = !static_patterns.is_empty() || !named_graph_patterns.is_empty();
+        let has_static_patterns = !static_patterns.is_empty()
+            || !named_graph_patterns.is_empty()
+            || (default_patterns_from_static && !default_patterns.is_empty());
         let static_bindings: Option<Vec<BindingSet>> = match &rdf_store {
             Some(store) if has_static_patterns => {
                 let mut accumulated: Vec<BindingSet> = Vec::new();
@@ -368,6 +386,23 @@ impl ContinuousQuery for CompiledCqelsQuery {
                         initialized = true;
                         pattern_results
                     };
+                }
+
+                if default_patterns_from_static {
+                    for pattern in &default_patterns {
+                        let mut pattern_results = Vec::new();
+                        for graph_uri in &from_static_graphs {
+                            pattern_results.extend(
+                                store.query_named_graph_pattern(graph_uri, pattern, &prefixes),
+                            );
+                        }
+                        accumulated = if initialized {
+                            join_binding_sets(&accumulated, &pattern_results)
+                        } else {
+                            initialized = true;
+                            pattern_results
+                        };
+                    }
                 }
 
                 for (graph_uri, patterns) in &named_graph_patterns {
@@ -422,13 +457,13 @@ impl ContinuousQuery for CompiledCqelsQuery {
                 // patterns; if those are empty too, no results.
                 let source_patterns = patterns_by_source.get(&source);
                 let active_pattern_count =
-                    source_patterns.map(|p| p.len()).unwrap_or(0) + default_patterns.len();
+                    source_patterns.map(|p| p.len()).unwrap_or(0) + stream_default_patterns.len();
                 let mut pattern_results: Vec<Vec<BindingSet>> = Vec::new();
                 let mut matched_count = 0;
                 let chained = source_patterns
                     .into_iter()
                     .flatten()
-                    .chain(default_patterns.iter());
+                    .chain(stream_default_patterns.iter());
                 for pattern in chained {
                     let matches: Vec<BindingSet> = stmts
                         .iter()
@@ -2027,6 +2062,102 @@ mod tests {
                 None => {} // Pending — the query is still alive, as required.
             }
         }
+    }
+
+    #[tokio::test]
+    async fn from_static_graph_default_patterns_join_stream_results() {
+        use crate::store::OxigraphRdfStore;
+
+        let graph_uri = "http://example.org/static";
+        let store = OxigraphRdfStore::new().unwrap();
+        store
+            .load_named_graph(
+                graph_uri,
+                &[Statement::new(
+                    Term::Iri(IriTerm::new("http://example.org/sensor1")),
+                    IriTerm::new("http://example.org/location"),
+                    Term::Iri(IriTerm::new("http://example.org/room1")),
+                )],
+            )
+            .unwrap();
+
+        let definition = CqelsQueryDefinition {
+            name: None,
+            description: None,
+            query_type: CqelsQueryType::Select,
+            prefixes: HashMap::new(),
+            streams: vec![CqelsStreamDefinition::root("sensors", WindowSpec::now())],
+            named_windows: vec![],
+            static_graphs: vec![GraphDefinition {
+                uri: graph_uri.to_string(),
+                depth: None,
+                cache_duration: None,
+            }],
+            named_graphs: vec![],
+            select_elements: vec![
+                SelectElement::Variable("?sensor".to_string()),
+                SelectElement::Variable("?temp".to_string()),
+                SelectElement::Variable("?location".to_string()),
+            ],
+            distinct: false,
+            pattern_groups: vec![
+                CqelsPatternGroup::Stream {
+                    source: "sensors".to_string(),
+                    patterns: vec![TriplePattern {
+                        subject: "?sensor".to_string(),
+                        predicate: "<http://example.org/temp>".to_string(),
+                        object: "?temp".to_string(),
+                    }],
+                },
+                CqelsPatternGroup::Default {
+                    patterns: vec![TriplePattern {
+                        subject: "?sensor".to_string(),
+                        predicate: "<http://example.org/location>".to_string(),
+                        object: "?location".to_string(),
+                    }],
+                },
+            ],
+            aggregates: vec![],
+            group_by_variables: vec![],
+            order_by_conditions: vec![],
+            limit: None,
+            operator_hints: OperatorHints::default(),
+            stream_semantics: StreamSemantics::default(),
+            construct_template: vec![],
+            seq_constraint: None,
+        };
+
+        let query = CompiledCqelsQuery {
+            query_string: "<from static graph default pattern test>".to_string(),
+            query_id: "test-from-static-default".to_string(),
+            definition: Arc::new(definition),
+            filter_expressions: Arc::new(vec![]),
+            bind_expressions: Arc::new(vec![]),
+            order_by_expressions: Arc::new(vec![]),
+            having_expressions: Arc::new(vec![]),
+            aggregate_specs: Arc::new(vec![]),
+            evaluator: Arc::new(ExpressionEvaluator::new()),
+            select_vars: Arc::new(vec![
+                "sensor".to_string(),
+                "temp".to_string(),
+                "location".to_string(),
+            ]),
+            rdf_store: Some(Arc::new(store)),
+            self_join_hints: Arc::new(vec![]),
+        };
+
+        let mut inputs = QueryInputs::new();
+        inputs.add_stream(
+            "sensors",
+            Box::pin(futures::stream::iter(vec![sensor1_temp_element()])),
+        );
+
+        let results: Vec<BindingSet> = query.execute(inputs).collect().await;
+        assert_eq!(results.len(), 1, "expected stream row to join FROM graph");
+        assert_eq!(
+            results[0].get("location").and_then(|v| v.as_string()),
+            Some("http://example.org/room1")
+        );
     }
 
     /// Direct check that [`apply_window_spec`] respects each spec
