@@ -39,6 +39,10 @@ pub struct MemoryStatement {
     )]
     pub object_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datatype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<JsonValue>,
 }
 
@@ -53,6 +57,8 @@ impl MemoryStatement {
             predicate: predicate.into(),
             object: object.into(),
             object_type: default_object_type(),
+            datatype: None,
+            language: None,
             meta: None,
         }
     }
@@ -525,6 +531,8 @@ mod tests {
                             predicate: "http://ex/likes".to_string(),
                             object: "http://ex/Sensors".to_string(),
                             object_type: "uri".to_string(),
+                            datatype: None,
+                            language: None,
                             meta: Some(serde_json::json!({"accessLabel":"team"})),
                         }],
                         turtle: None,

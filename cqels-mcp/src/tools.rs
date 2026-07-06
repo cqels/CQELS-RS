@@ -21,6 +21,8 @@ use cqels_core::parser::CqelsQlParser;
 use cqels_core::stream::RdfStreamElement;
 use cqels_model::{IriTerm, LiteralTerm, Statement, Term};
 use cqels_reasoning::{ReasoningConfig, ReasoningProfile, ReteNetwork};
+#[allow(deprecated)]
+use oxigraph::io::{GraphFormat, GraphParser};
 use serde_json::json;
 
 use crate::memory::{MemoryFact, MemoryPayload, MemoryStatement, MemoryStore};
@@ -564,6 +566,61 @@ fn namespace_from(invocation: &ToolInvocation) -> String {
         .to_string()
 }
 
+fn expand_memory_iri(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("IRI value must not be empty".to_string());
+    }
+    if trimmed.starts_with('<') || trimmed.ends_with('>') {
+        if !(trimmed.starts_with('<') && trimmed.ends_with('>')) {
+            return Err(format!("bracketed IRI '{value}' must use both '<' and '>'"));
+        }
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if is_absolute_memory_iri(inner) {
+            return Ok(inner.to_string());
+        }
+        return Err(format!("bracketed IRI '{value}' must be absolute"));
+    }
+    let Some((prefix, local)) = trimmed.split_once(':') else {
+        return Err(format!(
+            "'{value}' must be an absolute IRI or known prefixed name"
+        ));
+    };
+    if local.is_empty() {
+        return Err(format!("IRI '{value}' has an empty scheme-specific part"));
+    }
+    let base = match prefix {
+        "rdf" => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "rdfs" => "http://www.w3.org/2000/01/rdf-schema#",
+        "owl" => "http://www.w3.org/2002/07/owl#",
+        "xsd" => "http://www.w3.org/2001/XMLSchema#",
+        "sh" => "http://www.w3.org/ns/shacl#",
+        "cqels" => "cqels://ontology/",
+        _ => {
+            if is_valid_iri_scheme(prefix) {
+                return Ok(trimmed.to_string());
+            }
+            return Err(format!(
+                "unknown prefix '{prefix}' in '{value}'; supported: rdf, rdfs, owl, xsd, sh, cqels"
+            ));
+        }
+    };
+    Ok(format!("{base}{local}"))
+}
+
+fn is_valid_iri_scheme(prefix: &str) -> bool {
+    let mut chars = prefix.chars();
+    chars.next().is_some_and(|ch| ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+}
+
+fn is_absolute_memory_iri(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once(':') else {
+        return false;
+    };
+    !rest.is_empty() && is_valid_iri_scheme(scheme)
+}
+
 fn generated_memory_id() -> String {
     let seq = GENERATED_MEMORY_ID.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -571,6 +628,19 @@ fn generated_memory_id() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("memory-{nanos}-{seq}")
+}
+
+fn validate_writable_graph(graph: &str) -> Result<(), String> {
+    if RESERVED_GRAPHS.contains(&graph) {
+        return Err(format!(
+            "graph '{graph}' is reserved for CQELS system tools"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recall_graph(graph: &str) -> Result<(), String> {
+    validate_writable_graph(graph)
 }
 
 fn structured_memory_requested(invocation: &ToolInvocation) -> bool {
@@ -596,11 +666,7 @@ fn parse_memory_payload(invocation: &ToolInvocation) -> Result<Option<MemoryPayl
 
     let graph = if memory == LONGTERM_MEMORY {
         let graph = invocation.get_str("graph").unwrap_or(LONGTERM_GRAPH);
-        if RESERVED_GRAPHS.contains(&graph) {
-            return Err(format!(
-                "graph '{graph}' is reserved for CQELS system tools"
-            ));
-        }
+        validate_writable_graph(graph)?;
         Some(graph.to_string())
     } else {
         None
@@ -622,12 +688,15 @@ fn parse_memory_payload(invocation: &ToolInvocation) -> Result<Option<MemoryPayl
             }
         })
         .transpose()?;
-    let facts = parse_memory_statements(invocation.get("facts"), meta.as_ref())?;
     let turtle = invocation
         .get_str("turtle")
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let mut facts = parse_memory_statements(invocation.get("facts"), meta.as_ref())?;
+    if let Some(turtle) = &turtle {
+        facts.extend(parse_turtle_statements(turtle, meta.as_ref())?);
+    }
 
     if facts.is_empty() && turtle.is_none() && invocation.get_str("content").is_none() {
         return Err("store_memory requires one of: content, facts, turtle".to_string());
@@ -675,10 +744,31 @@ fn parse_memory_statements(
             ));
         }
         out.push(MemoryStatement {
-            subject: required("subject")?,
-            predicate: required("predicate")?,
-            object: required("object")?,
+            subject: expand_memory_iri(&required("subject")?)?,
+            predicate: expand_memory_iri(&required("predicate")?)?,
+            object: if object_type == "uri" {
+                expand_memory_iri(&required("object")?)?
+            } else {
+                required("object")?
+            },
             object_type: object_type.to_string(),
+            datatype: match object.get("datatype") {
+                Some(value) => {
+                    Some(expand_memory_iri(value.as_str().ok_or_else(|| {
+                        format!("facts[{idx}].datatype must be a string")
+                    })?)?)
+                }
+                None => None,
+            },
+            language: match object.get("language") {
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| format!("facts[{idx}].language must be a string"))?
+                        .to_string(),
+                ),
+                None => None,
+            },
             meta: match object.get("meta") {
                 Some(meta) if meta.is_object() => Some(meta.clone()),
                 Some(_) => return Err(format!("facts[{idx}].meta must be an object")),
@@ -687,6 +777,64 @@ fn parse_memory_statements(
         });
     }
     Ok(out)
+}
+
+#[allow(deprecated)]
+fn parse_turtle_statements(
+    turtle: &str,
+    default_meta: Option<&serde_json::Value>,
+) -> Result<Vec<MemoryStatement>, String> {
+    let parser = GraphParser::from_format(GraphFormat::Turtle);
+    let mut out = Vec::new();
+    for (idx, triple) in parser.read_triples(turtle.as_bytes()).enumerate() {
+        let triple = triple.map_err(|e| format!("turtle parse error at triple #{idx}: {e}"))?;
+        let subject = match triple.subject {
+            oxigraph::model::Subject::NamedNode(node) => node.as_str().to_string(),
+            oxigraph::model::Subject::BlankNode(node) => skolemized_blank_node(node.as_str()),
+            oxigraph::model::Subject::Triple(_) => {
+                return Err("turtle RDF-star subjects are not supported yet".to_string());
+            }
+        };
+        let (object, object_type, datatype, language) = match triple.object {
+            oxigraph::model::Term::NamedNode(node) => {
+                (node.as_str().to_string(), "uri", None, None)
+            }
+            oxigraph::model::Term::Literal(literal) => (
+                literal.value().to_string(),
+                "literal",
+                Some(literal.datatype().as_str().to_string()),
+                literal.language().map(str::to_string),
+            ),
+            oxigraph::model::Term::BlankNode(node) => {
+                (skolemized_blank_node(node.as_str()), "uri", None, None)
+            }
+            oxigraph::model::Term::Triple(_) => {
+                return Err("turtle RDF-star objects are not supported yet".to_string());
+            }
+        };
+        out.push(MemoryStatement {
+            subject,
+            predicate: triple.predicate.as_str().to_string(),
+            object,
+            object_type: object_type.to_string(),
+            datatype,
+            language,
+            meta: default_meta.cloned(),
+        });
+    }
+    Ok(out)
+}
+
+fn skolemized_blank_node(id: &str) -> String {
+    let mut out = String::from("urn:cqels:bnode:");
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    out
 }
 
 fn canonical_structured_content(payload: &MemoryPayload) -> Result<String, String> {
@@ -709,54 +857,204 @@ fn recall_limit(invocation: &ToolInvocation) -> usize {
         .unwrap_or(DEFAULT_RECALL_LIMIT)
 }
 
-fn has_non_empty_pattern_field(pattern: &serde_json::Map<String, serde_json::Value>) -> bool {
-    ["subject", "predicate", "object"].iter().any(|key| {
-        pattern
-            .get(*key)
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty())
-    })
-}
-
-fn filter_by_pattern(
-    facts: Vec<MemoryFact>,
-    pattern_value: Option<&serde_json::Value>,
-) -> Result<Vec<MemoryFact>, String> {
-    let Some(pattern_value) = pattern_value else {
-        return Ok(facts);
-    };
-    let pattern = pattern_value
-        .as_object()
-        .ok_or_else(|| "`pattern` must be an object".to_string())?;
-    if !has_non_empty_pattern_field(pattern) {
-        return Err("pattern must specify at least one of: subject, predicate, object".to_string());
+fn recall_format(invocation: &ToolInvocation) -> Result<&str, String> {
+    match invocation.get_str("format").unwrap_or("json") {
+        "json" => Ok("json"),
+        "turtle" | "natural" => {
+            Err("recall_memory format support is currently limited to 'json'".to_string())
+        }
+        other => Err(format!(
+            "unknown recall_memory format '{other}'; supported: json"
+        )),
     }
-    Ok(facts
-        .into_iter()
-        .filter(|fact| {
-            fact.facts
-                .iter()
-                .any(|stmt| statement_matches(stmt, pattern))
-        })
-        .collect())
 }
 
-fn statement_matches(
-    statement: &MemoryStatement,
-    pattern: &serde_json::Map<String, serde_json::Value>,
-) -> bool {
-    let matches_field = |key: &str, actual: &str| {
-        pattern
-            .get(key)
-            .and_then(|v| v.as_str())
-            .is_none_or(|expected| expected.is_empty() || expected == actual)
+#[derive(Debug)]
+struct MemoryPattern {
+    subject: Option<String>,
+    predicate: Option<String>,
+    object_candidates: Vec<String>,
+    object_type: Option<String>,
+    graph: Option<String>,
+}
+
+impl MemoryPattern {
+    fn has_statement_field(&self) -> bool {
+        self.subject.is_some() || self.predicate.is_some() || !self.object_candidates.is_empty()
+    }
+}
+
+fn non_empty_str<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    match object.get(key) {
+        Some(value) => match value.as_str() {
+            Some(text) if !text.is_empty() => Ok(Some(text)),
+            Some(_) => Ok(None),
+            None => Err(format!("pattern.{key} must be a string")),
+        },
+        None => Ok(None),
+    }
+}
+
+fn pattern_str<'a>(
+    pattern: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    match pattern {
+        Some(pattern) => non_empty_str(pattern, key),
+        None => Ok(None),
+    }
+}
+
+fn parse_recall_pattern(
+    pattern_value: Option<&serde_json::Value>,
+    graph_value: Option<&str>,
+) -> Result<Option<MemoryPattern>, String> {
+    let pattern = match pattern_value {
+        Some(pattern_value) => Some(
+            pattern_value
+                .as_object()
+                .ok_or_else(|| "`pattern` must be an object".to_string())?,
+        ),
+        None => None,
     };
-    matches_field("subject", &statement.subject)
-        && matches_field("predicate", &statement.predicate)
-        && matches_field("object", &statement.object)
+    if pattern.is_none() && graph_value.is_none() {
+        return Ok(None);
+    }
+
+    let subject = match pattern_str(pattern, "subject")? {
+        Some(value) => Some(expand_memory_iri(value)?),
+        None => None,
+    };
+    let predicate = match pattern_str(pattern, "predicate")? {
+        Some(value) => Some(expand_memory_iri(value)?),
+        None => None,
+    };
+    let object_type = pattern_str(pattern, "objectType")?.map(str::to_string);
+    if let Some(object_type) = &object_type {
+        if object_type != "uri" && object_type != "literal" {
+            return Err("pattern.objectType must be either 'uri' or 'literal'".to_string());
+        }
+    }
+    let mut object_candidates = Vec::new();
+    if let Some(object) = pattern_str(pattern, "object")? {
+        match object_type.as_deref() {
+            Some("uri") => object_candidates.push(expand_memory_iri(object)?),
+            Some("literal") => object_candidates.push(object.to_string()),
+            None => {
+                if let Ok(expanded) = expand_memory_iri(object) {
+                    object_candidates.push(expanded);
+                } else {
+                    object_candidates.push(object.to_string());
+                }
+            }
+            _ => unreachable!("objectType already validated"),
+        }
+    }
+    let graph = graph_value
+        .filter(|graph| !graph.is_empty())
+        .or(pattern_str(pattern, "graph")?)
+        .map(str::to_string);
+    if let Some(graph) = &graph {
+        validate_recall_graph(graph)?;
+    }
+    let parsed = MemoryPattern {
+        subject,
+        predicate,
+        object_candidates,
+        object_type,
+        graph,
+    };
+    if !parsed.has_statement_field() && parsed.graph.is_none() {
+        return Err(
+            "pattern must specify at least one of: subject, predicate, object, graph".to_string(),
+        );
+    }
+    Ok(Some(parsed))
+}
+
+fn memory_fact_matches_pattern(fact: &MemoryFact, pattern: &MemoryPattern) -> bool {
+    if fact.memory != LONGTERM_MEMORY {
+        return false;
+    }
+    let graph = fact.graph.as_deref().unwrap_or(LONGTERM_GRAPH);
+    if let Some(expected_graph) = &pattern.graph {
+        if graph != expected_graph {
+            return false;
+        }
+    } else if validate_writable_graph(graph).is_err() {
+        return false;
+    }
+    if !pattern.has_statement_field() {
+        return true;
+    }
+    fact.facts
+        .iter()
+        .any(|stmt| statement_matches(stmt, pattern))
+}
+
+fn pattern_statement_rows(
+    facts: Vec<MemoryFact>,
+    pattern: &MemoryPattern,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let mut rows = Vec::new();
+    for fact in facts {
+        if !memory_fact_matches_pattern(&fact, pattern) {
+            continue;
+        }
+        let graph = fact.graph.as_deref().unwrap_or(LONGTERM_GRAPH);
+        for statement in &fact.facts {
+            if pattern.has_statement_field() && !statement_matches(statement, pattern) {
+                continue;
+            }
+            let mut row = serde_json::Map::new();
+            row.insert("s".to_string(), json!(statement.subject.clone()));
+            row.insert("p".to_string(), json!(statement.predicate.clone()));
+            row.insert("o".to_string(), json!(statement.object.clone()));
+            row.insert(
+                "objectType".to_string(),
+                json!(statement.object_type.clone()),
+            );
+            if let Some(datatype) = &statement.datatype {
+                row.insert("datatype".to_string(), json!(datatype));
+            }
+            if let Some(language) = &statement.language {
+                row.insert("language".to_string(), json!(language));
+            }
+            row.insert("graph".to_string(), json!(graph));
+            row.insert("memory_id".to_string(), json!(fact.id.clone()));
+            if let Some(meta) = &statement.meta {
+                row.insert("meta".to_string(), meta.clone());
+            }
+            rows.push(serde_json::Value::Object(row));
+            if rows.len() >= limit {
+                return rows;
+            }
+        }
+    }
+    rows
+}
+
+fn statement_matches(statement: &MemoryStatement, pattern: &MemoryPattern) -> bool {
+    pattern
+        .subject
+        .as_deref()
+        .is_none_or(|expected| expected == statement.subject)
         && pattern
-            .get("objectType")
-            .and_then(|v| v.as_str())
+            .predicate
+            .as_deref()
+            .is_none_or(|expected| expected == statement.predicate)
+        && (pattern.object_candidates.is_empty()
+            || pattern
+                .object_candidates
+                .iter()
+                .any(|expected| expected == &statement.object))
+        && pattern
+            .object_type
+            .as_deref()
             .is_none_or(|expected| expected == statement.object_type)
 }
 
@@ -808,7 +1106,7 @@ impl McpTool for StoreMemoryTool {
             }))
             .with_property("turtle", json!({
                 "type": "string",
-                "description": "RDF data in Turtle format. Stored as raw Turtle until the full RDF repository-backed memory layer lands.",
+                "description": "RDF data in Turtle format. Parsed into graph-scoped structured statements and also retained on the memory record.",
             }))
             .with_property("memory", json!({
                 "type": "string",
@@ -903,7 +1201,8 @@ impl McpTool for RecallMemoryTool {
     fn description(&self) -> &str {
         "Retrieve memories from a namespace, optionally filtered by text \
          substring or alpha.8-style RDF subject/predicate/object pattern. \
-         Returns facts sorted by id."
+         Legacy text/no-pattern recall returns memory records sorted by id; \
+         pattern or graph recall returns Java-style RDF statement rows."
     }
 
     fn input_schema(&self) -> ToolInputSchema {
@@ -915,7 +1214,7 @@ impl McpTool for RecallMemoryTool {
             }))
             .with_property("query", json!({
                 "type": "string",
-                "description": "Substring to match within fact content. Empty/missing returns all facts in the namespace.",
+                "description": "Substring to match within fact content. Empty/missing legacy recall returns all memory records in the namespace.",
             }))
             .with_property("text", json!({
                 "type": "string",
@@ -928,8 +1227,19 @@ impl McpTool for RecallMemoryTool {
                     "subject": {"type": "string"},
                     "predicate": {"type": "string"},
                     "object": {"type": "string"},
-                    "objectType": {"type": "string", "enum": ["uri", "literal"]}
+                    "objectType": {"type": "string", "enum": ["uri", "literal"]},
+                    "graph": {"type": "string"}
                 }
+            }))
+            .with_property("graph", json!({
+                "type": "string",
+                "description": "Optional named graph URI to search for pattern recall. Defaults to all non-reserved longterm RDF memory graphs.",
+            }))
+            .with_property("format", json!({
+                "type": "string",
+                "enum": ["json"],
+                "default": "json",
+                "description": "Output format. This Rust slice currently implements Java's json pattern rows; turtle and natural serializers are follow-up parity work.",
             }))
             .with_property("limit", json!({
                 "type": "integer",
@@ -946,16 +1256,36 @@ impl McpTool for RecallMemoryTool {
             .or_else(|| invocation.get_str("text"))
             .unwrap_or("")
             .to_string();
+        let pattern =
+            match parse_recall_pattern(invocation.get("pattern"), invocation.get_str("graph")) {
+                Ok(pattern) => pattern,
+                Err(message) => return ToolResult::error(message),
+            };
+        let format = match recall_format(invocation) {
+            Ok(format) => format,
+            Err(message) => return ToolResult::error(message),
+        };
         match self.store.recall(&namespace, &query) {
             Ok(facts) => {
-                let mut facts = match filter_by_pattern(facts, invocation.get("pattern")) {
-                    Ok(facts) => facts,
-                    Err(message) => return ToolResult::error(message),
-                };
-                facts.truncate(recall_limit(invocation));
+                let limit = recall_limit(invocation);
+                if let Some(pattern) = pattern.as_ref() {
+                    let rows = pattern_statement_rows(facts, pattern, limit);
+                    return ToolResult::success(json!({
+                    "namespace": namespace,
+                    "query": query,
+                    "graph": pattern.graph.as_deref(),
+                    "format": format,
+                    "count": rows.len(),
+                    "facts": rows,
+                    }));
+                }
+
+                let mut facts = facts;
+                facts.truncate(limit);
                 ToolResult::success(json!({
                 "namespace": namespace,
                 "query": query,
+                "format": format,
                 "count": facts.len(),
                 "facts": facts,
                 }))
@@ -1398,7 +1728,9 @@ mod tests {
                             "subject": "http://ex/Alice",
                             "predicate": "http://ex/name",
                             "object": "Alice",
-                            "objectType": "literal"
+                            "objectType": "literal",
+                            "datatype": "xsd:string",
+                            "language": "en"
                         }
                     ]),
                 ),
@@ -1421,6 +1753,11 @@ mod tests {
             stored[0].facts[1].meta.as_ref().unwrap()["source"],
             "sensor-feed"
         );
+        assert_eq!(
+            stored[0].facts[1].datatype.as_deref(),
+            Some("http://www.w3.org/2001/XMLSchema#string")
+        );
+        assert_eq!(stored[0].facts[1].language.as_deref(), Some("en"));
         assert_eq!(stored[0].meta.as_ref().unwrap()["source"], "sensor-feed");
     }
 
@@ -1514,6 +1851,150 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("reserved"));
+    }
+
+    #[test]
+    fn store_memory_allows_non_user_non_reserved_graphs_and_pattern_recall_finds_them() {
+        let store = InMemoryMemoryStore::shared();
+        let store_result = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("http://ex/private-graph"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Alice",
+                        "predicate": "http://ex/likes",
+                        "object": "Sensors"
+                    }]),
+                ),
+        );
+        assert!(!store_result.is_error, "{:?}", store_result.content);
+
+        let recall = run_with_memory(
+            store.clone(),
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://ex/likes",
+                    "object": "Sensors"
+                }),
+            ),
+        );
+        assert!(!recall.is_error, "{:?}", recall.content);
+        assert_eq!(recall.content["count"], 1);
+        assert_eq!(
+            recall.content["facts"][0]["graph"],
+            "http://ex/private-graph"
+        );
+
+        let scoped = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("http://ex/private-graph"))
+                .with_arg(
+                    "pattern",
+                    serde_json::json!({
+                        "predicate": "http://ex/likes"
+                    }),
+                ),
+        );
+        assert!(!scoped.is_error, "{:?}", scoped.content);
+        assert_eq!(scoped.content["count"], 1);
+    }
+
+    #[test]
+    fn store_memory_expands_java_known_prefixes() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "cqels:Alice",
+                    "predicate": "rdf:type",
+                    "object": "cqels:Agent",
+                    "objectType": "uri"
+                }]),
+            ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+
+        let stored = store.recall("default", "").unwrap();
+        let stmt = &stored[0].facts[0];
+        assert_eq!(stmt.subject, "cqels://ontology/Alice");
+        assert_eq!(
+            stmt.predicate,
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        );
+        assert_eq!(stmt.object, "cqels://ontology/Agent");
+    }
+
+    #[test]
+    fn store_memory_accepts_other_absolute_iri_schemes() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "did:example:alice",
+                    "predicate": "tag:example.org,2026:knows",
+                    "object": "mailto:bob@example.org",
+                    "objectType": "uri"
+                }]),
+            ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+
+        let stored = store.recall("default", "").unwrap();
+        let stmt = &stored[0].facts[0];
+        assert_eq!(stmt.subject, "did:example:alice");
+        assert_eq!(stmt.predicate, "tag:example.org,2026:knows");
+        assert_eq!(stmt.object, "mailto:bob@example.org");
+        assert_eq!(stmt.object_type, "uri");
+    }
+
+    #[test]
+    fn store_memory_validates_bracketed_iris_are_absolute() {
+        let store = InMemoryMemoryStore::shared();
+        let valid = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "<http://ex/Alice>",
+                    "predicate": "<http://ex/likes>",
+                    "object": "<http://ex/Sensors>",
+                    "objectType": "uri"
+                }]),
+            ),
+        );
+        assert!(!valid.is_error, "{:?}", valid.content);
+
+        let invalid = run_with_memory(
+            store,
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "<Alice>",
+                    "predicate": "http://ex/likes",
+                    "object": "Sensors"
+                }]),
+            ),
+        );
+        assert!(invalid.is_error);
+        assert!(invalid.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("must be absolute"));
     }
 
     #[test]
@@ -1611,11 +2092,378 @@ mod tests {
         );
         assert!(!res.is_error, "{:?}", res.content);
         assert_eq!(res.content["count"], 1);
-        assert_eq!(res.content["facts"][0]["id"], "alice");
-        assert_eq!(res.content["facts"][0]["facts"][0]["objectType"], "uri");
-        assert!(res.content["facts"][0]["facts"][0]
-            .get("object_type")
-            .is_none());
+        assert_eq!(res.content["format"], "json");
+        assert_eq!(res.content["facts"][0]["memory_id"], "alice");
+        assert_eq!(res.content["facts"][0]["objectType"], "uri");
+        assert!(res.content["facts"][0].get("object_type").is_none());
+    }
+
+    #[test]
+    fn recall_memory_uses_expanded_prefix_pattern() {
+        let store = InMemoryMemoryStore::shared();
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "cqels:Alice",
+                    "predicate": "rdf:type",
+                    "object": "cqels:Agent",
+                    "objectType": "uri"
+                }]),
+            ),
+        );
+
+        let res = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "rdf:type",
+                    "object": "cqels:Agent",
+                    "objectType": "uri"
+                }),
+            ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["count"], 1);
+    }
+
+    #[test]
+    fn store_memory_parses_turtle_into_pattern_rows() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("ttl"))
+                .with_arg("graph", serde_json::json!("cqels://memory/user/turtle"))
+                .with_arg("meta", serde_json::json!({"source":"ttl-test"}))
+                .with_arg(
+                    "turtle",
+                    serde_json::json!(
+                        "@prefix cqels: <cqels://ontology/> . cqels:Alice cqels:knows cqels:Bob ."
+                    ),
+                ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["fact_count"], 1);
+
+        let recall = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/user/turtle"))
+                .with_arg(
+                    "pattern",
+                    serde_json::json!({
+                        "subject": "cqels:Alice",
+                        "predicate": "cqels:knows",
+                        "object": "cqels:Bob"
+                    }),
+                ),
+        );
+        assert!(!recall.is_error, "{:?}", recall.content);
+        assert_eq!(recall.content["count"], 1);
+        assert_eq!(recall.content["facts"][0]["s"], "cqels://ontology/Alice");
+        assert_eq!(recall.content["facts"][0]["p"], "cqels://ontology/knows");
+        assert_eq!(recall.content["facts"][0]["o"], "cqels://ontology/Bob");
+        assert_eq!(recall.content["facts"][0]["objectType"], "uri");
+        assert_eq!(recall.content["facts"][0]["meta"]["source"], "ttl-test");
+    }
+
+    #[test]
+    fn store_memory_skolemizes_turtle_blank_nodes() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("blank-turtle"))
+                .with_arg(
+                    "turtle",
+                    serde_json::json!(
+                        "@prefix foaf: <http://xmlns.com/foaf/0.1/> . _:alice foaf:knows _:bob ."
+                    ),
+                ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+
+        let recall = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://xmlns.com/foaf/0.1/knows"
+                }),
+            ),
+        );
+        assert!(!recall.is_error, "{:?}", recall.content);
+        assert_eq!(recall.content["count"], 1);
+        assert!(recall.content["facts"][0]["s"]
+            .as_str()
+            .unwrap()
+            .starts_with("urn:cqels:bnode:"));
+        assert!(recall.content["facts"][0]["o"]
+            .as_str()
+            .unwrap()
+            .starts_with("urn:cqels:bnode:"));
+        assert_eq!(recall.content["facts"][0]["objectType"], "uri");
+    }
+
+    #[test]
+    fn skolemized_blank_node_escapes_non_safe_bytes_injectively() {
+        assert_eq!(skolemized_blank_node("a/b"), "urn:cqels:bnode:a%2fb");
+        assert_ne!(skolemized_blank_node("a1"), skolemized_blank_node("a\u{1}"));
+    }
+
+    #[test]
+    fn store_memory_preserves_turtle_literal_metadata() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "turtle",
+                serde_json::json!(
+                    "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> . \
+                     <http://ex/Alice> <http://ex/age> \"42\"^^xsd:integer ; \
+                     <http://ex/name> \"Alice\"@en ."
+                ),
+            ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["fact_count"], 2);
+
+        let age = run_with_memory(
+            store.clone(),
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://ex/age"
+                }),
+            ),
+        );
+        assert!(!age.is_error, "{:?}", age.content);
+        assert_eq!(age.content["count"], 1);
+        assert_eq!(age.content["facts"][0]["o"], "42");
+        assert_eq!(age.content["facts"][0]["objectType"], "literal");
+        assert_eq!(
+            age.content["facts"][0]["datatype"],
+            "http://www.w3.org/2001/XMLSchema#integer"
+        );
+
+        let name = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://ex/name"
+                }),
+            ),
+        );
+        assert!(!name.is_error, "{:?}", name.content);
+        assert_eq!(name.content["count"], 1);
+        assert_eq!(name.content["facts"][0]["o"], "Alice");
+        assert_eq!(name.content["facts"][0]["language"], "en");
+        assert_eq!(
+            name.content["facts"][0]["datatype"],
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+        );
+    }
+
+    #[test]
+    fn store_memory_rejects_malformed_turtle() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store,
+            "store_memory",
+            ToolInvocation::new().with_arg("turtle", serde_json::json!("@prefix broken")),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("turtle parse error"));
+    }
+
+    #[test]
+    fn recall_memory_scopes_patterns_to_user_fact_graphs() {
+        let store = InMemoryMemoryStore::shared();
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Alice",
+                    "predicate": "http://ex/status",
+                    "object": "active"
+                }]),
+            ),
+        );
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/user/project"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Bob",
+                        "predicate": "http://ex/status",
+                        "object": "active"
+                    }]),
+                ),
+        );
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("memory", serde_json::json!("shortterm"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Charlie",
+                        "predicate": "http://ex/status",
+                        "object": "active"
+                    }]),
+                ),
+        );
+
+        let all_user_graphs = run_with_memory(
+            store.clone(),
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://ex/status",
+                    "object": "active"
+                }),
+            ),
+        );
+        assert!(!all_user_graphs.is_error, "{:?}", all_user_graphs.content);
+        assert_eq!(all_user_graphs.content["count"], 2);
+
+        let project_graph = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/user/project")),
+        );
+        assert!(!project_graph.is_error, "{:?}", project_graph.content);
+        assert_eq!(project_graph.content["count"], 1);
+        assert_eq!(
+            project_graph.content["facts"][0]["graph"],
+            "cqels://memory/user/project"
+        );
+    }
+
+    #[test]
+    fn recall_memory_supports_pattern_graph_and_top_level_graph_precedence() {
+        let store = InMemoryMemoryStore::shared();
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Default",
+                    "predicate": "http://ex/status",
+                    "object": "active"
+                }]),
+            ),
+        );
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/user/project"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Project",
+                        "predicate": "http://ex/status",
+                        "object": "active"
+                    }]),
+                ),
+        );
+
+        let pattern_graph = run_with_memory(
+            store.clone(),
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "graph": "cqels://memory/user/project",
+                    "predicate": "http://ex/status"
+                }),
+            ),
+        );
+        assert!(!pattern_graph.is_error, "{:?}", pattern_graph.content);
+        assert_eq!(pattern_graph.content["count"], 1);
+        assert_eq!(pattern_graph.content["facts"][0]["s"], "http://ex/Project");
+
+        let top_level_wins = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/longterm"))
+                .with_arg(
+                    "pattern",
+                    serde_json::json!({
+                        "graph": "cqels://memory/user/project",
+                        "predicate": "http://ex/status"
+                    }),
+                ),
+        );
+        assert!(!top_level_wins.is_error, "{:?}", top_level_wins.content);
+        assert_eq!(top_level_wins.content["count"], 1);
+        assert_eq!(top_level_wins.content["facts"][0]["s"], "http://ex/Default");
+    }
+
+    #[test]
+    fn recall_memory_rejects_reserved_graph_scope() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg("graph", serde_json::json!("cqels://memory/policy")),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("reserved"));
+    }
+
+    #[test]
+    fn recall_memory_rejects_unimplemented_non_json_format() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg("format", serde_json::json!("turtle")),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("limited to 'json'"));
+    }
+
+    #[test]
+    fn recall_memory_schema_only_advertises_json_format() {
+        let schema = recall_memory_tool(InMemoryMemoryStore::shared()).input_schema();
+        let format_enum = schema.properties["format"]["enum"]
+            .as_array()
+            .expect("format enum");
+        assert_eq!(format_enum.as_slice(), &[serde_json::json!("json")]);
     }
 
     #[test]
@@ -1661,11 +2509,14 @@ mod tests {
 
         let res = run_with_memory(store, "recall_memory", ToolInvocation::new());
         assert!(!res.is_error);
+        assert_eq!(res.content["format"], "json");
         assert_eq!(res.content["count"], DEFAULT_RECALL_LIMIT);
         assert_eq!(
             res.content["facts"].as_array().unwrap().len(),
             DEFAULT_RECALL_LIMIT
         );
+        assert_eq!(res.content["facts"][0]["id"], "fact-00");
+        assert!(res.content["facts"][0]["s"].is_null());
     }
 
     #[test]
