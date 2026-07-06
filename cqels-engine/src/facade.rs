@@ -276,6 +276,11 @@ impl CqelsEngine {
         self.runtime.registered_query_ids().await
     }
 
+    /// Returns the names of all currently registered input streams.
+    pub async fn registered_stream_names(&self) -> Vec<String> {
+        self.runtime.registered_stream_names().await
+    }
+
     /// Loads RDF statements into the default graph of the store.
     pub fn load_statements(&self, statements: &[Statement]) -> Result<(), CqelsError> {
         self.runtime.load_statements(statements)

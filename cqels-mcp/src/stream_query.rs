@@ -92,6 +92,22 @@ impl StreamQueryHub {
             .unwrap_or(0)
     }
 
+    /// Returns the IDs of all currently registered stream queries.
+    pub fn registered_query_ids(&self) -> Vec<String> {
+        let engine = self.inner.engine.clone();
+        self.inner
+            .handle
+            .block_on(async move { engine.registered_query_ids().await })
+    }
+
+    /// Returns the names of all currently registered input streams.
+    pub fn registered_stream_names(&self) -> Vec<String> {
+        let engine = self.inner.engine.clone();
+        self.inner
+            .handle
+            .block_on(async move { engine.registered_stream_names().await })
+    }
+
     /// Drains up to `max` buffered results for `query_id`. Returns the
     /// drained results in FIFO order.
     pub fn drain_results(&self, query_id: &str, max: usize) -> Vec<BindingSet> {

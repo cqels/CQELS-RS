@@ -1,16 +1,17 @@
 //! End-to-end JSON-RPC stdio integration test for the full
-//! `cqels-mcp` server tool and prompt surface.
+//! `cqels-mcp` server tool, prompt, and resource surface.
 //!
 //! Mirrors the registration order of `src/bin/cqels_mcp_server.rs` and
-//! drives the registries through `run_stdio_with_prompts` with a real
+//! drives the registries through `run_stdio_with_prompts_and_resources` with a real
 //! line-delimited request batch. Asserts each of the 12 default stdio
 //! tools (`parse_query`, `query`, `analyze_query`, `reasoning_profiles`,
 //! `shacl_capabilities`, `reason`, `validate`, `solve`, `store_memory`,
 //! `recall_memory`, `register_reasoning`, `forget_memory`) returns a
 //! non-error response with the expected shape, and verifies
-//! Java-compatible CQELS prompt templates are advertised and renderable.
+//! Java-compatible CQELS prompt templates and resources are advertised
+//! and renderable.
 //! Catches regressions in the transport / registration order that
-//! per-tool or per-prompt unit tests still pass.
+//! per-tool, per-prompt, or per-resource unit tests still pass.
 //!
 //! Runs as a binary integration test (in `cqels-mcp/tests/`), so it
 //! only depends on the crate's public API.
@@ -21,11 +22,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cqels_asp::{AnswerSet, AspError, AspSolver, Atom};
 use cqels_mcp::{
-    analyze_query_tool, cqels_prompt_registry, forget_memory_tool, parse_query_tool, query_tool,
-    reason_tool, reasoning_profiles_tool, recall_memory_tool_with_reasoning,
-    register_reasoning_tool, run_stdio_with_prompts, shacl_capabilities_tool,
-    solve_tool_with_solver, store_memory_tool, validate_tool_with_solver, InMemoryMemoryStore,
-    MemoryStore, ReasoningRegistration, ToolRegistry,
+    analyze_query_tool, cqels_prompt_registry, cqels_resource_registry, forget_memory_tool,
+    parse_query_tool, query_tool, reason_tool, reasoning_profiles_tool,
+    recall_memory_tool_with_reasoning, register_reasoning_tool,
+    run_stdio_with_prompts_and_resources, shacl_capabilities_tool, solve_tool_with_solver,
+    store_memory_tool, validate_tool_with_solver, InMemoryMemoryStore, MemoryStore,
+    ReasoningRegistration, ToolRegistry, RESOURCE_KG_STATS, RESOURCE_QUERY_RESULTS_TEMPLATE,
+    RESOURCE_REASONING,
 };
 use serde_json::{json, Value};
 
@@ -81,9 +84,6 @@ fn call_line(id: i64, name: &str, args: Value) -> String {
 
 #[test]
 fn stdio_dispatches_every_tool_in_one_session() {
-    // A sensor self-join query — exercises analyze_query's self-join
-    // detection path so we hit both `parse_query`/`query` and the
-    // compiler-side hint output.
     let self_join_query = r#"
         SELECT ?driver ?passenger
         FROM STREAM rides [RANGE 10s]
@@ -93,8 +93,6 @@ fn stdio_dispatches_every_tool_in_one_session() {
         }
     "#;
     let parse_args = json!({ "query": self_join_query });
-
-    // RDFS classic subClassOf chain.
     let reason_args = json!({
         "profile": "RDFS",
         "triples": [
@@ -110,19 +108,8 @@ fn stdio_dispatches_every_tool_in_one_session() {
             }
         ]
     });
-    let solve_args = json!({
-        "program": "demo.",
-        "max_models": 1,
-    });
-    let validate_args = json!({
-        "shapes": [],
-        "data": [],
-    });
-
-    // Memory tools: store → recall → forget. Use a stable id so
-    // assertions check the same record across operations. `recall_memory`
-    // filters by substring match on content (not by id), so we pass a
-    // unique phrase that only this fact contains.
+    let solve_args = json!({ "program": "demo.", "max_models": 1 });
+    let validate_args = json!({ "shapes": [], "data": [] });
     let store_args = json!({
         "id": "alice-likes-stream",
         "content": "Alice prefers IoT sensor streams",
@@ -132,11 +119,8 @@ fn stdio_dispatches_every_tool_in_one_session() {
     let forget_args = json!({ "id": "alice-likes-stream" });
 
     let mut lines = Vec::new();
-    // Handshake first.
     lines.push(json!({"jsonrpc":"2.0","id":0,"method":"initialize"}).to_string());
-    // tools/list to verify the surface.
     lines.push(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string());
-    // Per-tool dispatch.
     lines.push(call_line(2, "parse_query", parse_args.clone()));
     lines.push(call_line(3, "query", parse_args.clone()));
     lines.push(call_line(4, "analyze_query", parse_args));
@@ -149,7 +133,6 @@ fn stdio_dispatches_every_tool_in_one_session() {
     lines.push(call_line(11, "register_reasoning", register_reasoning_args));
     lines.push(call_line(12, "recall_memory", recall_args));
     lines.push(call_line(13, "forget_memory", forget_args));
-    // Prompt surface.
     lines.push(json!({"jsonrpc":"2.0","id":14,"method":"prompts/list"}).to_string());
     lines.push(
         json!({
@@ -163,13 +146,40 @@ fn stdio_dispatches_every_tool_in_one_session() {
         })
         .to_string(),
     );
+    lines.push(json!({"jsonrpc":"2.0","id":16,"method":"resources/list"}).to_string());
+    lines.push(json!({"jsonrpc":"2.0","id":17,"method":"resources/templates/list"}).to_string());
+    lines.push(
+        json!({
+            "jsonrpc": "2.0",
+            "id": 18,
+            "method": "resources/read",
+            "params": { "uri": RESOURCE_KG_STATS }
+        })
+        .to_string(),
+    );
+    lines.push(
+        json!({
+            "jsonrpc": "2.0",
+            "id": 19,
+            "method": "resources/read",
+            "params": { "uri": RESOURCE_REASONING }
+        })
+        .to_string(),
+    );
     let input = lines.join("\n") + "\n";
 
     let reg = make_full_registry();
     let prompts = cqels_prompt_registry();
+    let resources = cqels_resource_registry();
     let mut output: Vec<u8> = Vec::new();
-    run_stdio_with_prompts(&reg, &prompts, Cursor::new(input.as_bytes()), &mut output)
-        .expect("run_stdio");
+    run_stdio_with_prompts_and_resources(
+        &reg,
+        &prompts,
+        &resources,
+        Cursor::new(input.as_bytes()),
+        &mut output,
+    )
+    .expect("run_stdio");
 
     let text = String::from_utf8(output).expect("utf8");
     let responses: Vec<Value> = text
@@ -177,18 +187,13 @@ fn stdio_dispatches_every_tool_in_one_session() {
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).expect("parse response"))
         .collect();
+    assert_eq!(responses.len(), 20, "one response per request");
 
-    // 16 requests in, 16 responses out (every line had an `id`).
-    assert_eq!(responses.len(), 16, "one response per request");
-
-    // ─── initialize ──────────────────────────────────────────────
     assert_eq!(responses[0]["id"], 0);
-    assert!(
-        responses[0]["result"]["protocolVersion"].is_string(),
-        "initialize returns a protocolVersion"
-    );
+    assert!(responses[0]["result"]["protocolVersion"].is_string());
+    assert!(responses[0]["result"]["capabilities"]["prompts"].is_object());
+    assert!(responses[0]["result"]["capabilities"]["resources"].is_object());
 
-    // ─── tools/list ──────────────────────────────────────────────
     let tools = responses[1]["result"]["tools"]
         .as_array()
         .expect("tools array");
@@ -214,7 +219,6 @@ fn stdio_dispatches_every_tool_in_one_session() {
         );
     }
 
-    // Helper to assert a successful tools/call response.
     fn assert_tool_ok(resp: &Value, expected_id: i64) -> &Value {
         assert_eq!(resp["id"], expected_id);
         assert!(
@@ -229,36 +233,32 @@ fn stdio_dispatches_every_tool_in_one_session() {
         content
     }
 
-    // ─── parse_query ─────────────────────────────────────────────
     let parse = assert_tool_ok(&responses[2], 2);
     assert_eq!(parse["query_type"], "Select");
     assert_eq!(parse["streams"][0], "rides");
 
-    // ─── query (dry-run) ────────────────────────────────────────
     let query = assert_tool_ok(&responses[3], 3);
     assert_eq!(query["ok"], true);
     assert_eq!(query["dry_run"], true);
 
-    // ─── analyze_query — self-join hint must be detected ─────────
     let analyze = assert_tool_ok(&responses[4], 4);
-    assert_eq!(
-        analyze["has_self_join_optimization"], true,
-        "self-join query should trigger the planner hint"
-    );
+    assert_eq!(analyze["has_self_join_optimization"], true);
     let hints = analyze["self_join_hints"].as_array().expect("hint array");
     assert_eq!(hints.len(), 1);
     assert_eq!(hints[0]["source"], "rides");
 
-    // ─── reasoning_profiles — all 7 listed ───────────────────────
     let profiles = assert_tool_ok(&responses[5], 5);
-    let profile_list = profiles["profiles"].as_array().expect("profiles array");
-    assert_eq!(profile_list.len(), 7);
+    assert_eq!(
+        profiles["profiles"]
+            .as_array()
+            .expect("profiles array")
+            .len(),
+        7
+    );
 
-    // ─── shacl_capabilities ──────────────────────────────────────
     let shacl = assert_tool_ok(&responses[6], 6);
     assert!(shacl["supported_constraints"].as_array().unwrap().len() >= 5);
 
-    // ─── reason — classic RDFS subClassOf inference ──────────────
     let reasoned = assert_tool_ok(&responses[7], 7);
     assert_eq!(reasoned["profile"], "RDFS");
     let inferred = reasoned["inferred"].as_array().expect("inferred array");
@@ -270,18 +270,15 @@ fn stdio_dispatches_every_tool_in_one_session() {
         "expected :alice rdf:type :Animal in inferred set; got {inferred:?}"
     );
 
-    // ─── validate — SHACL bridge is installed in stdio ──────────────
     let validated = assert_tool_ok(&responses[8], 8);
     assert_eq!(validated["conforms"], true);
     assert_eq!(validated["violation_count"], 0);
 
-    // ─── solve — direct ASP bridge is installed in stdio ────────────
     let solved = assert_tool_ok(&responses[9], 9);
     assert_eq!(solved["model_count"], 1);
     let solve_atoms = solved["answer_sets"][0]["atoms"].as_array().unwrap();
     assert_eq!(solve_atoms[0]["predicate"], "demo");
 
-    // ─── store_memory + recall_memory + forget_memory ────────────
     let stored = assert_tool_ok(&responses[10], 10);
     assert_eq!(stored["ok"], true);
     assert_eq!(stored["id"], "alice-likes-stream");
@@ -293,19 +290,12 @@ fn stdio_dispatches_every_tool_in_one_session() {
     let recalled = assert_tool_ok(&responses[12], 12);
     assert_eq!(recalled["count"], 1, "exactly one fact matches the query");
     let facts = recalled["facts"].as_array().expect("facts array");
-    assert_eq!(
-        facts[0]["content"], "Alice prefers IoT sensor streams",
-        "recall_memory must return the content stored earlier in the same session"
-    );
+    assert_eq!(facts[0]["content"], "Alice prefers IoT sensor streams");
     assert_eq!(facts[0]["id"], "alice-likes-stream");
 
     let forgotten = assert_tool_ok(&responses[13], 13);
-    assert_eq!(
-        forgotten["removed"], true,
-        "forget_memory should report the fact was removed"
-    );
+    assert_eq!(forgotten["removed"], true);
 
-    // ─── prompts/list + prompts/get ──────────────────────────────
     let prompt_list = responses[14]["result"]["prompts"]
         .as_array()
         .expect("prompts array");
@@ -324,21 +314,45 @@ fn stdio_dispatches_every_tool_in_one_session() {
         "value_over_window",
         "spatial_recall",
     ] {
-        assert!(
-            prompt_names.contains(&expected),
-            "expected prompt '{expected}' to be advertised; got {prompt_names:?}"
-        );
+        assert!(prompt_names.contains(&expected));
     }
 
     assert_eq!(responses[15]["id"], 15);
     let message = &responses[15]["result"]["messages"][0];
     assert_eq!(message["role"], "user");
     assert_eq!(message["content"]["type"], "text");
-    assert!(
-        message["content"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("FROM STREAM SensorData [RANGE 30s]"),
-        "rendered prompt should include the CQELS-QL template"
-    );
+    assert!(message["content"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("FROM STREAM SensorData [RANGE 30s]"));
+
+    let resources_list = responses[16]["result"]["resources"]
+        .as_array()
+        .expect("resources array");
+    assert_eq!(resources_list.len(), 4, "4 static resources registered");
+    let resource_uris: Vec<&str> = resources_list
+        .iter()
+        .map(|resource| resource["uri"].as_str().unwrap())
+        .collect();
+    assert!(resource_uris.contains(&RESOURCE_KG_STATS));
+    assert!(resource_uris.contains(&RESOURCE_REASONING));
+
+    let templates = responses[17]["result"]["resourceTemplates"]
+        .as_array()
+        .expect("resourceTemplates array");
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0]["uriTemplate"], RESOURCE_QUERY_RESULTS_TEMPLATE);
+
+    let stats_content = &responses[18]["result"]["contents"][0];
+    assert_eq!(stats_content["uri"], RESOURCE_KG_STATS);
+    assert_eq!(stats_content["mimeType"], "application/json");
+    let stats_body: Value = serde_json::from_str(stats_content["text"].as_str().unwrap()).unwrap();
+    assert!(stats_body["tripleCount"].is_number());
+    assert_eq!(stats_body["registeredQueries"], 0);
+
+    let reasoning_content = &responses[19]["result"]["contents"][0];
+    assert_eq!(reasoning_content["uri"], RESOURCE_REASONING);
+    let reasoning_body: Value =
+        serde_json::from_str(reasoning_content["text"].as_str().unwrap()).unwrap();
+    assert!(reasoning_body["profiles"].as_array().unwrap().len() >= 5);
 }

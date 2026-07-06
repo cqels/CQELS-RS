@@ -1,4 +1,4 @@
-//! JSON-RPC 2.0 transport for the MCP tool/prompt surface.
+//! JSON-RPC 2.0 transport for the MCP tool/prompt/resource surface.
 //!
 //! Implements a minimal subset of the [Model Context Protocol](https://modelcontextprotocol.io/)
 //! over a line-delimited JSON-RPC 2.0 stream. The runtime reads one
@@ -14,6 +14,15 @@
 //! - `prompts/list` — returns prompt templates, when a prompt registry
 //!   is supplied.
 //! - `prompts/get` — renders a prompt template by name.
+//! - `resources/list` — returns CQELS metadata resources when a
+//!   [`crate::ResourceRegistry`] is supplied.
+//! - `resources/templates/list` — returns resource templates when a
+//!   [`crate::ResourceRegistry`] is supplied.
+//! - `resources/read` — reads a resource URI when a
+//!   [`crate::ResourceRegistry`] is supplied.
+//! - `resources/subscribe` / `resources/unsubscribe` — validate a resource
+//!   URI and acknowledge subscription intent for hosts that emit resource
+//!   update notifications.
 //! - `ping` — connection liveness check.
 //!
 //! Notifications (no `id` field) are accepted but produce no response.
@@ -26,6 +35,7 @@ use serde_json::{json, Value as JsonValue};
 
 use crate::prompt::{PromptInvocation, PromptRegistry};
 use crate::registry::ToolRegistry;
+use crate::resource::{ResourceError, ResourceRegistry};
 use crate::tool::ToolInvocation;
 
 /// MCP protocol version advertised by [`handle_request`].
@@ -80,7 +90,7 @@ struct JsonRpcError {
 /// Outcome of [`handle_request`]: either a serialized response or
 /// `None` when the input was a notification.
 pub fn handle_request(registry: &ToolRegistry, request: &str) -> Option<String> {
-    handle_request_inner(registry, None, request)
+    handle_request_inner(registry, None, None, request)
 }
 
 /// Prompt-aware variant of [`handle_request`].
@@ -89,12 +99,33 @@ pub fn handle_request_with_prompts(
     prompts: &PromptRegistry,
     request: &str,
 ) -> Option<String> {
-    handle_request_inner(registry, Some(prompts), request)
+    handle_request_inner(registry, Some(prompts), None, request)
+}
+
+/// Like [`handle_request`], but also advertises and dispatches MCP resources.
+pub fn handle_request_with_resources(
+    registry: &ToolRegistry,
+    resources: &ResourceRegistry,
+    request: &str,
+) -> Option<String> {
+    handle_request_inner(registry, None, Some(resources), request)
+}
+
+/// Like [`handle_request`], but also advertises and dispatches prompts
+/// and MCP resources.
+pub fn handle_request_with_prompts_and_resources(
+    registry: &ToolRegistry,
+    prompts: &PromptRegistry,
+    resources: &ResourceRegistry,
+    request: &str,
+) -> Option<String> {
+    handle_request_inner(registry, Some(prompts), Some(resources), request)
 }
 
 fn handle_request_inner(
     registry: &ToolRegistry,
     prompts: Option<&PromptRegistry>,
+    resources: Option<&ResourceRegistry>,
     request: &str,
 ) -> Option<String> {
     let parsed: Result<JsonRpcRequest, _> = serde_json::from_str(request);
@@ -121,7 +152,7 @@ fn handle_request_inner(
     }
 
     let id = request.id.clone();
-    let result = dispatch(registry, prompts, &request);
+    let result = dispatch(registry, prompts, resources, &request);
 
     match (id, result) {
         (None, _) => None, // Notification — no response.
@@ -133,6 +164,7 @@ fn handle_request_inner(
 fn dispatch(
     registry: &ToolRegistry,
     prompts: Option<&PromptRegistry>,
+    resources: Option<&ResourceRegistry>,
     request: &JsonRpcRequest,
 ) -> Result<JsonValue, (i32, String, Option<JsonValue>)> {
     match request.method.as_str() {
@@ -141,6 +173,15 @@ fn dispatch(
             capabilities.insert("tools".into(), json!({}));
             if prompts.is_some() {
                 capabilities.insert("prompts".into(), json!({}));
+            }
+            if resources.is_some() {
+                capabilities.insert(
+                    "resources".into(),
+                    json!({
+                        "subscribe": true,
+                        "listChanged": false,
+                    }),
+                );
             }
             Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
@@ -238,6 +279,94 @@ fn dispatch(
                 Err(e) => Err((error_code::INVALID_PARAMS, e.to_string(), None)),
             }
         }
+        "resources/list" => {
+            let resources = resources.ok_or_else(|| {
+                (
+                    error_code::METHOD_NOT_FOUND,
+                    "resources are not configured".to_string(),
+                    None,
+                )
+            })?;
+            Ok(json!({ "resources": resources.list() }))
+        }
+        "resources/templates/list" => {
+            let resources = resources.ok_or_else(|| {
+                (
+                    error_code::METHOD_NOT_FOUND,
+                    "resources are not configured".to_string(),
+                    None,
+                )
+            })?;
+            Ok(json!({ "resourceTemplates": resources.list_templates() }))
+        }
+        "resources/read" => {
+            let resources = resources.ok_or_else(|| {
+                (
+                    error_code::METHOD_NOT_FOUND,
+                    "resources are not configured".to_string(),
+                    None,
+                )
+            })?;
+            let uri = request
+                .params
+                .get("uri")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    (
+                        error_code::INVALID_PARAMS,
+                        "resources/read requires a `uri` string parameter".into(),
+                        None,
+                    )
+                })?;
+            match resources.read(uri) {
+                Ok(result) => serde_json::to_value(result).map_err(|e| {
+                    (
+                        error_code::INTERNAL_ERROR,
+                        format!("resource serialization failed: {e}"),
+                        None,
+                    )
+                }),
+                Err(ResourceError::UnknownResource(uri)) => Err((
+                    error_code::INVALID_PARAMS,
+                    format!("unknown resource '{uri}'"),
+                    Some(json!({ "uri": uri })),
+                )),
+                Err(ResourceError::Serialize(message)) => Err((
+                    error_code::INTERNAL_ERROR,
+                    format!("resource serialization failed: {message}"),
+                    None,
+                )),
+            }
+        }
+        "resources/subscribe" | "resources/unsubscribe" => {
+            let resources = resources.ok_or_else(|| {
+                (
+                    error_code::METHOD_NOT_FOUND,
+                    "resources are not configured".to_string(),
+                    None,
+                )
+            })?;
+            let uri = request
+                .params
+                .get("uri")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    (
+                        error_code::INVALID_PARAMS,
+                        "resource subscription requires a `uri` string parameter".into(),
+                        None,
+                    )
+                })?;
+            if resources.contains(uri) {
+                Ok(json!({}))
+            } else {
+                Err((
+                    error_code::INVALID_PARAMS,
+                    format!("unknown resource '{uri}'"),
+                    Some(json!({ "uri": uri })),
+                ))
+            }
+        }
         other => Err((
             error_code::METHOD_NOT_FOUND,
             format!("unknown method '{other}'"),
@@ -279,7 +408,7 @@ pub fn run_stdio<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
 ) -> std::io::Result<()> {
-    run_stdio_inner(registry, None, reader, &mut writer)
+    run_stdio_inner(registry, None, None, reader, &mut writer)
 }
 
 /// Runs an MCP server loop with both tool and prompt registries.
@@ -289,12 +418,40 @@ pub fn run_stdio_with_prompts<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
 ) -> std::io::Result<()> {
-    run_stdio_inner(registry, Some(prompts), reader, &mut writer)
+    run_stdio_inner(registry, Some(prompts), None, reader, &mut writer)
+}
+
+/// Runs an MCP stdio loop with both tools and resources configured.
+pub fn run_stdio_with_resources<R: BufRead, W: Write>(
+    registry: &ToolRegistry,
+    resources: &ResourceRegistry,
+    reader: R,
+    mut writer: W,
+) -> std::io::Result<()> {
+    run_stdio_inner(registry, None, Some(resources), reader, &mut writer)
+}
+
+/// Runs an MCP stdio loop with tools, prompts, and resources configured.
+pub fn run_stdio_with_prompts_and_resources<R: BufRead, W: Write>(
+    registry: &ToolRegistry,
+    prompts: &PromptRegistry,
+    resources: &ResourceRegistry,
+    reader: R,
+    mut writer: W,
+) -> std::io::Result<()> {
+    run_stdio_inner(
+        registry,
+        Some(prompts),
+        Some(resources),
+        reader,
+        &mut writer,
+    )
 }
 
 fn run_stdio_inner<R: BufRead, W: Write>(
     registry: &ToolRegistry,
     prompts: Option<&PromptRegistry>,
+    resources: Option<&ResourceRegistry>,
     reader: R,
     writer: &mut W,
 ) -> std::io::Result<()> {
@@ -304,7 +461,7 @@ fn run_stdio_inner<R: BufRead, W: Write>(
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(response) = handle_request_inner(registry, prompts, trimmed) {
+        if let Some(response) = handle_request_inner(registry, prompts, resources, trimmed) {
             writeln!(writer, "{response}")?;
             writer.flush()?;
         }
@@ -316,8 +473,10 @@ fn run_stdio_inner<R: BufRead, W: Write>(
 mod tests {
     use super::*;
     use crate::{
-        analyze_query_tool, cqels_prompt_registry, parse_query_tool, query_tool, reason_tool,
-        reasoning_profiles_tool, shacl_capabilities_tool,
+        analyze_query_tool, cqels_prompt_registry, cqels_resource_registry, parse_query_tool,
+        query_results_uri, query_tool, reason_tool, reasoning_profiles_tool,
+        shacl_capabilities_tool, RESOURCE_KG_STATS, RESOURCE_QUERY_RESULTS_TEMPLATE,
+        RESOURCE_REASONING,
     };
 
     fn make_registry() -> ToolRegistry {
@@ -356,6 +515,23 @@ mod tests {
         let value = parse_response(&resp);
         assert!(value["result"]["capabilities"]["tools"].is_object());
         assert!(value["result"]["capabilities"]["prompts"].is_object());
+    }
+
+    #[test]
+    fn initialize_advertises_prompts_and_resources_when_both_registries_are_supplied() {
+        let reg = make_registry();
+        let prompts = cqels_prompt_registry();
+        let resources = cqels_resource_registry();
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        let resp = handle_request_with_prompts_and_resources(&reg, &prompts, &resources, req)
+            .expect("response");
+        let value = parse_response(&resp);
+        assert!(value["result"]["capabilities"]["tools"].is_object());
+        assert!(value["result"]["capabilities"]["prompts"].is_object());
+        assert_eq!(
+            value["result"]["capabilities"]["resources"],
+            json!({"subscribe": true, "listChanged": false})
+        );
     }
 
     #[test]
@@ -560,6 +736,123 @@ mod tests {
     }
 
     #[test]
+    fn initialize_with_resources_advertises_resource_capability() {
+        let reg = make_registry();
+        let resources = cqels_resource_registry();
+        let req = r#"{"jsonrpc":"2.0","id":8,"method":"initialize"}"#;
+        let resp = handle_request_with_resources(&reg, &resources, req).expect("response");
+        let value = parse_response(&resp);
+        assert_eq!(value["result"]["capabilities"]["tools"], json!({}));
+        assert_eq!(
+            value["result"]["capabilities"]["resources"],
+            json!({"subscribe": true, "listChanged": false})
+        );
+    }
+
+    #[test]
+    fn resources_list_and_templates_list_expose_alpha8_surface() {
+        let reg = make_registry();
+        let resources = cqels_resource_registry();
+
+        let list = handle_request_with_resources(
+            &reg,
+            &resources,
+            r#"{"jsonrpc":"2.0","id":9,"method":"resources/list"}"#,
+        )
+        .expect("response");
+        let value = parse_response(&list);
+        let resources_out = value["result"]["resources"].as_array().unwrap();
+        assert_eq!(resources_out.len(), 4);
+        assert!(resources_out
+            .iter()
+            .any(|resource| resource["uri"] == RESOURCE_KG_STATS));
+        assert!(resources_out
+            .iter()
+            .any(|resource| resource["uri"] == RESOURCE_REASONING));
+
+        let templates = handle_request_with_resources(
+            &reg,
+            &resources,
+            r#"{"jsonrpc":"2.0","id":10,"method":"resources/templates/list"}"#,
+        )
+        .expect("response");
+        let value = parse_response(&templates);
+        assert_eq!(
+            value["result"]["resourceTemplates"][0]["uriTemplate"],
+            RESOURCE_QUERY_RESULTS_TEMPLATE
+        );
+    }
+
+    #[test]
+    fn resources_read_returns_text_content_for_static_resource() {
+        let reg = make_registry();
+        let resources = cqels_resource_registry();
+        let req = r#"{
+            "jsonrpc":"2.0","id":11,"method":"resources/read",
+            "params":{"uri":"cqels://reasoning/capabilities"}
+        }"#;
+
+        let resp = handle_request_with_resources(&reg, &resources, req).expect("response");
+        let value = parse_response(&resp);
+        let content = &value["result"]["contents"][0];
+        assert_eq!(content["uri"], RESOURCE_REASONING);
+        assert_eq!(content["mimeType"], "application/json");
+        let body: JsonValue = serde_json::from_str(content["text"].as_str().unwrap()).unwrap();
+        assert!(body["profiles"].as_array().unwrap().len() >= 5);
+    }
+
+    #[test]
+    fn resources_read_drains_query_results_template_uri() {
+        let reg = make_registry();
+        let resources = cqels_resource_registry();
+        let uri = query_results_uri("q-read");
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "resources/read",
+            "params": { "uri": uri },
+        })
+        .to_string();
+
+        let resp = handle_request_with_resources(&reg, &resources, &req).expect("response");
+        let value = parse_response(&resp);
+        let body: JsonValue =
+            serde_json::from_str(value["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["queryId"], "q-read");
+        assert!(body["results"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resources_subscribe_acknowledges_known_uri_and_rejects_unknown() {
+        let reg = make_registry();
+        let resources = cqels_resource_registry();
+
+        let known = handle_request_with_resources(
+            &reg,
+            &resources,
+            r#"{
+                "jsonrpc":"2.0","id":13,"method":"resources/subscribe",
+                "params":{"uri":"cqels://kg/stats"}
+            }"#,
+        )
+        .expect("response");
+        let value = parse_response(&known);
+        assert_eq!(value["result"], json!({}));
+
+        let unknown = handle_request_with_resources(
+            &reg,
+            &resources,
+            r#"{
+                "jsonrpc":"2.0","id":14,"method":"resources/subscribe",
+                "params":{"uri":"cqels://missing"}
+            }"#,
+        )
+        .expect("response");
+        let value = parse_response(&unknown);
+        assert_eq!(value["error"]["code"], error_code::INVALID_PARAMS);
+    }
+
+    #[test]
     fn stdio_loop_processes_multiple_requests_and_skips_blanks() {
         let reg = make_registry();
         let input = b"\
@@ -583,5 +876,27 @@ mod tests {
         assert_eq!(r2["id"], 2);
         assert_eq!(r3["id"], 3);
         assert!(r3["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn stdio_loop_with_resources_processes_resource_reads() {
+        let reg = make_registry();
+        let resources = cqels_resource_registry();
+        let input = b"\
+{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n\
+{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"resources/list\"}\n\
+{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"resources/read\",\"params\":{\"uri\":\"cqels://kg/stats\"}}\n\
+";
+        let mut output: Vec<u8> = Vec::new();
+        run_stdio_with_resources(&reg, &resources, &input[..], &mut output).expect("run stdio");
+        let text = String::from_utf8(output).expect("utf8");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let init: JsonValue = serde_json::from_str(lines[0]).unwrap();
+        let list: JsonValue = serde_json::from_str(lines[1]).unwrap();
+        let read: JsonValue = serde_json::from_str(lines[2]).unwrap();
+        assert!(init["result"]["capabilities"]["resources"].is_object());
+        assert_eq!(list["result"]["resources"].as_array().unwrap().len(), 4);
+        assert_eq!(read["result"]["contents"][0]["uri"], RESOURCE_KG_STATS);
     }
 }

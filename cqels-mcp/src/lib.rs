@@ -1,8 +1,9 @@
 //! Model Context Protocol (MCP) tool surface for CQELS.
 //!
 //! Mirrors Java's `cqels-mcp` module. Exposes the engine as a set of
-//! MCP **tools** and **prompts** that an LLM agent can invoke to query,
-//! register, reason over, validate, and manage RDF data with CQELS.
+//! MCP **tools**, **prompts**, and **resources** that an LLM agent can
+//! invoke to query, register, reason over, validate, manage, and inspect
+//! RDF data with CQELS.
 //!
 //! ## Scope
 //!
@@ -36,6 +37,7 @@
 pub mod memory;
 pub mod prompt;
 pub mod registry;
+pub mod resource;
 pub mod solve;
 pub mod stream_query;
 pub mod tool;
@@ -49,6 +51,13 @@ pub use prompt::{
     PromptDescriptor, PromptError, PromptInvocation, PromptMessage, PromptRegistry, PromptResult,
 };
 pub use registry::{McpError, ToolRegistry};
+pub use resource::{
+    cqels_resource_registry, cqels_resource_registry_with_streams, query_id_from_results_uri,
+    query_results_updated_notification, query_results_uri, resource_updated_notification,
+    ReadResourceResult, ResourceContent, ResourceDescriptor, ResourceError, ResourceRegistry,
+    ResourceTemplateDescriptor, DEFAULT_STREAM, RESOURCE_KG_STATS, RESOURCE_QUERIES,
+    RESOURCE_QUERY_RESULTS_TEMPLATE, RESOURCE_REASONING, RESOURCE_STREAMS,
+};
 pub use solve::{solve_tool, solve_tool_with_solver, SolveTool};
 pub use stream_query::{
     forget_stream_query_tool, list_stream_queries_tool, poll_stream_results_tool,
@@ -63,7 +72,8 @@ pub use tools::{
     register_reasoning_tool, shacl_capabilities_tool, store_memory_tool, ReasoningRegistration,
 };
 pub use transport::{
-    handle_request, handle_request_with_prompts, run_stdio, run_stdio_with_prompts,
-    PROTOCOL_VERSION, SERVER_NAME,
+    handle_request, handle_request_with_prompts, handle_request_with_prompts_and_resources,
+    handle_request_with_resources, run_stdio, run_stdio_with_prompts,
+    run_stdio_with_prompts_and_resources, run_stdio_with_resources, PROTOCOL_VERSION, SERVER_NAME,
 };
 pub use validate::{validate_tool, validate_tool_with_solver, ValidateTool};

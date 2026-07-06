@@ -331,6 +331,11 @@ impl CqelsRuntime {
         self.engine.registered_query_ids().await
     }
 
+    /// Returns the names of all currently registered input streams.
+    pub async fn registered_stream_names(&self) -> Vec<String> {
+        self.engine.registered_stream_names().await
+    }
+
     /// Loads RDF statements into the default graph of the store.
     pub fn load_statements(&self, statements: &[Statement]) -> Result<(), CqelsError> {
         self.store.load_statements(statements)
@@ -959,6 +964,39 @@ mod tests {
         assert!(runtime.registered_query_ids().await.contains(&qid));
         runtime.unregister_query(&qid).await.unwrap();
         assert!(!runtime.registered_query_ids().await.contains(&qid));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_registered_stream_names() {
+        use cqels_core::stream::{RdfStreamElement, StreamElement};
+        use cqels_model::term::{IriTerm, LiteralTerm, Term};
+
+        let runtime = CqelsRuntime::new();
+        let make_stream = |val: &str| {
+            let elem = StreamElement::Rdf(RdfStreamElement::new(
+                Statement::new(
+                    Term::Iri(IriTerm::new("http://ex.org/s")),
+                    IriTerm::new("http://ex.org/p"),
+                    Term::Literal(LiteralTerm::new(val)),
+                ),
+                1000,
+            ));
+            Box::pin(futures::stream::iter(vec![elem]))
+                as Pin<Box<dyn Stream<Item = StreamElement> + Send>>
+        };
+
+        runtime
+            .register_stream("a", make_stream("1"))
+            .await
+            .unwrap();
+        runtime
+            .register_stream("b", make_stream("2"))
+            .await
+            .unwrap();
+
+        let mut names = runtime.registered_stream_names().await;
+        names.sort();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[tokio::test]

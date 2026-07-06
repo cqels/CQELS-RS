@@ -370,6 +370,12 @@ impl ReactiveStreamEngine {
         queries.keys().cloned().collect()
     }
 
+    /// Returns the names of all currently registered input streams.
+    pub async fn registered_stream_names(&self) -> Vec<String> {
+        let streams = self.streams.lock().await;
+        streams.keys().cloned().collect()
+    }
+
     /// Injects an event directly into a registered stream's broadcast channel.
     ///
     /// Used for replaying recovered events during startup. Returns an error
@@ -1276,6 +1282,20 @@ mod tests {
         assert!(received.unwrap().is_some());
 
         engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_registered_stream_names_tracks_registered_streams() {
+        let engine = ReactiveStreamEngine::new();
+        let (_tx1, stream1) = create_stream_pair(32);
+        let (_tx2, stream2) = create_stream_pair(32);
+
+        engine.register_stream("alpha", stream1).await.unwrap();
+        engine.register_stream("beta", stream2).await.unwrap();
+
+        let mut names = engine.registered_stream_names().await;
+        names.sort();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
     }
 
     #[tokio::test]

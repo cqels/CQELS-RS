@@ -16,16 +16,23 @@
 //!   an [`InMemoryMemoryStore`].
 //! - Prompt templates: Java-compatible CQELS workflow/query prompts
 //!   exposed through `prompts/list` and `prompts/get`.
+//! - Resources:
+//! - `cqels://kg/stats`
+//! - `cqels://streams`
+//! - `cqels://queries`
+//! - `cqels://reasoning/capabilities`
+//! - `cqels://queries/{queryId}/results` template
 
 use std::io::{self, BufReader};
 use std::sync::Arc;
 
 use cqels_mcp::{
-    analyze_query_tool, cqels_prompt_registry, forget_memory_tool, parse_query_tool, query_tool,
-    reason_tool, reasoning_profiles_tool, recall_memory_tool_with_reasoning,
-    register_reasoning_tool, run_stdio_with_prompts, shacl_capabilities_tool, solve_tool,
-    store_memory_tool, validate_tool, InMemoryMemoryStore, MemoryStore, ReasoningRegistration,
-    SledMemoryStore, ToolRegistry,
+    analyze_query_tool, cqels_prompt_registry, cqels_resource_registry, forget_memory_tool,
+    parse_query_tool, query_tool, reason_tool, reasoning_profiles_tool,
+    recall_memory_tool_with_reasoning, register_reasoning_tool,
+    run_stdio_with_prompts_and_resources, shacl_capabilities_tool, solve_tool, store_memory_tool,
+    validate_tool, InMemoryMemoryStore, MemoryStore, ReasoningRegistration, SledMemoryStore,
+    ToolRegistry,
 };
 
 fn main() -> io::Result<()> {
@@ -58,11 +65,12 @@ fn main() -> io::Result<()> {
     registry.install(recall_memory_tool_with_reasoning(memory.clone(), reasoning));
     registry.install(forget_memory_tool(memory));
     let prompts = cqels_prompt_registry();
+    let resources = cqels_resource_registry();
 
     let stdin = io::stdin();
     let stdout = io::stdout();
     let reader = BufReader::new(stdin.lock());
     let writer = stdout.lock();
 
-    run_stdio_with_prompts(&registry, &prompts, reader, writer)
+    run_stdio_with_prompts_and_resources(&registry, &prompts, &resources, reader, writer)
 }
