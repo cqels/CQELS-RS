@@ -8,9 +8,9 @@
 //! ## Scope
 //!
 //! This crate ships protocol-agnostic layers for tools and prompt
-//! templates: traits, registries, JSON-Schema-shaped input contracts,
-//! and reference implementations. The line-delimited JSON-RPC stdio
-//! transport connects MCP clients to those registries.
+//! templates and resources: traits, registries, JSON-Schema-shaped input
+//! contracts, and reference implementations. The bundled transports are
+//! line-delimited JSON-RPC over stdio and an opt-in HTTP JSON-RPC endpoint.
 //!
 //! Mapping to Java's tool set:
 //!
@@ -34,6 +34,7 @@
 //! | `validate`         | ✅ implemented (SHACL bridge; see [`validate`]) |
 //! | `solve`            | ✅ implemented (ASP bridge; see [`solve`]) |
 
+pub mod http_transport;
 pub mod memory;
 pub mod prompt;
 pub mod registry;
@@ -45,6 +46,10 @@ pub mod tools;
 pub mod transport;
 pub mod validate;
 
+pub use http_transport::{
+    run_http, run_http_with_prompts_and_resources, server_transport_from_env, HttpConfigError,
+    HttpTransportConfig, ServerTransport,
+};
 pub use memory::{InMemoryMemoryStore, MemoryError, MemoryFact, MemoryStore, SledMemoryStore};
 pub use prompt::{
     cqels_prompt_registry, install_cqels_prompts, McpPrompt, PromptArgument, PromptContent,

@@ -1,8 +1,12 @@
-//! Entry-point binary for the `cqels-mcp` stdio server.
+//! Entry-point binary for the `cqels-mcp` server.
 //!
 //! Run with `cargo run -p cqels-mcp --bin cqels_mcp_server` and pipe
 //! line-delimited JSON-RPC requests on stdin. Responses are written to
 //! stdout, one per line.
+//!
+//! Set `CQELS_MCP_TRANSPORT=http` to expose the same JSON-RPC surface at
+//! an opt-in HTTP endpoint (default `127.0.0.1:3000/mcp`) with optional
+//! bearer auth and health-check support.
 //!
 //! Registered surface:
 //!
@@ -23,6 +27,7 @@
 //! - `cqels://reasoning/capabilities`
 //! - `cqels://queries/{queryId}/results` template
 
+use std::error::Error;
 use std::io::{self, BufReader};
 use std::sync::Arc;
 
@@ -30,12 +35,13 @@ use cqels_mcp::{
     analyze_query_tool, cqels_prompt_registry, cqels_resource_registry, forget_memory_tool,
     parse_query_tool, query_tool, reason_tool, reasoning_profiles_tool,
     recall_memory_tool_with_reasoning, register_reasoning_tool,
-    run_stdio_with_prompts_and_resources, shacl_capabilities_tool, solve_tool, store_memory_tool,
-    validate_tool, InMemoryMemoryStore, MemoryStore, ReasoningRegistration, SledMemoryStore,
-    ToolRegistry,
+    run_http_with_prompts_and_resources, run_stdio_with_prompts_and_resources,
+    server_transport_from_env, shacl_capabilities_tool, solve_tool, store_memory_tool,
+    validate_tool, InMemoryMemoryStore, MemoryStore, ReasoningRegistration, ServerTransport,
+    SledMemoryStore, ToolRegistry,
 };
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), Box<dyn Error>> {
     let memory: Arc<dyn MemoryStore> = match std::env::var("CQELS_MCP_MEMORY_DIR") {
         Ok(path) if !path.is_empty() => match SledMemoryStore::open(&path) {
             Ok(store) => Arc::new(store),
@@ -67,10 +73,27 @@ fn main() -> io::Result<()> {
     let prompts = cqels_prompt_registry();
     let resources = cqels_resource_registry();
 
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let reader = BufReader::new(stdin.lock());
-    let writer = stdout.lock();
+    match server_transport_from_env()? {
+        ServerTransport::Stdio => {
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let reader = BufReader::new(stdin.lock());
+            let writer = stdout.lock();
+            run_stdio_with_prompts_and_resources(&registry, &prompts, &resources, reader, writer)?;
+        }
+        ServerTransport::Http(config) => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(run_http_with_prompts_and_resources(
+                Arc::new(registry),
+                Arc::new(prompts),
+                Arc::new(resources),
+                config,
+            ))?;
+        }
+        _ => return Err("unsupported cqels-mcp server transport".into()),
+    }
 
-    run_stdio_with_prompts_and_resources(&registry, &prompts, &resources, reader, writer)
+    Ok(())
 }
