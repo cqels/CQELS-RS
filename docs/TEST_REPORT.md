@@ -1,7 +1,7 @@
 # CQELS-RS Test Report — Java Parity Verification
 
 **Repository:** `HiveIntel/cqels-rs`
-**Captured at:** commit `fcdef33` on `main` (2026-05-15)
+**Captured at:** alpha.8 MCP parity stack (2026-07-07)
 **Toolchain:** Rust 1.83+ (MSRV), Cargo 1.95.0
 
 This document is a point-in-time snapshot proving the Rust port is at
@@ -14,11 +14,11 @@ day-to-day test workflow, see [`testing.md`](./testing.md).
 
 | Metric | Value |
 |---|---|
-| **Total tests** | **1,653 passing** (default features) + 43 optional-feature tests + 4 doctests = **~1,700** |
+| **Total tests** | **1,811 passing** (default features) + 43 optional-feature tests = **~1,850** |
 | **Failures** | **0** |
-| **Ignored** | 3 (live-server integration tests gated by env vars) |
-| **Test groups** | 49 across 15 workspace crates |
-| **Variance across 3 consecutive full runs** | **0** |
+| **Ignored** | 4 (live-server or opt-in doc tests gated by env vars / explicit examples) |
+| **Test groups** | 51 across 15 workspace crates |
+| **Latest full-workspace run** | **0 failures** |
 | **Local CI gates** | fmt ✅ · clippy ✅ (workspace + features) · test ✅ · doc ✅ |
 | **Parity-plan `[!]` deferrals remaining** | **0** |
 
@@ -32,7 +32,7 @@ day-to-day test workflow, see [`testing.md`](./testing.md).
 | Clippy (workspace) | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
 | Clippy (kuksa feature) | `cargo clippy -p cqels-cdsp --features kuksa --all-targets -- -D warnings` | ✅ clean |
 | Clippy (thrift feature) | `cargo clippy -p cqels-storage-iotdb --features thrift --all-targets -- -D warnings` | ✅ clean |
-| Tests | `cargo test --workspace` (× 3) | ✅ 1653 / 1653 each |
+| Tests | `cargo test --workspace` | ✅ 1811 passed, 4 ignored |
 | Tests (kuksa feature) | `cargo test -p cqels-cdsp --features kuksa` | ✅ 27 passed, 1 ignored (`KUKSA_HOST`) |
 | Tests (thrift feature) | `cargo test -p cqels-storage-iotdb --features thrift` | ✅ 16 passed, 2 ignored (`IOTDB_HOST`) |
 | Docs | `RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps` | ✅ clean |
@@ -43,12 +43,12 @@ day-to-day test workflow, see [`testing.md`](./testing.md).
 
 | Crate | Tests | Role | Java module(s) ported |
 |---|---:|---|---|
-| `cqels-core` | **683** | Stream operators, parser, compiler, query pipeline | `cqels-core` |
+| `cqels-core` | **743** | Stream operators, parser, compiler, query pipeline | `cqels-core` |
 | `cqels-reasoning` | **160** | RETE network, RDFS / OWL profiles, rule sets | `cqels-reasoning` |
-| `cqels-engine` | **134** | `ReactiveStreamEngine`, CEP runtime, persistence wiring | `cqels-engine` |
+| `cqels-engine` | **135** | `ReactiveStreamEngine`, CEP runtime, persistence wiring | `cqels-engine` |
 | `cqels-model` | **107** | RDF model, BindingSet, statements, terms | `cqels-model` |
 | `cqels-geo` | **67** | GeoSPARQL spatial reasoning | `cqels-geo` |
-| `cqels-mcp` | **67** | MCP tool surface + JSON-RPC stdio transport | `cqels-mcp` |
+| `cqels-mcp` | **147** | MCP tool/prompt surface + JSON-RPC stdio transport | `cqels-mcp` |
 | `cqels-shacl` | **60** | SHACL validation engine, repair candidates | `cqels-shacl` |
 | `cqels-asp` | **50** | ASP solver trait, Clingo subprocess solver | `cqels-asp` |
 | `cqels-cdsp` | **15** | COVESA VSS signal envelope + mapper + source | `cqels-cdsp` |
@@ -57,10 +57,10 @@ day-to-day test workflow, see [`testing.md`](./testing.md).
 | `cqels-storage-sled` | **8** | Sled embedded KV backend (pure-Rust alt.) | (Rust-only fill-in) |
 | `cqels-storage-lmdb` | **8** | LMDB embedded backend via `heed` | (Rust-only fill-in) |
 | `cqels-storage-rocksdb` | **8** | RocksDB backend (real C++ library) | `cqels-storage-rocksdb` |
-| `cqels-storage-spi` | **0** | Trait-only crate (impls live in backend crates) | `cqels-storage-spi` |
-| **TOTAL (lib unit)** | **1,391** | | |
-| Integration + doc tests across the workspace | **262** | | |
-| **GRAND TOTAL** | **1,653** | | |
+| `cqels-storage-spi` | **14** | Trait-only crate (impls live in backend crates) | `cqels-storage-spi` |
+| **TOTAL (lib unit)** | **1,546** | | |
+| Integration + doc tests across the workspace | **265** | | |
+| **GRAND TOTAL** | **1,811** | | |
 
 ---
 
@@ -102,7 +102,7 @@ the tests that prove the port.
 | RocksDB backend (lifts `links = "rocksdb"` oxigraph clash) | `cqels-storage-rocksdb` | 8 tests, same shape |
 | IoTDB time-series adapter | `cqels-storage-iotdb` — narrow `IotDbExecutor` trait + in-memory ref impl | 14 tests (executor-level + backend-level) |
 | IoTDB **real Thrift client** | `cqels-storage-iotdb::ThriftIotDbExecutor` (feature `thrift`) | 2 unit tests + 1 `IOTDB_HOST`-gated live round-trip |
-| MCP tool surface (Java's `cqels-mcp`) | `cqels-mcp` (`query`, `parse_query`, `analyze_query`, `reasoning_profiles`, `shacl_capabilities`, `reason`, `store/recall/forget_memory`) | 43 stateless tool tests + 8 engine-bound stream-query tool tests + 8 SHACL `validate` tests + 8 ASP `solve` tests = **67** |
+| MCP tool + prompt surface (Java's `cqels-mcp`) | `cqels-mcp` (`query`, `parse_query`, `analyze_query`, `reasoning_profiles`, `shacl_capabilities`, `reason`, `store/recall/forget_memory`, `register_reasoning`, `validate`, `solve`, 8 CQELS prompt templates) | 99 stateless/memory/reasoning tool tests + 19 prompt/transport tests + 13 engine-bound stream-query tool tests + 8 SHACL `validate` tests + 8 ASP `solve` tests = **147** |
 | MCP `register_stream_query` engine wiring | `cqels-mcp::stream_query::StreamQueryHub` | `stream_query::tests::*` (8 tests; race-fixed in `fcdef33`) |
 | MCP `validate` (SHACL bridge) | `cqels-mcp::validate` (any `Arc<dyn AspSolver>`) | 8 tests with recording `MockSolver` |
 | MCP `solve` (ASP bridge) | `cqels-mcp::solve` | 8 tests |
@@ -153,7 +153,7 @@ These appear in the Java codebase but are deliberately not ported, per
 
 | Build invocation | Build OK | Tests passing |
 |---|:---:|:---:|
-| `cargo build --workspace` | ✅ | 1,653 / 1,653 |
+| `cargo build --workspace` | ✅ | 1,811 passed, 4 ignored |
 | `cargo build -p cqels-cdsp --features kuksa` | ✅ | 27 / 27 |
 | `cargo build -p cqels-storage-iotdb --features thrift` | ✅ | 16 / 16 |
 
@@ -166,16 +166,14 @@ A previously-flaky test
 was stabilized in commit `fcdef33` by pre-registering the stream the
 query subscribes to, eliminating a race between the engine's
 auto-cleanup-on-empty-stream path and the explicit `unregister` call.
-Five consecutive isolated runs and three consecutive full-workspace
-runs after the fix produced:
+Five consecutive isolated runs after the fix and the latest full-workspace
+run on the alpha.8 MCP parity stack produced:
 
 ```
-Run 1: passed=1653 failed=0 ignored=3
-Run 2: passed=1653 failed=0 ignored=3
-Run 3: passed=1653 failed=0 ignored=3
+Latest full workspace: passed=1811 failed=0 ignored=4
 ```
 
-Zero variance.
+No failures were observed in the latest full-workspace run.
 
 ---
 

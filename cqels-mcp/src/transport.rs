@@ -1,4 +1,4 @@
-//! JSON-RPC 2.0 transport for the MCP tool surface.
+//! JSON-RPC 2.0 transport for the MCP tool/prompt surface.
 //!
 //! Implements a minimal subset of the [Model Context Protocol](https://modelcontextprotocol.io/)
 //! over a line-delimited JSON-RPC 2.0 stream. The runtime reads one
@@ -11,6 +11,9 @@
 //!   advertised capabilities.
 //! - `tools/list` — returns the registry's tools with their schemas.
 //! - `tools/call` — dispatches a tool invocation by name.
+//! - `prompts/list` — returns prompt templates, when a prompt registry
+//!   is supplied.
+//! - `prompts/get` — renders a prompt template by name.
 //! - `ping` — connection liveness check.
 //!
 //! Notifications (no `id` field) are accepted but produce no response.
@@ -21,6 +24,7 @@ use std::io::{BufRead, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
+use crate::prompt::{PromptInvocation, PromptRegistry};
 use crate::registry::ToolRegistry;
 use crate::tool::ToolInvocation;
 
@@ -76,6 +80,23 @@ struct JsonRpcError {
 /// Outcome of [`handle_request`]: either a serialized response or
 /// `None` when the input was a notification.
 pub fn handle_request(registry: &ToolRegistry, request: &str) -> Option<String> {
+    handle_request_inner(registry, None, request)
+}
+
+/// Prompt-aware variant of [`handle_request`].
+pub fn handle_request_with_prompts(
+    registry: &ToolRegistry,
+    prompts: &PromptRegistry,
+    request: &str,
+) -> Option<String> {
+    handle_request_inner(registry, Some(prompts), request)
+}
+
+fn handle_request_inner(
+    registry: &ToolRegistry,
+    prompts: Option<&PromptRegistry>,
+    request: &str,
+) -> Option<String> {
     let parsed: Result<JsonRpcRequest, _> = serde_json::from_str(request);
     let request = match parsed {
         Ok(r) => r,
@@ -100,7 +121,7 @@ pub fn handle_request(registry: &ToolRegistry, request: &str) -> Option<String> 
     }
 
     let id = request.id.clone();
-    let result = dispatch(registry, &request);
+    let result = dispatch(registry, prompts, &request);
 
     match (id, result) {
         (None, _) => None, // Notification — no response.
@@ -111,14 +132,22 @@ pub fn handle_request(registry: &ToolRegistry, request: &str) -> Option<String> 
 
 fn dispatch(
     registry: &ToolRegistry,
+    prompts: Option<&PromptRegistry>,
     request: &JsonRpcRequest,
 ) -> Result<JsonValue, (i32, String, Option<JsonValue>)> {
     match request.method.as_str() {
-        "initialize" => Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-            "capabilities": { "tools": {} },
-        })),
+        "initialize" => {
+            let mut capabilities = serde_json::Map::new();
+            capabilities.insert("tools".into(), json!({}));
+            if prompts.is_some() {
+                capabilities.insert("prompts".into(), json!({}));
+            }
+            Ok(json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": capabilities,
+            }))
+        }
         "ping" => Ok(json!({})),
         "tools/list" => {
             let mut tools_out = Vec::new();
@@ -157,6 +186,56 @@ fn dispatch(
                     "isError": result.is_error,
                 })),
                 Err(e) => Err((error_code::METHOD_NOT_FOUND, e.to_string(), None)),
+            }
+        }
+        "prompts/list" => {
+            let prompts = prompts.ok_or_else(|| {
+                (
+                    error_code::METHOD_NOT_FOUND,
+                    "prompts are not enabled".into(),
+                    None,
+                )
+            })?;
+            let mut prompts_out = Vec::new();
+            for name in prompts.list() {
+                let prompt = prompts.get(&name).expect("prompt listed");
+                prompts_out.push(json!(prompt.descriptor()));
+            }
+            Ok(json!({ "prompts": prompts_out }))
+        }
+        "prompts/get" => {
+            let prompts = prompts.ok_or_else(|| {
+                (
+                    error_code::METHOD_NOT_FOUND,
+                    "prompts are not enabled".into(),
+                    None,
+                )
+            })?;
+            let name = request
+                .params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    (
+                        error_code::INVALID_PARAMS,
+                        "prompts/get requires a `name` string parameter".into(),
+                        None,
+                    )
+                })?;
+            let arguments = match request.params.get("arguments") {
+                Some(value) => value.as_object().cloned().ok_or_else(|| {
+                    (
+                        error_code::INVALID_PARAMS,
+                        "prompts/get `arguments` must be an object".into(),
+                        None,
+                    )
+                })?,
+                None => serde_json::Map::new(),
+            };
+            let invocation = PromptInvocation { arguments };
+            match prompts.render(name, &invocation) {
+                Ok(result) => Ok(json!(result)),
+                Err(e) => Err((error_code::INVALID_PARAMS, e.to_string(), None)),
             }
         }
         other => Err((
@@ -200,13 +279,32 @@ pub fn run_stdio<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
 ) -> std::io::Result<()> {
+    run_stdio_inner(registry, None, reader, &mut writer)
+}
+
+/// Runs an MCP server loop with both tool and prompt registries.
+pub fn run_stdio_with_prompts<R: BufRead, W: Write>(
+    registry: &ToolRegistry,
+    prompts: &PromptRegistry,
+    reader: R,
+    mut writer: W,
+) -> std::io::Result<()> {
+    run_stdio_inner(registry, Some(prompts), reader, &mut writer)
+}
+
+fn run_stdio_inner<R: BufRead, W: Write>(
+    registry: &ToolRegistry,
+    prompts: Option<&PromptRegistry>,
+    reader: R,
+    writer: &mut W,
+) -> std::io::Result<()> {
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(response) = handle_request(registry, trimmed) {
+        if let Some(response) = handle_request_inner(registry, prompts, trimmed) {
             writeln!(writer, "{response}")?;
             writer.flush()?;
         }
@@ -218,8 +316,8 @@ pub fn run_stdio<R: BufRead, W: Write>(
 mod tests {
     use super::*;
     use crate::{
-        analyze_query_tool, parse_query_tool, query_tool, reason_tool, reasoning_profiles_tool,
-        shacl_capabilities_tool,
+        analyze_query_tool, cqels_prompt_registry, parse_query_tool, query_tool, reason_tool,
+        reasoning_profiles_tool, shacl_capabilities_tool,
     };
 
     fn make_registry() -> ToolRegistry {
@@ -247,6 +345,17 @@ mod tests {
         assert_eq!(value["id"], 1);
         assert_eq!(value["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(value["result"]["serverInfo"]["name"], SERVER_NAME);
+    }
+
+    #[test]
+    fn initialize_advertises_prompts_when_registry_is_supplied() {
+        let reg = make_registry();
+        let prompts = cqels_prompt_registry();
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        let resp = handle_request_with_prompts(&reg, &prompts, req).expect("response");
+        let value = parse_response(&resp);
+        assert!(value["result"]["capabilities"]["tools"].is_object());
+        assert!(value["result"]["capabilities"]["prompts"].is_object());
     }
 
     #[test]
@@ -307,6 +416,114 @@ mod tests {
         let resp = handle_request(&reg, req).expect("response");
         let value = parse_response(&resp);
         assert_eq!(value["error"]["code"], error_code::METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn prompts_list_returns_all_installed_prompts() {
+        let reg = make_registry();
+        let prompts = cqels_prompt_registry();
+        let req = r#"{"jsonrpc":"2.0","id":8,"method":"prompts/list"}"#;
+        let resp = handle_request_with_prompts(&reg, &prompts, req).expect("response");
+        let value = parse_response(&resp);
+        let prompts = value["result"]["prompts"]
+            .as_array()
+            .expect("prompts array");
+        assert_eq!(prompts.len(), 8);
+        assert!(
+            prompts.iter().any(|p| p["name"] == "recent_events_window"),
+            "recent_events_window prompt should be advertised"
+        );
+        for prompt in prompts {
+            assert!(prompt["name"].is_string());
+            assert!(prompt["description"].is_string());
+            assert!(prompt["arguments"].is_array());
+        }
+    }
+
+    #[test]
+    fn prompts_list_without_prompt_registry_returns_method_not_found() {
+        let reg = make_registry();
+        let req = r#"{"jsonrpc":"2.0","id":8,"method":"prompts/list"}"#;
+        let resp = handle_request(&reg, req).expect("response");
+        let value = parse_response(&resp);
+        assert_eq!(value["error"]["code"], error_code::METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn empty_prompt_registry_is_advertised_and_lists_empty() {
+        let reg = make_registry();
+        let prompts = PromptRegistry::new();
+        let init = r#"{"jsonrpc":"2.0","id":8,"method":"initialize"}"#;
+        let init_resp = handle_request_with_prompts(&reg, &prompts, init).expect("response");
+        let init_value = parse_response(&init_resp);
+        assert!(init_value["result"]["capabilities"]["prompts"].is_object());
+
+        let list = r#"{"jsonrpc":"2.0","id":9,"method":"prompts/list"}"#;
+        let list_resp = handle_request_with_prompts(&reg, &prompts, list).expect("response");
+        let list_value = parse_response(&list_resp);
+        assert_eq!(
+            list_value["result"]["prompts"]
+                .as_array()
+                .expect("prompts array")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn prompts_get_renders_named_prompt() {
+        let reg = make_registry();
+        let prompts = cqels_prompt_registry();
+        let req = r#"{
+            "jsonrpc":"2.0","id":9,"method":"prompts/get",
+            "params":{"name":"recent_events_window","arguments":{"stream":"SensorData","window":"RANGE 30s"}}
+        }"#;
+        let resp = handle_request_with_prompts(&reg, &prompts, req).expect("response");
+        let value = parse_response(&resp);
+        assert_eq!(value["id"], 9);
+        let message = &value["result"]["messages"][0];
+        assert_eq!(message["role"], "user");
+        assert_eq!(message["content"]["type"], "text");
+        assert!(message["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("FROM STREAM SensorData [RANGE 30s]"));
+    }
+
+    #[test]
+    fn prompts_get_with_missing_name_returns_invalid_params() {
+        let reg = make_registry();
+        let prompts = cqels_prompt_registry();
+        let req = r#"{"jsonrpc":"2.0","id":10,"method":"prompts/get","params":{}}"#;
+        let resp = handle_request_with_prompts(&reg, &prompts, req).expect("response");
+        let value = parse_response(&resp);
+        assert_eq!(value["error"]["code"], error_code::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn prompts_get_with_unknown_prompt_returns_invalid_params() {
+        let reg = make_registry();
+        let prompts = cqels_prompt_registry();
+        let req = r#"{
+            "jsonrpc":"2.0","id":11,"method":"prompts/get",
+            "params":{"name":"missing","arguments":{}}
+        }"#;
+        let resp = handle_request_with_prompts(&reg, &prompts, req).expect("response");
+        let value = parse_response(&resp);
+        assert_eq!(value["error"]["code"], error_code::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn prompts_get_with_non_object_arguments_returns_invalid_params() {
+        let reg = make_registry();
+        let prompts = cqels_prompt_registry();
+        let req = r#"{
+            "jsonrpc":"2.0","id":12,"method":"prompts/get",
+            "params":{"name":"store_knowledge","arguments":["not","an","object"]}
+        }"#;
+        let resp = handle_request_with_prompts(&reg, &prompts, req).expect("response");
+        let value = parse_response(&resp);
+        assert_eq!(value["error"]["code"], error_code::INVALID_PARAMS);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! line-delimited JSON-RPC requests on stdin. Responses are written to
 //! stdout, one per line.
 //!
-//! Registered tools:
+//! Registered surface:
 //!
 //! - Stateless: `parse_query`, `query`, `analyze_query`,
 //!   `reasoning_profiles`, `shacl_capabilities`, `reason`
@@ -14,15 +14,18 @@
 //!   and `register_reasoning`, backed by a [`SledMemoryStore`] when
 //!   the `CQELS_MCP_MEMORY_DIR` environment variable is set, otherwise
 //!   an [`InMemoryMemoryStore`].
+//! - Prompt templates: Java-compatible CQELS workflow/query prompts
+//!   exposed through `prompts/list` and `prompts/get`.
 
 use std::io::{self, BufReader};
 use std::sync::Arc;
 
 use cqels_mcp::{
-    analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reason_tool,
-    reasoning_profiles_tool, recall_memory_tool_with_reasoning, register_reasoning_tool, run_stdio,
-    shacl_capabilities_tool, solve_tool, store_memory_tool, validate_tool, InMemoryMemoryStore,
-    MemoryStore, ReasoningRegistration, SledMemoryStore, ToolRegistry,
+    analyze_query_tool, cqels_prompt_registry, forget_memory_tool, parse_query_tool, query_tool,
+    reason_tool, reasoning_profiles_tool, recall_memory_tool_with_reasoning,
+    register_reasoning_tool, run_stdio_with_prompts, shacl_capabilities_tool, solve_tool,
+    store_memory_tool, validate_tool, InMemoryMemoryStore, MemoryStore, ReasoningRegistration,
+    SledMemoryStore, ToolRegistry,
 };
 
 fn main() -> io::Result<()> {
@@ -54,11 +57,12 @@ fn main() -> io::Result<()> {
     registry.install(register_reasoning_tool(memory.clone(), reasoning.clone()));
     registry.install(recall_memory_tool_with_reasoning(memory.clone(), reasoning));
     registry.install(forget_memory_tool(memory));
+    let prompts = cqels_prompt_registry();
 
     let stdin = io::stdin();
     let stdout = io::stdout();
     let reader = BufReader::new(stdin.lock());
     let writer = stdout.lock();
 
-    run_stdio(&registry, reader, writer)
+    run_stdio_with_prompts(&registry, &prompts, reader, writer)
 }

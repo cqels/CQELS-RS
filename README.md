@@ -17,7 +17,7 @@ reasoning. Rust port of the [CQELS 2.0](https://cqels.github.io/) engine.
 - **GeoSPARQL** -- 6 spatial functions with R-tree indexing
 - **SHACL** -- Shape validation, repair candidates, ASP-based solving
 - **Persistent storage SPI** -- Pluggable backends; production-grade embedded impls via `sled` (`cqels-storage-sled`) and LMDB (`cqels-storage-lmdb`)
-- **MCP tool surface** -- `cqels-mcp` exposes query/reasoning/SHACL capabilities to LLM agents
+- **MCP tool/prompt surface** -- `cqels-mcp` exposes query/reasoning/SHACL capabilities and prompt templates to LLM agents
 - **Async-first** -- Built on tokio with `Stream`-based dataflow composition
 - **RDF ecosystem** -- Bidirectional interop with [oxrdf](https://docs.rs/oxrdf)
 
@@ -80,9 +80,10 @@ cqels-core               Stream processing core (windows, operators, parsers,
     |   +-- cqels-storage-sled    Production-grade embedded backend (pure-Rust sled)
     |   +-- cqels-storage-lmdb    Production-grade embedded backend (heed/LMDB, MVCC)
     |
-    +-- cqels-mcp            Model Context Protocol tool surface (exposes the
+    +-- cqels-mcp            Model Context Protocol tool/prompt surface (exposes the
                              engine to LLM agents — `parse_query`, `query`,
-                             `reasoning_profiles`, `shacl_capabilities`)
+                             `reasoning_profiles`, `shacl_capabilities`,
+                             `prompts/list`, `prompts/get`)
 ```
 
 ## Examples

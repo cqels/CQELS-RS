@@ -1,15 +1,16 @@
 //! End-to-end JSON-RPC stdio integration test for the full
-//! `cqels-mcp` server tool surface.
+//! `cqels-mcp` server tool and prompt surface.
 //!
 //! Mirrors the registration order of `src/bin/cqels_mcp_server.rs` and
-//! drives the registry through `run_stdio` with a real
+//! drives the registries through `run_stdio_with_prompts` with a real
 //! line-delimited request batch. Asserts each of the 12 default stdio
 //! tools (`parse_query`, `query`, `analyze_query`, `reasoning_profiles`,
 //! `shacl_capabilities`, `reason`, `validate`, `solve`, `store_memory`,
 //! `recall_memory`, `register_reasoning`, `forget_memory`) returns a
-//! non-error response with the expected shape. Catches regressions in
-//! the transport / registration order that per-tool unit tests still
-//! pass.
+//! non-error response with the expected shape, and verifies
+//! Java-compatible CQELS prompt templates are advertised and renderable.
+//! Catches regressions in the transport / registration order that
+//! per-tool or per-prompt unit tests still pass.
 //!
 //! Runs as a binary integration test (in `cqels-mcp/tests/`), so it
 //! only depends on the crate's public API.
@@ -20,10 +21,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cqels_asp::{AnswerSet, AspError, AspSolver, Atom};
 use cqels_mcp::{
-    analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reason_tool,
-    reasoning_profiles_tool, recall_memory_tool_with_reasoning, register_reasoning_tool, run_stdio,
-    shacl_capabilities_tool, solve_tool_with_solver, store_memory_tool, validate_tool_with_solver,
-    InMemoryMemoryStore, MemoryStore, ReasoningRegistration, ToolRegistry,
+    analyze_query_tool, cqels_prompt_registry, forget_memory_tool, parse_query_tool, query_tool,
+    reason_tool, reasoning_profiles_tool, recall_memory_tool_with_reasoning,
+    register_reasoning_tool, run_stdio_with_prompts, shacl_capabilities_tool,
+    solve_tool_with_solver, store_memory_tool, validate_tool_with_solver, InMemoryMemoryStore,
+    MemoryStore, ReasoningRegistration, ToolRegistry,
 };
 use serde_json::{json, Value};
 
@@ -147,11 +149,27 @@ fn stdio_dispatches_every_tool_in_one_session() {
     lines.push(call_line(11, "register_reasoning", register_reasoning_args));
     lines.push(call_line(12, "recall_memory", recall_args));
     lines.push(call_line(13, "forget_memory", forget_args));
+    // Prompt surface.
+    lines.push(json!({"jsonrpc":"2.0","id":14,"method":"prompts/list"}).to_string());
+    lines.push(
+        json!({
+            "jsonrpc":"2.0",
+            "id":15,
+            "method":"prompts/get",
+            "params": {
+                "name": "recent_events_window",
+                "arguments": { "stream": "SensorData", "window": "RANGE 30s" }
+            }
+        })
+        .to_string(),
+    );
     let input = lines.join("\n") + "\n";
 
     let reg = make_full_registry();
+    let prompts = cqels_prompt_registry();
     let mut output: Vec<u8> = Vec::new();
-    run_stdio(&reg, Cursor::new(input.as_bytes()), &mut output).expect("run_stdio");
+    run_stdio_with_prompts(&reg, &prompts, Cursor::new(input.as_bytes()), &mut output)
+        .expect("run_stdio");
 
     let text = String::from_utf8(output).expect("utf8");
     let responses: Vec<Value> = text
@@ -160,8 +178,8 @@ fn stdio_dispatches_every_tool_in_one_session() {
         .map(|l| serde_json::from_str(l).expect("parse response"))
         .collect();
 
-    // 14 requests in, 14 responses out (every line had an `id`).
-    assert_eq!(responses.len(), 14, "one response per request");
+    // 16 requests in, 16 responses out (every line had an `id`).
+    assert_eq!(responses.len(), 16, "one response per request");
 
     // ─── initialize ──────────────────────────────────────────────
     assert_eq!(responses[0]["id"], 0);
@@ -285,5 +303,42 @@ fn stdio_dispatches_every_tool_in_one_session() {
     assert_eq!(
         forgotten["removed"], true,
         "forget_memory should report the fact was removed"
+    );
+
+    // ─── prompts/list + prompts/get ──────────────────────────────
+    let prompt_list = responses[14]["result"]["prompts"]
+        .as_array()
+        .expect("prompts array");
+    assert_eq!(prompt_list.len(), 8, "8 prompts registered");
+    let prompt_names: Vec<&str> = prompt_list
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "store_knowledge",
+        "recall_about",
+        "validate_data",
+        "reasoning_workflow",
+        "recent_events_window",
+        "entity_by_type",
+        "value_over_window",
+        "spatial_recall",
+    ] {
+        assert!(
+            prompt_names.contains(&expected),
+            "expected prompt '{expected}' to be advertised; got {prompt_names:?}"
+        );
+    }
+
+    assert_eq!(responses[15]["id"], 15);
+    let message = &responses[15]["result"]["messages"][0];
+    assert_eq!(message["role"], "user");
+    assert_eq!(message["content"]["type"], "text");
+    assert!(
+        message["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("FROM STREAM SensorData [RANGE 30s]"),
+        "rendered prompt should include the CQELS-QL template"
     );
 }

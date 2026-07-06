@@ -1,17 +1,15 @@
 //! Model Context Protocol (MCP) tool surface for CQELS.
 //!
 //! Mirrors Java's `cqels-mcp` module. Exposes the engine as a set of
-//! MCP **tools** that an LLM agent can invoke to query, register, reason
-//! over, and validate RDF data managed by CQELS.
+//! MCP **tools** and **prompts** that an LLM agent can invoke to query,
+//! register, reason over, validate, and manage RDF data with CQELS.
 //!
 //! ## Scope
 //!
-//! This crate ships the **protocol-agnostic tool layer**: trait
-//! definitions, a registry, JSON-Schema-shaped input contracts, and
-//! reference implementations of two foundational tools (`query` and
-//! `parse_query`). The transport (JSON-RPC over stdio / HTTP / SSE)
-//! that connects an MCP client to this registry is a follow-up and can
-//! be implemented against any Rust MCP SDK (e.g. `rmcp`).
+//! This crate ships protocol-agnostic layers for tools and prompt
+//! templates: traits, registries, JSON-Schema-shaped input contracts,
+//! and reference implementations. The line-delimited JSON-RPC stdio
+//! transport connects MCP clients to those registries.
 //!
 //! Mapping to Java's tool set:
 //!
@@ -36,6 +34,7 @@
 //! | `solve`            | ✅ implemented (ASP bridge; see [`solve`]) |
 
 pub mod memory;
+pub mod prompt;
 pub mod registry;
 pub mod solve;
 pub mod stream_query;
@@ -45,6 +44,10 @@ pub mod transport;
 pub mod validate;
 
 pub use memory::{InMemoryMemoryStore, MemoryError, MemoryFact, MemoryStore, SledMemoryStore};
+pub use prompt::{
+    cqels_prompt_registry, install_cqels_prompts, McpPrompt, PromptArgument, PromptContent,
+    PromptDescriptor, PromptError, PromptInvocation, PromptMessage, PromptRegistry, PromptResult,
+};
 pub use registry::{McpError, ToolRegistry};
 pub use solve::{solve_tool, solve_tool_with_solver, SolveTool};
 pub use stream_query::{
@@ -59,5 +62,8 @@ pub use tools::{
     reasoning_profiles_tool, recall_memory_tool, recall_memory_tool_with_reasoning,
     register_reasoning_tool, shacl_capabilities_tool, store_memory_tool, ReasoningRegistration,
 };
-pub use transport::{handle_request, run_stdio, PROTOCOL_VERSION, SERVER_NAME};
+pub use transport::{
+    handle_request, handle_request_with_prompts, run_stdio, run_stdio_with_prompts,
+    PROTOCOL_VERSION, SERVER_NAME,
+};
 pub use validate::{validate_tool, validate_tool_with_solver, ValidateTool};
