@@ -12,8 +12,9 @@
 //! follow-up that requires wiring `cqels_engine::CqelsEngine` into the
 //! tool handler.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cqels_core::compiler::CqelsQueryCompiler;
 use cqels_core::parser::CqelsQlParser;
@@ -22,7 +23,7 @@ use cqels_model::{IriTerm, LiteralTerm, Statement, Term};
 use cqels_reasoning::{ReasoningConfig, ReasoningProfile, ReteNetwork};
 use serde_json::json;
 
-use crate::memory::{MemoryFact, MemoryStore};
+use crate::memory::{MemoryFact, MemoryPayload, MemoryStatement, MemoryStore};
 use crate::tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 
 // ─── parse_query ─────────────────────────────────────────────────────
@@ -539,12 +540,224 @@ fn term_to_string(t: &Term) -> String {
 // ─── memory tools ────────────────────────────────────────────────────
 
 const DEFAULT_NAMESPACE: &str = "default";
+const LONGTERM_MEMORY: &str = "longterm";
+const SHORTTERM_MEMORY: &str = "shortterm";
+const LONGTERM_GRAPH: &str = "cqels://memory/longterm";
+const DEFAULT_STREAM: &str = "shortterm";
+const DEFAULT_RECALL_LIMIT: usize = 50;
+const MAX_RECALL_LIMIT: usize = 1000;
+const RESERVED_GRAPHS: &[&str] = &[
+    "cqels://memory/annotations",
+    "cqels://memory/policy",
+    "cqels://memory/procedures",
+    "cqels://memory/decisions",
+    "cqels://memory/episodic",
+    "cqels://memory/inferred",
+];
+
+static GENERATED_MEMORY_ID: AtomicU64 = AtomicU64::new(1);
 
 fn namespace_from(invocation: &ToolInvocation) -> String {
     invocation
         .get_str("namespace")
         .unwrap_or(DEFAULT_NAMESPACE)
         .to_string()
+}
+
+fn generated_memory_id() -> String {
+    let seq = GENERATED_MEMORY_ID.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("memory-{nanos}-{seq}")
+}
+
+fn structured_memory_requested(invocation: &ToolInvocation) -> bool {
+    ["facts", "turtle", "memory", "stream", "graph", "meta"]
+        .iter()
+        .any(|key| invocation.get(key).is_some())
+}
+
+fn parse_memory_payload(invocation: &ToolInvocation) -> Result<Option<MemoryPayload>, String> {
+    if !structured_memory_requested(invocation) {
+        return Ok(None);
+    }
+
+    let memory = invocation
+        .get_str("memory")
+        .unwrap_or(LONGTERM_MEMORY)
+        .to_string();
+    if memory != LONGTERM_MEMORY && memory != SHORTTERM_MEMORY {
+        return Err(format!(
+            "unknown memory type '{memory}'; supported: longterm, shortterm"
+        ));
+    }
+
+    let graph = if memory == LONGTERM_MEMORY {
+        let graph = invocation.get_str("graph").unwrap_or(LONGTERM_GRAPH);
+        if RESERVED_GRAPHS.contains(&graph) {
+            return Err(format!(
+                "graph '{graph}' is reserved for CQELS system tools"
+            ));
+        }
+        Some(graph.to_string())
+    } else {
+        None
+    };
+
+    let stream = (memory == SHORTTERM_MEMORY).then(|| {
+        invocation
+            .get_str("stream")
+            .unwrap_or(DEFAULT_STREAM)
+            .to_string()
+    });
+    let meta = invocation
+        .get("meta")
+        .map(|value| {
+            if value.is_object() {
+                Ok(value.clone())
+            } else {
+                Err("`meta` must be an object".to_string())
+            }
+        })
+        .transpose()?;
+    let facts = parse_memory_statements(invocation.get("facts"), meta.as_ref())?;
+    let turtle = invocation
+        .get_str("turtle")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    if facts.is_empty() && turtle.is_none() && invocation.get_str("content").is_none() {
+        return Err("store_memory requires one of: content, facts, turtle".to_string());
+    }
+
+    Ok(Some(MemoryPayload {
+        memory,
+        graph,
+        stream,
+        facts,
+        turtle,
+        meta,
+    }))
+}
+
+fn parse_memory_statements(
+    value: Option<&serde_json::Value>,
+    default_meta: Option<&serde_json::Value>,
+) -> Result<Vec<MemoryStatement>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let facts = value
+        .as_array()
+        .ok_or_else(|| "`facts` must be an array".to_string())?;
+    let mut out = Vec::with_capacity(facts.len());
+    for (idx, fact) in facts.iter().enumerate() {
+        let object = fact
+            .as_object()
+            .ok_or_else(|| format!("facts[{idx}] must be an object"))?;
+        let required = |key: &str| {
+            object
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| format!("facts[{idx}] requires `{key}`"))
+        };
+        let object_type = object
+            .get("objectType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("literal");
+        if object_type != "uri" && object_type != "literal" {
+            return Err(format!(
+                "facts[{idx}].objectType must be either 'uri' or 'literal'"
+            ));
+        }
+        out.push(MemoryStatement {
+            subject: required("subject")?,
+            predicate: required("predicate")?,
+            object: required("object")?,
+            object_type: object_type.to_string(),
+            meta: match object.get("meta") {
+                Some(meta) if meta.is_object() => Some(meta.clone()),
+                Some(_) => return Err(format!("facts[{idx}].meta must be an object")),
+                None => default_meta.cloned(),
+            },
+        });
+    }
+    Ok(out)
+}
+
+fn canonical_structured_content(payload: &MemoryPayload) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "memory": payload.memory,
+        "graph": payload.graph,
+        "stream": payload.stream,
+        "facts": payload.facts,
+        "turtle": payload.turtle,
+        "meta": payload.meta,
+    }))
+    .map_err(|e| format!("failed to encode structured memory content: {e}"))
+}
+
+fn recall_limit(invocation: &ToolInvocation) -> usize {
+    invocation
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.clamp(1, MAX_RECALL_LIMIT as i64) as usize)
+        .unwrap_or(DEFAULT_RECALL_LIMIT)
+}
+
+fn has_non_empty_pattern_field(pattern: &serde_json::Map<String, serde_json::Value>) -> bool {
+    ["subject", "predicate", "object"].iter().any(|key| {
+        pattern
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    })
+}
+
+fn filter_by_pattern(
+    facts: Vec<MemoryFact>,
+    pattern_value: Option<&serde_json::Value>,
+) -> Result<Vec<MemoryFact>, String> {
+    let Some(pattern_value) = pattern_value else {
+        return Ok(facts);
+    };
+    let pattern = pattern_value
+        .as_object()
+        .ok_or_else(|| "`pattern` must be an object".to_string())?;
+    if !has_non_empty_pattern_field(pattern) {
+        return Err("pattern must specify at least one of: subject, predicate, object".to_string());
+    }
+    Ok(facts
+        .into_iter()
+        .filter(|fact| {
+            fact.facts
+                .iter()
+                .any(|stmt| statement_matches(stmt, pattern))
+        })
+        .collect())
+}
+
+fn statement_matches(
+    statement: &MemoryStatement,
+    pattern: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let matches_field = |key: &str, actual: &str| {
+        pattern
+            .get(key)
+            .and_then(|v| v.as_str())
+            .is_none_or(|expected| expected.is_empty() || expected == actual)
+    };
+    matches_field("subject", &statement.subject)
+        && matches_field("predicate", &statement.predicate)
+        && matches_field("object", &statement.object)
+        && pattern
+            .get("objectType")
+            .and_then(|v| v.as_str())
+            .is_none_or(|expected| expected == statement.object_type)
 }
 
 /// Constructs a `store_memory` tool backed by the supplied
@@ -563,45 +776,109 @@ impl McpTool for StoreMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Persist a fact to long-term memory keyed by (namespace, id). \
-         Replaces any existing fact at the same key. Returns the stored \
-         fact's metadata."
+        "Persist memory keyed by (namespace, id). Supports legacy raw \
+         content plus alpha.8-style RDF facts, Turtle payloads, graph/stream \
+         targeting, and statement metadata."
     }
 
     fn input_schema(&self) -> ToolInputSchema {
         ToolInputSchema::object()
             .with_property("id", json!({
                 "type": "string",
-                "description": "Unique identifier for this fact within the namespace.",
+                "description": "Unique identifier for this memory within the namespace. Generated for structured RDF payloads when omitted.",
             }))
             .with_property("content", json!({
                 "type": "string",
-                "description": "Raw content of the memory (free-form text, JSON, Turtle, etc.).",
+                "description": "Raw content of the memory (free-form text, JSON, Turtle, etc.). Optional when `facts` or `turtle` is provided.",
+            }))
+            .with_property("facts", json!({
+                "type": "array",
+                "description": "Array of RDF facts to store.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "predicate": {"type": "string"},
+                        "object": {"type": "string"},
+                        "objectType": {"type": "string", "enum": ["uri", "literal"], "default": "literal"},
+                        "meta": {"type": "object"}
+                    },
+                    "required": ["subject", "predicate", "object"]
+                }
+            }))
+            .with_property("turtle", json!({
+                "type": "string",
+                "description": "RDF data in Turtle format. Stored as raw Turtle until the full RDF repository-backed memory layer lands.",
+            }))
+            .with_property("memory", json!({
+                "type": "string",
+                "enum": ["longterm", "shortterm"],
+                "default": LONGTERM_MEMORY,
+                "description": "Memory type: longterm persistent memory or shortterm stream memory metadata.",
+            }))
+            .with_property("stream", json!({
+                "type": "string",
+                "description": "Target stream name for shortterm memory metadata.",
+            }))
+            .with_property("graph", json!({
+                "type": "string",
+                "description": "Named graph URI for longterm memory. CQELS system graphs are reserved.",
+                "default": LONGTERM_GRAPH,
+            }))
+            .with_property("meta", json!({
+                "type": "object",
+                "description": "Default statement metadata such as source, confidence, validity interval, spatial scope, accessLabel, or decisionScope.",
             }))
             .with_property("namespace", json!({
                 "type": "string",
                 "description": "Logical bucket isolating memories (default: \"default\").",
                 "default": DEFAULT_NAMESPACE,
             }))
-            .require("id")
-            .require("content")
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
-        let Some(id) = invocation.get_str("id").map(str::to_string) else {
-            return ToolResult::error("missing `id` argument");
-        };
-        let Some(content) = invocation.get_str("content").map(str::to_string) else {
-            return ToolResult::error("missing `content` argument");
-        };
         let namespace = namespace_from(invocation);
-        let fact = MemoryFact::new(namespace.clone(), id.clone(), content);
+        let payload = match parse_memory_payload(invocation) {
+            Ok(payload) => payload,
+            Err(message) => return ToolResult::error(message),
+        };
+
+        let fact = match payload {
+            Some(payload) => {
+                let id = invocation
+                    .get_str("id")
+                    .map(str::to_string)
+                    .unwrap_or_else(generated_memory_id);
+                let content = match invocation.get_str("content") {
+                    Some(content) => content.to_string(),
+                    None => match canonical_structured_content(&payload) {
+                        Ok(content) => content,
+                        Err(message) => return ToolResult::error(message),
+                    },
+                };
+                MemoryFact::with_structured_payload(namespace.clone(), id, content, payload)
+            }
+            None => {
+                let Some(id) = invocation.get_str("id").map(str::to_string) else {
+                    return ToolResult::error("missing `id` argument");
+                };
+                let Some(content) = invocation.get_str("content").map(str::to_string) else {
+                    return ToolResult::error("missing `content` argument");
+                };
+                MemoryFact::new(namespace.clone(), id, content)
+            }
+        };
         match self.store.store(fact.clone()) {
             Ok(()) => ToolResult::success(json!({
                 "ok": true,
                 "namespace": fact.namespace,
                 "id": fact.id,
                 "created_at_ms": fact.created_at_ms,
+                "memory": fact.memory,
+                "graph": fact.graph,
+                "stream": fact.stream,
+                "fact_count": fact.facts.len(),
+                "has_turtle": fact.turtle.is_some(),
             })),
             Err(e) => ToolResult::error(format!("store failed: {e}")),
         }
@@ -624,9 +901,9 @@ impl McpTool for RecallMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Retrieve memories from a namespace, optionally filtered to facts \
-         whose content contains a query substring. Returns facts sorted \
-         by id."
+        "Retrieve memories from a namespace, optionally filtered by text \
+         substring or alpha.8-style RDF subject/predicate/object pattern. \
+         Returns facts sorted by id."
     }
 
     fn input_schema(&self) -> ToolInputSchema {
@@ -640,18 +917,49 @@ impl McpTool for RecallMemoryTool {
                 "type": "string",
                 "description": "Substring to match within fact content. Empty/missing returns all facts in the namespace.",
             }))
+            .with_property("text", json!({
+                "type": "string",
+                "description": "Alias for `query`, matching Java alpha.8's lexical recall argument.",
+            }))
+            .with_property("pattern", json!({
+                "type": "object",
+                "description": "Simple RDF graph pattern over stored structured facts.",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "object": {"type": "string"},
+                    "objectType": {"type": "string", "enum": ["uri", "literal"]}
+                }
+            }))
+            .with_property("limit", json!({
+                "type": "integer",
+                "description": "Maximum facts to return, clamped to [1, 1000].",
+                "default": DEFAULT_RECALL_LIMIT,
+                "maximum": MAX_RECALL_LIMIT,
+            }))
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
         let namespace = namespace_from(invocation);
-        let query = invocation.get_str("query").unwrap_or("").to_string();
+        let query = invocation
+            .get_str("query")
+            .or_else(|| invocation.get_str("text"))
+            .unwrap_or("")
+            .to_string();
         match self.store.recall(&namespace, &query) {
-            Ok(facts) => ToolResult::success(json!({
+            Ok(facts) => {
+                let mut facts = match filter_by_pattern(facts, invocation.get("pattern")) {
+                    Ok(facts) => facts,
+                    Err(message) => return ToolResult::error(message),
+                };
+                facts.truncate(recall_limit(invocation));
+                ToolResult::success(json!({
                 "namespace": namespace,
                 "query": query,
                 "count": facts.len(),
                 "facts": facts,
-            })),
+                }))
+            }
             Err(e) => ToolResult::error(format!("recall failed: {e}")),
         }
     }
@@ -1067,6 +1375,176 @@ mod tests {
     }
 
     #[test]
+    fn store_memory_accepts_java_style_rdf_facts() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("namespace", serde_json::json!("semantic"))
+                .with_arg("graph", serde_json::json!("cqels://memory/user/project"))
+                .with_arg("meta", serde_json::json!({"source":"sensor-feed"}))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([
+                        {
+                            "subject": "http://ex/Alice",
+                            "predicate": "http://ex/likes",
+                            "object": "http://ex/Sensors",
+                            "objectType": "uri",
+                            "meta": {"accessLabel": "team"}
+                        },
+                        {
+                            "subject": "http://ex/Alice",
+                            "predicate": "http://ex/name",
+                            "object": "Alice",
+                            "objectType": "literal"
+                        }
+                    ]),
+                ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["memory"], LONGTERM_MEMORY);
+        assert_eq!(res.content["graph"], "cqels://memory/user/project");
+        assert_eq!(res.content["fact_count"], 2);
+        assert!(res.content["id"].as_str().unwrap().starts_with("memory-"));
+
+        let stored = store.recall("semantic", "").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].facts.len(), 2);
+        assert_eq!(stored[0].facts[0].object_type, "uri");
+        assert_eq!(
+            stored[0].facts[0].meta.as_ref().unwrap()["accessLabel"],
+            "team"
+        );
+        assert_eq!(
+            stored[0].facts[1].meta.as_ref().unwrap()["source"],
+            "sensor-feed"
+        );
+        assert_eq!(stored[0].meta.as_ref().unwrap()["source"], "sensor-feed");
+    }
+
+    #[test]
+    fn store_memory_generates_distinct_structured_ids() {
+        let store = InMemoryMemoryStore::shared();
+        let first = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Alice",
+                    "predicate": "http://ex/likes",
+                    "object": "Sensors"
+                }]),
+            ),
+        );
+        let second = run_with_memory(
+            store,
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Bob",
+                    "predicate": "http://ex/likes",
+                    "object": "Sensors"
+                }]),
+            ),
+        );
+
+        assert!(!first.is_error, "{:?}", first.content);
+        assert!(!second.is_error, "{:?}", second.content);
+        assert_ne!(first.content["id"], second.content["id"]);
+    }
+
+    #[test]
+    fn store_memory_rejects_non_object_metadata() {
+        let store = InMemoryMemoryStore::shared();
+        let top_level = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("meta", serde_json::json!("not-an-object"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Alice",
+                        "predicate": "http://ex/likes",
+                        "object": "Sensors"
+                    }]),
+                ),
+        );
+        assert!(top_level.is_error);
+
+        let per_fact = run_with_memory(
+            store,
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Alice",
+                    "predicate": "http://ex/likes",
+                    "object": "Sensors",
+                    "meta": "not-an-object"
+                }]),
+            ),
+        );
+        assert!(per_fact.is_error);
+    }
+
+    #[test]
+    fn store_memory_rejects_reserved_system_graphs() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store,
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/policy"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Alice",
+                        "predicate": "http://ex/likes",
+                        "object": "Sensors"
+                    }]),
+                ),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("reserved"));
+    }
+
+    #[test]
+    fn store_memory_records_shortterm_stream_metadata() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("memory", serde_json::json!("shortterm"))
+                .with_arg("stream", serde_json::json!("alerts"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Alice",
+                        "predicate": "http://ex/status",
+                        "object": "active"
+                    }]),
+                ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["memory"], SHORTTERM_MEMORY);
+        assert_eq!(res.content["stream"], "alerts");
+
+        let stored = store.recall("default", "").unwrap();
+        assert_eq!(stored[0].memory, SHORTTERM_MEMORY);
+        assert_eq!(stored[0].stream.as_deref(), Some("alerts"));
+        assert!(stored[0].graph.is_none());
+    }
+
+    #[test]
     fn recall_memory_filters_by_substring_query() {
         let store = InMemoryMemoryStore::shared();
         store
@@ -1083,6 +1561,126 @@ mod tests {
         assert!(!res.is_error);
         assert_eq!(res.content["count"], 1);
         assert_eq!(res.content["facts"][0]["id"], "b");
+    }
+
+    #[test]
+    fn recall_memory_filters_structured_facts_by_pattern() {
+        let store = InMemoryMemoryStore::shared();
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("alice"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Alice",
+                        "predicate": "http://ex/likes",
+                        "object": "http://ex/Sensors",
+                        "objectType": "uri"
+                    }]),
+                ),
+        );
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("bob"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Bob",
+                        "predicate": "http://ex/likes",
+                        "object": "Sensors",
+                        "objectType": "literal"
+                    }]),
+                ),
+        );
+
+        let res = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://ex/likes",
+                    "object": "http://ex/Sensors",
+                    "objectType": "uri"
+                }),
+            ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["count"], 1);
+        assert_eq!(res.content["facts"][0]["id"], "alice");
+        assert_eq!(res.content["facts"][0]["facts"][0]["objectType"], "uri");
+        assert!(res.content["facts"][0]["facts"][0]
+            .get("object_type")
+            .is_none());
+    }
+
+    #[test]
+    fn recall_memory_supports_text_alias_and_limit_clamp() {
+        let store = InMemoryMemoryStore::shared();
+        for idx in 0..3 {
+            run_with_memory(
+                store.clone(),
+                "store_memory",
+                ToolInvocation::new()
+                    .with_arg("id", serde_json::json!(format!("fact-{idx}")))
+                    .with_arg(
+                        "facts",
+                        serde_json::json!([{
+                            "subject": format!("http://ex/{idx}"),
+                            "predicate": "http://ex/name",
+                            "object": "shared literal"
+                        }]),
+                    ),
+            );
+        }
+
+        let res = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("text", serde_json::json!("shared literal"))
+                .with_arg("limit", serde_json::json!(2)),
+        );
+        assert!(!res.is_error);
+        assert_eq!(res.content["count"], 2);
+        assert_eq!(res.content["facts"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn recall_memory_defaults_to_java_limit() {
+        let store = InMemoryMemoryStore::shared();
+        for idx in 0..51 {
+            store
+                .store(MemoryFact::new("default", format!("fact-{idx:02}"), "same"))
+                .unwrap();
+        }
+
+        let res = run_with_memory(store, "recall_memory", ToolInvocation::new());
+        assert!(!res.is_error);
+        assert_eq!(res.content["count"], DEFAULT_RECALL_LIMIT);
+        assert_eq!(
+            res.content["facts"].as_array().unwrap().len(),
+            DEFAULT_RECALL_LIMIT
+        );
+    }
+
+    #[test]
+    fn recall_memory_rejects_empty_pattern() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg("pattern", serde_json::json!({})),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("subject, predicate, object"));
     }
 
     #[test]
