@@ -1,6 +1,6 @@
-{"stream": "sensors", "ts": 1000, "s": "http://ex.org/s1", "p": "http://ex.org/temp", "o": "21"}
-{"stream": "sensors", "ts": 1100, "s": "http://ex.org/s2", "p": "http://ex.org/temp", "o": "23"}
-{"stream": "sensors", "ts": 1200, "s": "http://ex.org/s3", "p": "http://ex.org/temp", "o": "25"}
-{"stream": "sensors", "ts": 1300, "s": "http://ex.org/s4", "p": "http://ex.org/temp", "o": "24"}
-{"stream": "sensors", "ts": 1400, "s": "http://ex.org/s5", "p": "http://ex.org/temp", "o": "26"}
-{"stream": "sensors", "ts": 1500, "s": "http://ex.org/s6", "p": "http://ex.org/temp", "o": "28"}
+{"stream": "sensors", "ts": 1000, "s": "http://ex.org/s1", "p": "http://ex.org/temp", "o": "\"21\"^^<http://www.w3.org/2001/XMLSchema#integer>"}
+{"stream": "sensors", "ts": 1100, "s": "http://ex.org/s2", "p": "http://ex.org/temp", "o": "\"23\"^^<http://www.w3.org/2001/XMLSchema#integer>"}
+{"stream": "sensors", "ts": 1200, "s": "http://ex.org/s3", "p": "http://ex.org/temp", "o": "\"25\"^^<http://www.w3.org/2001/XMLSchema#integer>"}
+{"stream": "sensors", "ts": 1300, "s": "http://ex.org/s4", "p": "http://ex.org/temp", "o": "\"24\"^^<http://www.w3.org/2001/XMLSchema#integer>"}
+{"stream": "sensors", "ts": 1400, "s": "http://ex.org/s5", "p": "http://ex.org/temp", "o": "\"26\"^^<http://www.w3.org/2001/XMLSchema#integer>"}
+{"stream": "sensors", "ts": 1500, "s": "http://ex.org/s6", "p": "http://ex.org/temp", "o": "\"28\"^^<http://www.w3.org/2001/XMLSchema#integer>"}

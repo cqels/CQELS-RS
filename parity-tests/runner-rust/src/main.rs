@@ -199,6 +199,14 @@ fn value_to_string(v: &JsonValue) -> String {
 /// the README documents.
 fn parse_term(s: &str) -> Term {
     let trimmed = s.trim();
+    // NT-style typed literal: `"value"^^<datatype-iri>`. Real RDF streams carry
+    // typed literals (e.g. a sensor reading `"25"^^<xsd:integer>`), which the
+    // engine lifts to a numeric Value so `FILTER(?v > 24)` compares numerically.
+    // A bare `21` (no quotes/^^) stays a plain literal, so existing fixtures are
+    // unaffected.
+    if let Some(lit) = parse_typed_literal(trimmed) {
+        return lit;
+    }
     if trimmed.starts_with('<') && trimmed.ends_with('>') && trimmed.len() >= 2 {
         return Term::Iri(IriTerm::new(&trimmed[1..trimmed.len() - 1]));
     }
@@ -211,6 +219,19 @@ fn parse_term(s: &str) -> Term {
     } else {
         Term::Literal(LiteralTerm::new(trimmed))
     }
+}
+
+/// Parses an N-Triples-style typed literal `"value"^^<datatype-iri>`; returns
+/// `None` for anything not matching that exact shape (so bare literals and IRIs
+/// fall through to the default handling).
+fn parse_typed_literal(s: &str) -> Option<Term> {
+    let rest = s.strip_prefix('"')?;
+    let close = rest.find("\"^^<")?;
+    let value = &rest[..close];
+    let datatype = rest[close + 4..].strip_suffix('>')?;
+    Some(Term::Literal(
+        LiteralTerm::new(value).with_datatype(datatype),
+    ))
 }
 
 /// Converts a BindingSet into the same `BTreeMap<String, String>`
@@ -254,10 +275,7 @@ fn value_display(v: &Value) -> String {
 /// `oxrdfio` lives in a different crate we don't already depend on;
 /// dragging it in for a one-file consumer isn't worth it.
 #[allow(deprecated)]
-fn load_static_data(
-    engine: &cqels_engine::CqelsEngine,
-    trig: &str,
-) -> Result<(), String> {
+fn load_static_data(engine: &cqels_engine::CqelsEngine, trig: &str) -> Result<(), String> {
     use cqels_model::Statement as CqelsStatement;
     use oxigraph::io::{DatasetFormat, DatasetParser};
     use std::collections::HashMap;
@@ -307,7 +325,7 @@ fn load_static_data(
 }
 
 async fn run_workload(workload: &Workload) -> Result<Vec<(BTreeMap<String, String>, i64)>, String> {
-    let mut engine = CqelsEngine::builder()
+    let engine = CqelsEngine::builder()
         .build()
         .map_err(|e| format!("build engine: {e}"))?;
 
