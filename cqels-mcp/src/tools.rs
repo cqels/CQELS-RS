@@ -643,6 +643,10 @@ fn validate_recall_graph(graph: &str) -> Result<(), String> {
     validate_writable_graph(graph)
 }
 
+fn memory_fact_graph(fact: &MemoryFact) -> &str {
+    fact.graph.as_deref().unwrap_or(LONGTERM_GRAPH)
+}
+
 fn structured_memory_requested(invocation: &ToolInvocation) -> bool {
     ["facts", "turtle", "memory", "stream", "graph", "meta"]
         .iter()
@@ -979,7 +983,7 @@ fn memory_fact_matches_pattern(fact: &MemoryFact, pattern: &MemoryPattern) -> bo
     if fact.memory != LONGTERM_MEMORY {
         return false;
     }
-    let graph = fact.graph.as_deref().unwrap_or(LONGTERM_GRAPH);
+    let graph = memory_fact_graph(fact);
     if let Some(expected_graph) = &pattern.graph {
         if graph != expected_graph {
             return false;
@@ -1005,7 +1009,7 @@ fn pattern_statement_rows(
         if !memory_fact_matches_pattern(&fact, pattern) {
             continue;
         }
-        let graph = fact.graph.as_deref().unwrap_or(LONGTERM_GRAPH);
+        let graph = memory_fact_graph(&fact);
         for statement in &fact.facts {
             if pattern.has_statement_field() && !statement_matches(statement, pattern) {
                 continue;
@@ -1056,6 +1060,124 @@ fn statement_matches(statement: &MemoryStatement, pattern: &MemoryPattern) -> bo
             .object_type
             .as_deref()
             .is_none_or(|expected| expected == statement.object_type)
+}
+
+fn statement_delete_matches(statement: &MemoryStatement, target: &MemoryStatement) -> bool {
+    statement.subject == target.subject
+        && statement.predicate == target.predicate
+        && statement.object == target.object
+        && statement.object_type == target.object_type
+        && statement.datatype == target.datatype
+        && statement.language == target.language
+}
+
+fn canonical_fact_content(fact: &MemoryFact) -> Result<String, String> {
+    canonical_structured_content(&MemoryPayload {
+        memory: fact.memory.clone(),
+        graph: fact.graph.clone(),
+        stream: fact.stream.clone(),
+        facts: fact.facts.clone(),
+        turtle: fact.turtle.clone(),
+        meta: fact.meta.clone(),
+    })
+}
+
+fn forget_graph_memories(
+    store: &dyn MemoryStore,
+    namespace: &str,
+    graph: &str,
+) -> Result<usize, String> {
+    if graph.trim().is_empty() {
+        return Err("forget_memory graph must not be empty".to_string());
+    }
+    validate_recall_graph(graph)?;
+    let facts = store
+        .recall(namespace, "")
+        .map_err(|e| format!("recall before graph clear failed: {e}"))?;
+    let mut removed = 0;
+    for fact in facts {
+        if fact.memory == LONGTERM_MEMORY
+            && memory_fact_graph(&fact) == graph
+            && match store.forget(namespace, &fact.id) {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    return Err(format!(
+                        "graph clear failed after removing {removed} records: {e}"
+                    ));
+                }
+            }
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+#[derive(Debug, Default)]
+struct StatementForgetSummary {
+    statements_removed: usize,
+    records_updated: usize,
+    records_deleted: usize,
+}
+
+fn forget_matching_statements(
+    store: &dyn MemoryStore,
+    namespace: &str,
+    targets: &[MemoryStatement],
+) -> Result<StatementForgetSummary, String> {
+    if targets.is_empty() {
+        return Err("forget_memory facts must contain at least one fact".to_string());
+    }
+    let facts = store
+        .recall(namespace, "")
+        .map_err(|e| format!("recall before fact removal failed: {e}"))?;
+    let mut summary = StatementForgetSummary::default();
+    for mut fact in facts {
+        if fact.memory != LONGTERM_MEMORY
+            || memory_fact_graph(&fact) != LONGTERM_GRAPH
+            || fact.facts.is_empty()
+        {
+            continue;
+        }
+        let before = fact.facts.len();
+        fact.facts.retain(|statement| {
+            !targets
+                .iter()
+                .any(|target| statement_delete_matches(statement, target))
+        });
+        let removed = before - fact.facts.len();
+        if removed == 0 {
+            continue;
+        }
+        summary.statements_removed += removed;
+        if fact.facts.is_empty() {
+            match store.forget(namespace, &fact.id) {
+                Ok(true) => summary.records_deleted += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "fact removal delete failed after removing {} statements, updating {} records, deleting {} records: {e}",
+                        summary.statements_removed,
+                        summary.records_updated,
+                        summary.records_deleted
+                    ));
+                }
+            }
+        } else {
+            fact.turtle = None;
+            fact.content = canonical_fact_content(&fact)?;
+            if let Err(e) = store.store(fact) {
+                return Err(format!(
+                    "fact removal update failed after removing {} statements, updating {} records, deleting {} records: {e}",
+                    summary.statements_removed,
+                    summary.records_updated,
+                    summary.records_deleted
+                ));
+            }
+            summary.records_updated += 1;
+        }
+    }
+    Ok(summary)
 }
 
 /// Constructs a `store_memory` tool backed by the supplied
@@ -1311,8 +1433,10 @@ impl McpTool for ForgetMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Delete a memory fact by (namespace, id). Returns whether a \
-         fact was actually removed."
+        "Delete memory by (namespace, id), clear a longterm named graph, \
+         or remove specific RDF facts from the default longterm graph. \
+         Graph clear removes longterm memory records only, including the \
+         default longterm graph when that graph URI is supplied."
     }
 
     fn input_schema(&self) -> ToolInputSchema {
@@ -1321,7 +1445,30 @@ impl McpTool for ForgetMemoryTool {
                 "id",
                 json!({
                     "type": "string",
-                    "description": "Identifier of the memory to forget.",
+                    "description": "Identifier of the memory record to forget.",
+                }),
+            )
+            .with_property("facts", json!({
+                "type": "array",
+                "description": "Array of RDF facts to remove from the default longterm graph.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "predicate": {"type": "string"},
+                        "object": {"type": "string"},
+                        "objectType": {"type": "string", "enum": ["uri", "literal"], "default": "literal"},
+                        "datatype": {"type": "string"},
+                        "language": {"type": "string"}
+                    },
+                    "required": ["subject", "predicate", "object"]
+                }
+            }))
+            .with_property(
+                "graph",
+                json!({
+                    "type": "string",
+                    "description": "Longterm named graph URI to clear.",
                 }),
             )
             .with_property(
@@ -1332,18 +1479,64 @@ impl McpTool for ForgetMemoryTool {
                     "default": DEFAULT_NAMESPACE,
                 }),
             )
-            .require("id")
+            .with_one_of(vec![
+                json!({"required": ["id"]}),
+                json!({"required": ["graph"]}),
+                json!({"required": ["facts"]}),
+            ])
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
-        let Some(id) = invocation.get_str("id").map(str::to_string) else {
-            return ToolResult::error("missing `id` argument");
-        };
         let namespace = namespace_from(invocation);
+        let actions = [
+            invocation.get("id").is_some(),
+            invocation.get("graph").is_some(),
+            invocation.get("facts").is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        if actions != 1 {
+            return ToolResult::error("provide exactly one of: id, graph, facts");
+        }
+
+        if let Some(graph) = invocation.get_str("graph") {
+            return match forget_graph_memories(self.store.as_ref(), &namespace, graph) {
+                Ok(removed) => ToolResult::success(json!({
+                    "namespace": namespace,
+                    "graph": graph,
+                    "records_removed": removed,
+                })),
+                Err(message) => ToolResult::error(message),
+            };
+        } else if invocation.get("graph").is_some() {
+            return ToolResult::error("forget_memory graph must be a string");
+        }
+        if invocation.get("facts").is_some() {
+            let targets = match parse_memory_statements(invocation.get("facts"), None) {
+                Ok(targets) => targets,
+                Err(message) => return ToolResult::error(message),
+            };
+            return match forget_matching_statements(self.store.as_ref(), &namespace, &targets) {
+                Ok(summary) => ToolResult::success(json!({
+                    "namespace": namespace,
+                    "graph": LONGTERM_GRAPH,
+                    "statements_removed": summary.statements_removed,
+                    "records_updated": summary.records_updated,
+                    "records_deleted": summary.records_deleted,
+                })),
+                Err(message) => ToolResult::error(message),
+            };
+        }
+
+        let Some(id) = invocation.get_str("id").map(str::to_string) else {
+            return ToolResult::error("forget_memory id must be a string");
+        };
         match self.store.forget(&namespace, &id) {
             Ok(removed) => ToolResult::success(json!({
                 "namespace": namespace,
                 "id": id,
+                "deleted": removed,
                 "removed": removed,
             })),
             Err(e) => ToolResult::error(format!("forget failed: {e}")),
@@ -2560,6 +2753,7 @@ mod tests {
         );
         assert!(!res.is_error);
         assert_eq!(res.content["removed"], true);
+        assert_eq!(res.content["deleted"], true);
         assert_eq!(store.len("default").unwrap(), 0);
     }
 
@@ -2573,6 +2767,287 @@ mod tests {
         );
         assert!(!res.is_error);
         assert_eq!(res.content["removed"], false);
+        assert_eq!(res.content["deleted"], false);
+    }
+
+    #[test]
+    fn forget_memory_rejects_missing_action() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(store, "forget_memory", ToolInvocation::new());
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("provide exactly one"));
+    }
+
+    #[test]
+    fn forget_memory_schema_requires_exactly_one_action() {
+        let schema = forget_memory_tool(InMemoryMemoryStore::shared()).input_schema();
+        assert_eq!(schema.one_of.len(), 3);
+        assert_eq!(schema.one_of[0]["required"], serde_json::json!(["id"]));
+        assert_eq!(schema.one_of[1]["required"], serde_json::json!(["graph"]));
+        assert_eq!(schema.one_of[2]["required"], serde_json::json!(["facts"]));
+    }
+
+    #[test]
+    fn forget_memory_rejects_conflicting_actions() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store,
+            "forget_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("k"))
+                .with_arg("graph", serde_json::json!("cqels://memory/longterm")),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("exactly one"));
+    }
+
+    #[test]
+    fn forget_memory_rejects_empty_fact_removal() {
+        let store = InMemoryMemoryStore::shared();
+        let res = run_with_memory(
+            store,
+            "forget_memory",
+            ToolInvocation::new().with_arg("facts", serde_json::json!([])),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("at least one fact"));
+    }
+
+    #[test]
+    fn forget_memory_clears_named_graph_records() {
+        let store = InMemoryMemoryStore::shared();
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Default",
+                    "predicate": "http://ex/status",
+                    "object": "active"
+                }]),
+            ),
+        );
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/user/project"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Project",
+                        "predicate": "http://ex/status",
+                        "object": "active"
+                    }]),
+                ),
+        );
+
+        let res = run_with_memory(
+            store.clone(),
+            "forget_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/user/project")),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["records_removed"], 1);
+
+        let project = run_with_memory(
+            store.clone(),
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("graph", serde_json::json!("cqels://memory/user/project")),
+        );
+        assert!(!project.is_error, "{:?}", project.content);
+        assert_eq!(project.content["count"], 0);
+
+        let default = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://ex/status"
+                }),
+            ),
+        );
+        assert!(!default.is_error, "{:?}", default.content);
+        assert_eq!(default.content["count"], 1);
+        assert_eq!(default.content["facts"][0]["s"], "http://ex/Default");
+    }
+
+    #[test]
+    fn forget_memory_removes_matching_structured_facts() {
+        let store = InMemoryMemoryStore::shared();
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("bundle"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([
+                        {
+                            "subject": "http://ex/Alice",
+                            "predicate": "http://ex/likes",
+                            "object": "http://ex/Sensors",
+                            "objectType": "uri"
+                        },
+                        {
+                            "subject": "http://ex/Alice",
+                            "predicate": "http://ex/name",
+                            "object": "Alice",
+                            "datatype": "xsd:string",
+                            "language": "en"
+                        }
+                    ]),
+                ),
+        );
+
+        let res = run_with_memory(
+            store.clone(),
+            "forget_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Alice",
+                    "predicate": "http://ex/name",
+                    "object": "Alice",
+                    "datatype": "xsd:string",
+                    "language": "en"
+                }]),
+            ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["statements_removed"], 1);
+        assert_eq!(res.content["records_updated"], 1);
+        assert_eq!(res.content["records_deleted"], 0);
+
+        let stored = store.recall("default", "").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].facts.len(), 1);
+        assert_eq!(stored[0].facts[0].predicate, "http://ex/likes");
+
+        let name = run_with_memory(
+            store.clone(),
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://ex/name"
+                }),
+            ),
+        );
+        assert!(!name.is_error, "{:?}", name.content);
+        assert_eq!(name.content["count"], 0);
+
+        let likes = run_with_memory(
+            store,
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({
+                    "predicate": "http://ex/likes"
+                }),
+            ),
+        );
+        assert!(!likes.is_error, "{:?}", likes.content);
+        assert_eq!(likes.content["count"], 1);
+    }
+
+    #[test]
+    fn forget_memory_clears_stale_turtle_after_structured_fact_removal() {
+        let store = InMemoryMemoryStore::shared();
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("mixed"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Alice",
+                        "predicate": "http://ex/status",
+                        "object": "active"
+                    }]),
+                )
+                .with_arg(
+                    "turtle",
+                    serde_json::json!("<http://ex/Bob> <http://ex/status> \"active\" ."),
+                ),
+        );
+        let before = store.recall("default", "").unwrap();
+        assert!(before[0].turtle.is_some());
+        assert_eq!(before[0].facts.len(), 2);
+
+        let res = run_with_memory(
+            store.clone(),
+            "forget_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Alice",
+                    "predicate": "http://ex/status",
+                    "object": "active"
+                }]),
+            ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["statements_removed"], 1);
+
+        let after = store.recall("default", "").unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].facts.len(), 1);
+        assert_eq!(after[0].facts[0].subject, "http://ex/Bob");
+        assert!(after[0].turtle.is_none());
+        assert!(after[0].content.contains("\"turtle\":null"));
+        assert!(!after[0].content.contains("http://ex/Alice"));
+    }
+
+    #[test]
+    fn forget_memory_deletes_record_when_last_structured_fact_is_removed() {
+        let store = InMemoryMemoryStore::shared();
+        run_with_memory(
+            store.clone(),
+            "store_memory",
+            ToolInvocation::new()
+                .with_arg("id", serde_json::json!("single"))
+                .with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": "http://ex/Alice",
+                        "predicate": "http://ex/status",
+                        "object": "active"
+                    }]),
+                ),
+        );
+
+        let res = run_with_memory(
+            store.clone(),
+            "forget_memory",
+            ToolInvocation::new().with_arg(
+                "facts",
+                serde_json::json!([{
+                    "subject": "http://ex/Alice",
+                    "predicate": "http://ex/status",
+                    "object": "active"
+                }]),
+            ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["statements_removed"], 1);
+        assert_eq!(res.content["records_updated"], 0);
+        assert_eq!(res.content["records_deleted"], 1);
+        assert_eq!(store.len("default").unwrap(), 0);
     }
 
     #[test]

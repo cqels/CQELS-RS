@@ -39,6 +39,8 @@ pub struct ToolInputSchema {
     pub type_field: String,
     pub properties: serde_json::Map<String, JsonValue>,
     pub required: Vec<String>,
+    #[serde(rename = "oneOf", default, skip_serializing_if = "Vec::is_empty")]
+    pub one_of: Vec<JsonValue>,
 }
 
 impl ToolInputSchema {
@@ -47,6 +49,7 @@ impl ToolInputSchema {
             type_field: "object".into(),
             properties: serde_json::Map::new(),
             required: Vec::new(),
+            one_of: Vec::new(),
         }
     }
 
@@ -57,6 +60,11 @@ impl ToolInputSchema {
 
     pub fn require(mut self, name: &str) -> Self {
         self.required.push(name.into());
+        self
+    }
+
+    pub fn with_one_of(mut self, schemas: Vec<JsonValue>) -> Self {
+        self.one_of = schemas;
         self
     }
 }
