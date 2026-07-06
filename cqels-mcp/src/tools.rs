@@ -262,10 +262,27 @@ fn all_profiles() -> [ReasoningProfile; 7] {
     ]
 }
 
+const PROFILE_HINT: &str = "NONE, RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL, \
+                            RDFS_MINIMAL, RDFS_FULL, OWL2_QL, OWL2_EL, OWL2_RL";
+
+fn java_alpha8_aliases(profile: ReasoningProfile) -> &'static [&'static str] {
+    match profile {
+        ReasoningProfile::None => &["NONE"],
+        ReasoningProfile::Rdfs => &["RDFS_MINIMAL"],
+        ReasoningProfile::RdfsFull => &["RDFS_FULL"],
+        ReasoningProfile::OwlLite => &[],
+        ReasoningProfile::OwlQl => &["OWL2_QL"],
+        ReasoningProfile::Owl2El => &["OWL2_EL"],
+        ReasoningProfile::Owl2Rl => &["OWL2_RL"],
+        _ => &[],
+    }
+}
+
 fn profile_summary(profile: ReasoningProfile) -> serde_json::Value {
     let rules = profile.rules();
     json!({
         "name": profile.name(),
+        "java_alpha8_aliases": java_alpha8_aliases(profile),
         "description": profile.description(),
         "rule_count": rules.len(),
         "requires_recursive_inference": profile.requires_recursive_inference(),
@@ -278,10 +295,12 @@ impl McpTool for ReasoningProfilesTool {
     }
 
     fn description(&self) -> &str {
-        "List supported reasoning profiles (RDFS, OWL-QL, OWL2-EL, OWL2-RL, \
-         etc.) with their rule counts and capabilities, or describe one \
-         specific profile in detail. Returns metadata only — live inference \
-         against a working memory is a separate operation."
+        "List supported reasoning profiles (NONE, RDFS, RDFS-Full, OWL-Lite, \
+         OWL-QL, OWL2-EL, OWL2-RL) with their rule counts and capabilities, \
+         or describe one specific profile in detail. Accepts Java alpha.8 \
+         aliases RDFS_MINIMAL, RDFS_FULL, OWL2_QL, OWL2_EL, and OWL2_RL. Returns \
+         metadata only — live inference against a working memory is a \
+         separate operation."
     }
 
     fn input_schema(&self) -> ToolInputSchema {
@@ -289,13 +308,13 @@ impl McpTool for ReasoningProfilesTool {
             "profile",
             json!({
                 "type": "string",
-                "description": "Optional profile name (e.g., 'RDFS', 'OWL-QL', 'OWL2-RL'). If omitted, lists all profiles.",
+                "description": "Optional profile name. Accepts Rust profile names (NONE, RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL) and Java alpha.8 aliases (RDFS_MINIMAL, RDFS_FULL, OWL2_QL, OWL2_EL, OWL2_RL). If omitted, lists all profiles.",
             }),
         )
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
-        match invocation.get_str("profile") {
+        match invocation.get_str("profile").map(str::trim) {
             None | Some("") => {
                 let profiles: Vec<_> = all_profiles().iter().map(|p| profile_summary(*p)).collect();
                 ToolResult::success(json!({ "profiles": profiles }))
@@ -303,7 +322,7 @@ impl McpTool for ReasoningProfilesTool {
             Some(name) => match resolve_profile(name) {
                 Some(p) => ToolResult::success(profile_summary(p)),
                 None => ToolResult::error(format!(
-                    "unknown reasoning profile '{name}'; try one of: NONE, RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL"
+                    "unknown reasoning profile '{name}'; try one of: {PROFILE_HINT}"
                 )),
             },
         }
@@ -311,10 +330,19 @@ impl McpTool for ReasoningProfilesTool {
 }
 
 fn resolve_profile(name: &str) -> Option<ReasoningProfile> {
-    let normalized = name.to_uppercase().replace('_', "-");
+    let normalized = name.trim().to_uppercase().replace('_', "-");
+    match normalized.as_str() {
+        "RDFS-MINIMAL" => return Some(ReasoningProfile::Rdfs),
+        "OWL2-QL" => return Some(ReasoningProfile::OwlQl),
+        _ => {}
+    }
     all_profiles()
         .into_iter()
         .find(|p| p.name().to_uppercase() == normalized)
+}
+
+fn default_reason_profile() -> ReasoningProfile {
+    ReasoningProfile::RdfsFull
 }
 
 // ─── shacl_capabilities ──────────────────────────────────────────────
@@ -373,8 +401,10 @@ impl McpTool for ShaclCapabilitiesTool {
 /// profile (RDFS, OWL-RL, etc.).
 ///
 /// Inputs:
-/// - `profile`: profile name (`RDFS`, `RDFS-Full`, `OWL-Lite`,
-///   `OWL-QL`, `OWL2-EL`, `OWL2-RL`). Required.
+/// - `profile`: profile name (`NONE`, `RDFS`, `RDFS-Full`,
+///   `OWL-Lite`, `OWL-QL`, `OWL2-EL`, `OWL2-RL`) or Java alpha.8
+///   alias (`RDFS_MINIMAL`, `RDFS_FULL`, `OWL2_QL`, `OWL2_EL`,
+///   `OWL2_RL`). Defaults to Java's `RDFS_FULL`.
 /// - `triples`: array of `{s, p, o}` objects. `s` and `p` must be IRIs;
 ///   `o` is treated as an IRI if it parses as a URL (`http(s)://...`)
 ///   or starts with `<` / contains `:`, otherwise as a literal. Required.
@@ -402,9 +432,11 @@ impl McpTool for ReasonTool {
 
     fn description(&self) -> &str {
         "Run one-shot RETE inference over a triple set using a built-in \
-         reasoning profile (RDFS / OWL-Lite / OWL-QL / OWL2-EL / OWL2-RL). \
-         Inputs: `profile` (string) + `triples` (array of `{s, p, o}` \
-         objects). Returns inferred triples with rule provenance. \
+         reasoning profile (NONE / RDFS / RDFS-Full / OWL-Lite / OWL-QL / \
+         OWL2-EL / OWL2-RL). Inputs: optional `profile` (string; accepts \
+         Java alpha.8 aliases RDFS_MINIMAL, RDFS_FULL, OWL2_QL, OWL2_EL, and OWL2_RL; \
+         defaults to RDFS_FULL) + `triples` (array of `{s, p, o}` objects). \
+         Returns inferred triples with rule provenance. \
          Stateless — no engine wiring required."
     }
 
@@ -414,7 +446,8 @@ impl McpTool for ReasonTool {
                 "profile",
                 json!({
                     "type": "string",
-                    "description": "Reasoning profile name (RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL)."
+                    "default": "RDFS_FULL",
+                    "description": "Reasoning profile name. Accepts Rust profile names (NONE, RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL) and Java alpha.8 aliases (RDFS_MINIMAL, RDFS_FULL, OWL2_QL, OWL2_EL, OWL2_RL); defaults to RDFS_FULL."
                 }),
             )
             .with_property(
@@ -441,19 +474,24 @@ impl McpTool for ReasonTool {
                     "default": 0
                 }),
             )
-            .require("profile")
             .require("triples")
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
-        let Some(profile_name) = invocation.get_str("profile") else {
-            return ToolResult::error("missing `profile` argument");
-        };
-        let Some(profile) = resolve_profile(profile_name) else {
-            return ToolResult::error(format!(
-                "unknown reasoning profile '{profile_name}'; try one of: \
-                 RDFS, RDFS-Full, OWL-Lite, OWL-QL, OWL2-EL, OWL2-RL"
-            ));
+        let profile_arg = invocation
+            .get_str("profile")
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let profile = match profile_arg {
+            Some(profile_name) => match resolve_profile(profile_name) {
+                Some(profile) => profile,
+                None => {
+                    return ToolResult::error(format!(
+                        "unknown reasoning profile '{profile_name}'; try one of: {PROFILE_HINT}"
+                    ));
+                }
+            },
+            None => default_reason_profile(),
         };
         let Some(triples) = invocation.get("triples").and_then(|v| v.as_array()) else {
             return ToolResult::error("missing or non-array `triples` argument");
@@ -505,6 +543,7 @@ impl McpTool for ReasonTool {
 
         ToolResult::success(json!({
             "profile": profile.name(),
+            "profile_java_alpha8_aliases": java_alpha8_aliases(profile),
             "input_count": elements.len(),
             "inferred_count": inferred.len(),
             "inferred": inferred,
@@ -1718,8 +1757,17 @@ mod tests {
         // Every entry must include name + rule_count.
         for p in profiles {
             assert!(p["name"].is_string());
+            assert!(p["java_alpha8_aliases"].is_array());
             assert!(p["rule_count"].is_number());
         }
+        let rdfs_full = profiles
+            .iter()
+            .find(|p| p["name"] == "RDFS-Full")
+            .expect("RDFS-Full profile");
+        assert_eq!(
+            rdfs_full["java_alpha8_aliases"],
+            serde_json::json!(["RDFS_FULL"])
+        );
     }
 
     #[test]
@@ -1730,6 +1778,10 @@ mod tests {
         );
         assert!(!res.is_error);
         assert_eq!(res.content["name"], "RDFS");
+        assert_eq!(
+            res.content["java_alpha8_aliases"],
+            serde_json::json!(["RDFS_MINIMAL"])
+        );
         assert!(res.content["rule_count"].as_u64().unwrap() > 0);
     }
 
@@ -1744,6 +1796,35 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_profiles_accepts_java_alpha8_aliases() {
+        for (alias, canonical) in [
+            ("NONE", "None"),
+            ("RDFS_MINIMAL", "RDFS"),
+            ("RDFS_FULL", "RDFS-Full"),
+            ("OWL2_QL", "OWL-QL"),
+            ("OWL2_EL", "OWL2-EL"),
+            ("OWL2_RL", "OWL2-RL"),
+        ] {
+            let res = run(
+                "reasoning_profiles",
+                ToolInvocation::new().with_arg("profile", serde_json::json!(alias)),
+            );
+            assert!(!res.is_error, "{alias}: {:?}", res.content);
+            assert_eq!(res.content["name"], canonical, "{alias}");
+        }
+    }
+
+    #[test]
+    fn reasoning_profiles_trims_java_alpha8_aliases() {
+        let res = run(
+            "reasoning_profiles",
+            ToolInvocation::new().with_arg("profile", serde_json::json!(" RDFS_FULL ")),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["name"], "RDFS-Full");
+    }
+
+    #[test]
     fn reasoning_profiles_rejects_unknown_profile_with_hint() {
         let res = run(
             "reasoning_profiles",
@@ -1752,6 +1833,7 @@ mod tests {
         assert!(res.is_error);
         let msg = res.content["message"].as_str().unwrap();
         assert!(msg.contains("RDFS") && msg.contains("OWL2-RL"));
+        assert!(msg.contains("RDFS_FULL") && msg.contains("OWL2_QL"));
     }
 
     // ─── shacl_capabilities tests ────────────────────────────────────
@@ -1812,6 +1894,63 @@ mod tests {
     }
 
     #[test]
+    fn reason_defaults_profile_to_java_alpha8_rdfs_full() {
+        let res = run(
+            "reason",
+            ToolInvocation::new().with_arg("triples", serde_json::json!([])),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["profile"], "RDFS-Full");
+        assert_eq!(
+            res.content["profile_java_alpha8_aliases"],
+            serde_json::json!(["RDFS_FULL"])
+        );
+        assert_eq!(res.content["input_count"], 0);
+    }
+
+    #[test]
+    fn reason_accepts_java_alpha8_profile_aliases() {
+        for (alias, canonical) in [
+            ("NONE", "None"),
+            ("RDFS_MINIMAL", "RDFS"),
+            ("RDFS_FULL", "RDFS-Full"),
+            ("OWL2_QL", "OWL-QL"),
+            ("OWL2_EL", "OWL2-EL"),
+            ("OWL2_RL", "OWL2-RL"),
+        ] {
+            let res = run(
+                "reason",
+                ToolInvocation::new()
+                    .with_arg("profile", serde_json::json!(alias))
+                    .with_arg("triples", serde_json::json!([])),
+            );
+            assert!(!res.is_error, "{alias}: {:?}", res.content);
+            assert_eq!(res.content["profile"], canonical, "{alias}");
+        }
+    }
+
+    #[test]
+    fn reason_trims_java_alpha8_profile_aliases() {
+        let res = run(
+            "reason",
+            ToolInvocation::new()
+                .with_arg("profile", serde_json::json!(" OWL2_QL "))
+                .with_arg("triples", serde_json::json!([])),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["profile"], "OWL-QL");
+    }
+
+    #[test]
+    fn reason_schema_profile_is_optional_with_java_alpha8_default() {
+        let schema = reason_tool().input_schema();
+        assert!(!schema.required.contains(&"profile".to_string()));
+        assert!(schema.required.contains(&"triples".to_string()));
+        assert_eq!(schema.properties["profile"]["default"], "RDFS_FULL");
+        assert!(schema.properties["profile"].get("enum").is_none());
+    }
+
+    #[test]
     fn reason_rejects_unknown_profile() {
         let res = run(
             "reason",
@@ -1820,6 +1959,21 @@ mod tests {
                 .with_arg("triples", serde_json::json!([])),
         );
         assert!(res.is_error);
+    }
+
+    #[test]
+    fn reason_rejects_unadvertised_java_custom_profile() {
+        let res = run(
+            "reason",
+            ToolInvocation::new()
+                .with_arg("profile", serde_json::json!("CUSTOM"))
+                .with_arg("triples", serde_json::json!([])),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown reasoning profile"));
     }
 
     #[test]
