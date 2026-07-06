@@ -6,7 +6,7 @@
 //! line-delimited request batch. Asserts each of the 9 currently-shipped
 //! tools (`parse_query`, `query`, `analyze_query`, `reasoning_profiles`,
 //! `shacl_capabilities`, `reason`, `store_memory`, `recall_memory`,
-//! `forget_memory`) returns a non-error response with the expected
+//! `register_reasoning`, `forget_memory`) returns a non-error response with the expected
 //! shape. Catches regressions in the transport / registration order
 //! that per-tool unit tests still pass.
 //!
@@ -18,13 +18,15 @@ use std::sync::Arc;
 
 use cqels_mcp::{
     analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reason_tool,
-    reasoning_profiles_tool, recall_memory_tool, run_stdio, shacl_capabilities_tool,
-    store_memory_tool, InMemoryMemoryStore, MemoryStore, ToolRegistry,
+    reasoning_profiles_tool, recall_memory_tool_with_reasoning, register_reasoning_tool, run_stdio,
+    shacl_capabilities_tool, store_memory_tool, InMemoryMemoryStore, MemoryStore,
+    ReasoningRegistration, ToolRegistry,
 };
 use serde_json::{json, Value};
 
 fn make_full_registry() -> ToolRegistry {
     let memory: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+    let reasoning = ReasoningRegistration::shared();
     let mut reg = ToolRegistry::new();
     reg.install(parse_query_tool());
     reg.install(query_tool());
@@ -33,7 +35,8 @@ fn make_full_registry() -> ToolRegistry {
     reg.install(shacl_capabilities_tool());
     reg.install(reason_tool());
     reg.install(store_memory_tool(memory.clone()));
-    reg.install(recall_memory_tool(memory.clone()));
+    reg.install(register_reasoning_tool(memory.clone(), reasoning.clone()));
+    reg.install(recall_memory_tool_with_reasoning(memory.clone(), reasoning));
     reg.install(forget_memory_tool(memory));
     reg
 }
@@ -89,6 +92,7 @@ fn stdio_dispatches_every_tool_in_one_session() {
         "id": "alice-likes-stream",
         "content": "Alice prefers IoT sensor streams",
     });
+    let register_reasoning_args = json!({});
     let recall_args = json!({ "query": "IoT sensor" });
     let forget_args = json!({ "id": "alice-likes-stream" });
 
@@ -105,8 +109,9 @@ fn stdio_dispatches_every_tool_in_one_session() {
     lines.push(call_line(6, "shacl_capabilities", json!({})));
     lines.push(call_line(7, "reason", reason_args));
     lines.push(call_line(8, "store_memory", store_args));
-    lines.push(call_line(9, "recall_memory", recall_args));
-    lines.push(call_line(10, "forget_memory", forget_args));
+    lines.push(call_line(9, "register_reasoning", register_reasoning_args));
+    lines.push(call_line(10, "recall_memory", recall_args));
+    lines.push(call_line(11, "forget_memory", forget_args));
     let input = lines.join("\n") + "\n";
 
     let reg = make_full_registry();
@@ -120,8 +125,8 @@ fn stdio_dispatches_every_tool_in_one_session() {
         .map(|l| serde_json::from_str(l).expect("parse response"))
         .collect();
 
-    // 11 requests in, 11 responses out (every line had an `id`).
-    assert_eq!(responses.len(), 11, "one response per request");
+    // 12 requests in, 12 responses out (every line had an `id`).
+    assert_eq!(responses.len(), 12, "one response per request");
 
     // ─── initialize ──────────────────────────────────────────────
     assert_eq!(responses[0]["id"], 0);
@@ -134,7 +139,7 @@ fn stdio_dispatches_every_tool_in_one_session() {
     let tools = responses[1]["result"]["tools"]
         .as_array()
         .expect("tools array");
-    assert_eq!(tools.len(), 9, "9 tools registered");
+    assert_eq!(tools.len(), 10, "10 tools registered");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "parse_query",
@@ -144,6 +149,7 @@ fn stdio_dispatches_every_tool_in_one_session() {
         "shacl_capabilities",
         "reason",
         "store_memory",
+        "register_reasoning",
         "recall_memory",
         "forget_memory",
     ] {
@@ -214,7 +220,11 @@ fn stdio_dispatches_every_tool_in_one_session() {
     assert_eq!(stored["ok"], true);
     assert_eq!(stored["id"], "alice-likes-stream");
 
-    let recalled = assert_tool_ok(&responses[9], 9);
+    let registered = assert_tool_ok(&responses[9], 9);
+    assert_eq!(registered["registered"], true);
+    assert_eq!(registered["profile"], "RDFS-Full");
+
+    let recalled = assert_tool_ok(&responses[10], 10);
     assert_eq!(recalled["count"], 1, "exactly one fact matches the query");
     let facts = recalled["facts"].as_array().expect("facts array");
     assert_eq!(
@@ -223,7 +233,7 @@ fn stdio_dispatches_every_tool_in_one_session() {
     );
     assert_eq!(facts[0]["id"], "alice-likes-stream");
 
-    let forgotten = assert_tool_ok(&responses[10], 10);
+    let forgotten = assert_tool_ok(&responses[11], 11);
     assert_eq!(
         forgotten["removed"], true,
         "forget_memory should report the fact was removed"

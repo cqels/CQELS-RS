@@ -10,16 +10,18 @@
 //!   `reasoning_profiles`, `shacl_capabilities`, `reason`
 //!   (one-shot RETE inference).
 //! - Memory tools: `store_memory`, `recall_memory`, `forget_memory`,
-//!   backed by a [`SledMemoryStore`] when the `CQELS_MCP_MEMORY_DIR`
-//!   environment variable is set, otherwise an [`InMemoryMemoryStore`].
+//!   and `register_reasoning`, backed by a [`SledMemoryStore`] when
+//!   the `CQELS_MCP_MEMORY_DIR` environment variable is set, otherwise
+//!   an [`InMemoryMemoryStore`].
 
 use std::io::{self, BufReader};
 use std::sync::Arc;
 
 use cqels_mcp::{
     analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reason_tool,
-    reasoning_profiles_tool, recall_memory_tool, run_stdio, shacl_capabilities_tool,
-    store_memory_tool, InMemoryMemoryStore, MemoryStore, SledMemoryStore, ToolRegistry,
+    reasoning_profiles_tool, recall_memory_tool_with_reasoning, register_reasoning_tool, run_stdio,
+    shacl_capabilities_tool, store_memory_tool, InMemoryMemoryStore, MemoryStore,
+    ReasoningRegistration, SledMemoryStore, ToolRegistry,
 };
 
 fn main() -> io::Result<()> {
@@ -37,6 +39,7 @@ fn main() -> io::Result<()> {
         _ => Arc::new(InMemoryMemoryStore::new()),
     };
 
+    let reasoning = ReasoningRegistration::shared();
     let mut registry = ToolRegistry::new();
     registry.install(parse_query_tool());
     registry.install(query_tool());
@@ -45,7 +48,8 @@ fn main() -> io::Result<()> {
     registry.install(shacl_capabilities_tool());
     registry.install(reason_tool());
     registry.install(store_memory_tool(memory.clone()));
-    registry.install(recall_memory_tool(memory.clone()));
+    registry.install(register_reasoning_tool(memory.clone(), reasoning.clone()));
+    registry.install(recall_memory_tool_with_reasoning(memory.clone(), reasoning));
     registry.install(forget_memory_tool(memory));
 
     let stdin = io::stdin();

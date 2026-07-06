@@ -12,6 +12,7 @@
 //! follow-up that requires wiring `cqels_engine::CqelsEngine` into the
 //! tool handler.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,6 +24,7 @@ use cqels_model::{IriTerm, LiteralTerm, Statement, Term};
 use cqels_reasoning::{ReasoningConfig, ReasoningProfile, ReteNetwork};
 #[allow(deprecated)]
 use oxigraph::io::{GraphFormat, GraphParser};
+use parking_lot::RwLock;
 use serde_json::json;
 
 use crate::memory::{MemoryFact, MemoryPayload, MemoryStatement, MemoryStore};
@@ -345,6 +347,13 @@ fn default_reason_profile() -> ReasoningProfile {
     ReasoningProfile::RdfsFull
 }
 
+fn reasoning_max_recursion_depth(profile: ReasoningProfile) -> usize {
+    match profile {
+        ReasoningProfile::OwlLite | ReasoningProfile::Owl2Rl => 15,
+        _ => 10,
+    }
+}
+
 // ─── shacl_capabilities ──────────────────────────────────────────────
 
 /// Returns a [`ShaclCapabilitiesTool`] that describes the SHACL features
@@ -525,6 +534,7 @@ impl McpTool for ReasonTool {
             .rule_set(profile.rule_set())
             .default_window(Duration::from_secs(60 * 60 * 24 * 365))
             .enable_recursive_inference(profile.requires_recursive_inference())
+            .max_recursion_depth(reasoning_max_recursion_depth(profile))
             .build();
         let mut network = ReteNetwork::compile(config);
 
@@ -584,6 +594,8 @@ const DEFAULT_NAMESPACE: &str = "default";
 const LONGTERM_MEMORY: &str = "longterm";
 const SHORTTERM_MEMORY: &str = "shortterm";
 const LONGTERM_GRAPH: &str = "cqels://memory/longterm";
+const SCHEMA_GRAPH: &str = "cqels://memory/schema";
+const INFERRED_GRAPH: &str = "cqels://memory/inferred";
 const DEFAULT_STREAM: &str = "shortterm";
 const DEFAULT_RECALL_LIMIT: usize = 50;
 const MAX_RECALL_LIMIT: usize = 1000;
@@ -593,10 +605,79 @@ const RESERVED_GRAPHS: &[&str] = &[
     "cqels://memory/procedures",
     "cqels://memory/decisions",
     "cqels://memory/episodic",
-    "cqels://memory/inferred",
+    INFERRED_GRAPH,
 ];
 
 static GENERATED_MEMORY_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug)]
+struct ReasoningRegistrationState {
+    profile: ReasoningProfile,
+    schema_graph: String,
+    data_graph: String,
+    registered: bool,
+}
+
+impl Default for ReasoningRegistrationState {
+    fn default() -> Self {
+        Self {
+            profile: default_reason_profile(),
+            schema_graph: SCHEMA_GRAPH.to_string(),
+            data_graph: LONGTERM_GRAPH.to_string(),
+            registered: false,
+        }
+    }
+}
+
+/// Shared MCP reasoning registration used by `register_reasoning` and
+/// `recall_memory(entail:true)`.
+pub struct ReasoningRegistration {
+    inner: RwLock<HashMap<String, ReasoningRegistrationState>>,
+}
+
+impl ReasoningRegistration {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn shared() -> Arc<Self> {
+        Arc::new(Self::new())
+    }
+
+    fn current(&self, namespace: &str) -> ReasoningRegistrationState {
+        self.inner
+            .read()
+            .get(namespace)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn register(
+        &self,
+        namespace: String,
+        profile: ReasoningProfile,
+        schema_graph: String,
+        data_graph: String,
+    ) {
+        self.inner.write().insert(
+            namespace,
+            ReasoningRegistrationState {
+                profile,
+                schema_graph,
+                data_graph,
+                registered: true,
+            },
+        );
+    }
+}
+
+impl Default for ReasoningRegistration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 fn namespace_from(invocation: &ToolInvocation) -> String {
     invocation
@@ -1101,6 +1182,178 @@ fn statement_matches(statement: &MemoryStatement, pattern: &MemoryPattern) -> bo
             .is_none_or(|expected| expected == statement.object_type)
 }
 
+#[derive(Clone, Debug)]
+struct EntailedRow {
+    statement: MemoryStatement,
+    graph: String,
+    inferred: bool,
+}
+
+fn memory_statement_to_statement(statement: &MemoryStatement) -> Statement {
+    let mut literal = LiteralTerm::new(statement.object.clone());
+    if let Some(datatype) = &statement.datatype {
+        literal = literal.with_datatype(datatype.clone());
+    }
+    if let Some(language) = &statement.language {
+        literal = literal.with_language(language.clone());
+    }
+    Statement::new(
+        Term::Iri(IriTerm::new(statement.subject.clone())),
+        IriTerm::new(statement.predicate.clone()),
+        if statement.object_type == "uri" {
+            Term::Iri(IriTerm::new(statement.object.clone()))
+        } else {
+            Term::Literal(literal)
+        },
+    )
+}
+
+fn statement_to_memory_statement(statement: &Statement) -> MemoryStatement {
+    let (object, object_type, datatype, language) = match &statement.object {
+        Term::Iri(iri) => (iri.as_str().to_string(), "uri".to_string(), None, None),
+        Term::Literal(literal) => (
+            literal.value().to_string(),
+            "literal".to_string(),
+            literal.datatype().map(str::to_string),
+            literal.language().map(str::to_string),
+        ),
+        other => (other.to_string(), "literal".to_string(), None, None),
+    };
+    MemoryStatement {
+        subject: term_to_string(&statement.subject),
+        predicate: statement.predicate.as_str().to_string(),
+        object,
+        object_type,
+        datatype,
+        language,
+        meta: None,
+    }
+}
+
+fn graph_statements(
+    store: &dyn MemoryStore,
+    namespace: &str,
+    graph: &str,
+) -> Result<Vec<Statement>, String> {
+    let facts = store
+        .recall(namespace, "")
+        .map_err(|e| format!("recall for reasoning graph '{graph}' failed: {e}"))?;
+    Ok(facts
+        .iter()
+        .filter(|fact| fact.memory == LONGTERM_MEMORY && memory_fact_graph(fact) == graph)
+        .flat_map(|fact| fact.facts.iter().map(memory_statement_to_statement))
+        .collect())
+}
+
+fn infer_memory_view(
+    store: &dyn MemoryStore,
+    namespace: &str,
+    config: &ReasoningRegistrationState,
+    include_asserted: bool,
+) -> Result<Vec<EntailedRow>, String> {
+    let data_statements = graph_statements(store, namespace, &config.data_graph)?;
+    let schema_statements = if config.schema_graph == config.data_graph {
+        Vec::new()
+    } else {
+        graph_statements(store, namespace, &config.schema_graph)?
+    };
+
+    let reasoning_config = ReasoningConfig::builder()
+        .rule_set(config.profile.rule_set())
+        .default_window(Duration::from_secs(60 * 60 * 24 * 365))
+        .enable_recursive_inference(config.profile.requires_recursive_inference())
+        .max_recursion_depth(reasoning_max_recursion_depth(config.profile))
+        .build();
+    let mut network = ReteNetwork::compile(reasoning_config);
+
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+    for statement in &schema_statements {
+        let element = RdfStreamElement::new(statement.clone(), 0);
+        let _ = network.process_element(&element);
+    }
+    if include_asserted {
+        for statement in &data_statements {
+            if seen.insert(statement.clone()) {
+                rows.push(EntailedRow {
+                    statement: statement_to_memory_statement(statement),
+                    graph: config.data_graph.clone(),
+                    inferred: false,
+                });
+            }
+        }
+    }
+    for statement in &data_statements {
+        let element = RdfStreamElement::new(statement.clone(), 0);
+        for inferred in network.process_element(&element) {
+            if seen.insert(inferred.statement.clone()) {
+                rows.push(EntailedRow {
+                    statement: statement_to_memory_statement(&inferred.statement),
+                    graph: INFERRED_GRAPH.to_string(),
+                    inferred: true,
+                });
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn entailed_pattern_rows(
+    store: &dyn MemoryStore,
+    namespace: &str,
+    config: &ReasoningRegistrationState,
+    pattern: &MemoryPattern,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut rows: Vec<_> = infer_memory_view(store, namespace, config, true)?
+        .into_iter()
+        .filter(|row| statement_matches(&row.statement, pattern))
+        .collect();
+    rows.sort_by(|a, b| {
+        (
+            &a.statement.subject,
+            &a.statement.predicate,
+            &a.statement.object,
+            &a.graph,
+        )
+            .cmp(&(
+                &b.statement.subject,
+                &b.statement.predicate,
+                &b.statement.object,
+                &b.graph,
+            ))
+    });
+    rows.truncate(limit);
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let mut out = serde_json::Map::new();
+            out.insert("s".to_string(), json!(row.statement.subject));
+            out.insert("p".to_string(), json!(row.statement.predicate));
+            out.insert("o".to_string(), json!(row.statement.object));
+            out.insert("objectType".to_string(), json!(row.statement.object_type));
+            if let Some(datatype) = row.statement.datatype {
+                out.insert("datatype".to_string(), json!(datatype));
+            }
+            if let Some(language) = row.statement.language {
+                out.insert("language".to_string(), json!(language));
+            }
+            out.insert("graph".to_string(), json!(row.graph));
+            out.insert("inferred".to_string(), json!(row.inferred));
+            serde_json::Value::Object(out)
+        })
+        .collect())
+}
+
+fn optional_graph_arg(invocation: &ToolInvocation, key: &str, default: &str) -> String {
+    invocation
+        .get_str(key)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
+        .to_string()
+}
+
 fn statement_delete_matches(statement: &MemoryStatement, target: &MemoryStatement) -> bool {
     statement.subject == target.subject
         && statement.predicate == target.predicate
@@ -1217,6 +1470,128 @@ fn forget_matching_statements(
         }
     }
     Ok(summary)
+}
+
+/// Constructs a `register_reasoning` tool backed by the supplied memory
+/// store and shared reasoning registration.
+pub fn register_reasoning_tool(
+    store: Arc<dyn MemoryStore>,
+    registration: Arc<ReasoningRegistration>,
+) -> RegisterReasoningTool {
+    RegisterReasoningTool {
+        store,
+        registration,
+    }
+}
+
+pub struct RegisterReasoningTool {
+    store: Arc<dyn MemoryStore>,
+    registration: Arc<ReasoningRegistration>,
+}
+
+impl McpTool for RegisterReasoningTool {
+    fn name(&self) -> &str {
+        "register_reasoning"
+    }
+
+    fn description(&self) -> &str {
+        "Enable ontology-aware memory recall. Stores the active reasoning \
+         profile plus longterm schema/data graph configuration; recall_memory with \
+         entail:true then recomputes asserted plus entailed pattern rows on \
+         demand."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property(
+                "namespace",
+                json!({
+                    "type": "string",
+                    "default": DEFAULT_NAMESPACE,
+                    "description": "Logical memory namespace for this reasoning registration.",
+                }),
+            )
+            .with_property(
+                "profile",
+                json!({
+                    "type": "string",
+                    "default": "RDFS_FULL",
+                    "description": "Reasoning profile. Accepts Rust profile names and Java alpha.8 aliases; defaults to the current profile, initially RDFS_FULL."
+                }),
+            )
+            .with_property(
+                "schemaGraph",
+                json!({
+                    "type": "string",
+                    "default": SCHEMA_GRAPH,
+                    "description": "Longterm named graph holding ontology/schema triples."
+                }),
+            )
+            .with_property(
+                "dataGraph",
+                json!({
+                    "type": "string",
+                    "default": LONGTERM_GRAPH,
+                    "description": "Longterm named graph holding asserted data triples."
+                }),
+            )
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let current = self.registration.current(&namespace);
+        let profile = match invocation.get_str("profile").map(str::trim) {
+            Some("") | None => current.profile,
+            Some(name) => match resolve_profile(name) {
+                Some(profile) => profile,
+                None => {
+                    return ToolResult::error(format!(
+                        "unknown reasoning profile '{name}'; try one of: {PROFILE_HINT}"
+                    ));
+                }
+            },
+        };
+        let schema_graph = optional_graph_arg(invocation, "schemaGraph", SCHEMA_GRAPH);
+        let data_graph = optional_graph_arg(invocation, "dataGraph", LONGTERM_GRAPH);
+        if let Err(message) = validate_recall_graph(&schema_graph) {
+            return ToolResult::error(message);
+        }
+        if let Err(message) = validate_recall_graph(&data_graph) {
+            return ToolResult::error(message);
+        }
+        let candidate = ReasoningRegistrationState {
+            profile,
+            schema_graph: schema_graph.clone(),
+            data_graph: data_graph.clone(),
+            registered: true,
+        };
+        let entailed_count =
+            match infer_memory_view(self.store.as_ref(), &namespace, &candidate, true) {
+                Ok(rows) => rows.into_iter().filter(|row| row.inferred).count(),
+                Err(message) => return ToolResult::error(message),
+            };
+        self.registration.register(
+            namespace.clone(),
+            profile,
+            schema_graph.clone(),
+            data_graph.clone(),
+        );
+        ToolResult::success(json!({
+            "ok": true,
+            "registered": true,
+            "namespace": namespace,
+            "profile": profile.name(),
+            "profile_java_alpha8_aliases": java_alpha8_aliases(profile),
+            "schemaGraph": schema_graph,
+            "dataGraph": data_graph,
+            "inferredGraph": INFERRED_GRAPH,
+            "entailed_count": entailed_count,
+            "message": format!(
+                "Reasoning registered with profile {}; {entailed_count} entailed statement(s) over {data_graph}.",
+                profile.name()
+            ),
+        }))
+    }
 }
 
 /// Constructs a `store_memory` tool backed by the supplied
@@ -1347,11 +1722,27 @@ impl McpTool for StoreMemoryTool {
 /// Constructs a `recall_memory` tool backed by the supplied
 /// [`MemoryStore`].
 pub fn recall_memory_tool(store: Arc<dyn MemoryStore>) -> RecallMemoryTool {
-    RecallMemoryTool { store }
+    RecallMemoryTool {
+        store,
+        registration: None,
+    }
+}
+
+/// Constructs a `recall_memory` tool with ontology-aware recall support
+/// through a shared [`ReasoningRegistration`].
+pub fn recall_memory_tool_with_reasoning(
+    store: Arc<dyn MemoryStore>,
+    registration: Arc<ReasoningRegistration>,
+) -> RecallMemoryTool {
+    RecallMemoryTool {
+        store,
+        registration: Some(registration),
+    }
 }
 
 pub struct RecallMemoryTool {
     store: Arc<dyn MemoryStore>,
+    registration: Option<Arc<ReasoningRegistration>>,
 }
 
 impl McpTool for RecallMemoryTool {
@@ -1363,7 +1754,11 @@ impl McpTool for RecallMemoryTool {
         "Retrieve memories from a namespace, optionally filtered by text \
          substring or alpha.8-style RDF subject/predicate/object pattern. \
          Legacy text/no-pattern recall returns memory records sorted by id; \
-         pattern or graph recall returns Java-style RDF statement rows."
+         pattern or graph recall returns Java-style RDF statement rows. \
+         With register_reasoning, pattern recall may set entail:true to \
+         return asserted plus entailed rows; graph filters are rejected in \
+         entail mode and statement metadata is not emitted for entail-mode \
+         asserted or inferred rows."
     }
 
     fn input_schema(&self) -> ToolInputSchema {
@@ -1396,6 +1791,11 @@ impl McpTool for RecallMemoryTool {
                 "type": "string",
                 "description": "Optional named graph URI to search for pattern recall. Defaults to all non-reserved longterm RDF memory graphs.",
             }))
+            .with_property("entail", json!({
+                "type": "boolean",
+                "default": false,
+                "description": "When true, pattern recall returns asserted plus entailed triples from the active register_reasoning configuration.",
+            }))
             .with_property("format", json!({
                 "type": "string",
                 "enum": ["json"],
@@ -1417,6 +1817,10 @@ impl McpTool for RecallMemoryTool {
             .or_else(|| invocation.get_str("text"))
             .unwrap_or("")
             .to_string();
+        let entail = invocation
+            .get("entail")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         let pattern =
             match parse_recall_pattern(invocation.get("pattern"), invocation.get_str("graph")) {
                 Ok(pattern) => pattern,
@@ -1426,6 +1830,56 @@ impl McpTool for RecallMemoryTool {
             Ok(format) => format,
             Err(message) => return ToolResult::error(message),
         };
+        if entail {
+            if !query.is_empty() {
+                return ToolResult::error(
+                    "entail:true applies only to plain pattern recall, not query/text recall",
+                );
+            }
+            let Some(pattern) = pattern.as_ref() else {
+                return ToolResult::error("entail:true requires a pattern");
+            };
+            if pattern.graph.is_some() {
+                return ToolResult::error(
+                    "entail:true uses the active register_reasoning dataGraph; omit graph filters",
+                );
+            }
+            let Some(registration) = self.registration.as_ref() else {
+                return ToolResult::error(
+                    "Ontology-aware recall is not available — call register_reasoning first",
+                );
+            };
+            let config = registration.current(&namespace);
+            if !config.registered {
+                return ToolResult::error(
+                    "Ontology-aware recall is not available — call register_reasoning first",
+                );
+            }
+            let limit = recall_limit(invocation);
+            let rows = match entailed_pattern_rows(
+                self.store.as_ref(),
+                &namespace,
+                &config,
+                pattern,
+                limit,
+            ) {
+                Ok(rows) => rows,
+                Err(message) => return ToolResult::error(message),
+            };
+            return ToolResult::success(json!({
+                "namespace": namespace,
+                "query": query,
+                "graph": config.data_graph,
+                "schemaGraph": config.schema_graph,
+                "inferredGraph": INFERRED_GRAPH,
+                "profile": config.profile.name(),
+                "profile_java_alpha8_aliases": java_alpha8_aliases(config.profile),
+                "entail": true,
+                "format": format,
+                "count": rows.len(),
+                "facts": rows,
+            }));
+        }
         match self.store.recall(&namespace, &query) {
             Ok(facts) => {
                 let limit = recall_limit(invocation);
@@ -1946,6 +2400,7 @@ mod tests {
         let schema = reason_tool().input_schema();
         assert!(!schema.required.contains(&"profile".to_string()));
         assert!(schema.required.contains(&"triples".to_string()));
+        assert!(!schema.properties.contains_key("namespace"));
         assert_eq!(schema.properties["profile"]["default"], "RDFS_FULL");
         assert!(schema.properties["profile"].get("enum").is_none());
     }
@@ -2012,6 +2467,47 @@ mod tests {
         reg.install(recall_memory_tool(store.clone()));
         reg.install(forget_memory_tool(store));
         reg.call(name, &args).expect("dispatch")
+    }
+
+    fn run_with_memory_and_reasoning(
+        store: Arc<InMemoryMemoryStore>,
+        registration: Arc<ReasoningRegistration>,
+        name: &str,
+        args: ToolInvocation,
+    ) -> ToolResult {
+        let mut reg = ToolRegistry::new();
+        reg.install(store_memory_tool(store.clone()));
+        reg.install(register_reasoning_tool(store.clone(), registration.clone()));
+        reg.install(recall_memory_tool_with_reasoning(
+            store.clone(),
+            registration,
+        ));
+        reg.install(forget_memory_tool(store));
+        reg.call(name, &args).expect("dispatch")
+    }
+
+    fn store_fact(
+        store: Arc<InMemoryMemoryStore>,
+        graph: Option<&str>,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        object_type: &str,
+    ) {
+        let mut args = ToolInvocation::new().with_arg(
+            "facts",
+            serde_json::json!([{
+                "subject": subject,
+                "predicate": predicate,
+                "object": object,
+                "objectType": object_type
+            }]),
+        );
+        if let Some(graph) = graph {
+            args = args.with_arg("graph", serde_json::json!(graph));
+        }
+        let res = run_with_memory(store, "store_memory", args);
+        assert!(!res.is_error, "{:?}", res.content);
     }
 
     #[test]
@@ -2811,6 +3307,329 @@ mod tests {
             .as_array()
             .expect("format enum");
         assert_eq!(format_enum.as_slice(), &[serde_json::json!("json")]);
+    }
+
+    #[test]
+    fn register_reasoning_defaults_to_java_alpha8_rdfs_full() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        let res = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "register_reasoning",
+            ToolInvocation::new(),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["registered"], true);
+        assert_eq!(res.content["namespace"], DEFAULT_NAMESPACE);
+        assert_eq!(res.content["profile"], "RDFS-Full");
+        assert_eq!(res.content["schemaGraph"], SCHEMA_GRAPH);
+        assert_eq!(res.content["dataGraph"], LONGTERM_GRAPH);
+    }
+
+    #[test]
+    fn register_reasoning_schema_advertises_alpha8_defaults() {
+        let schema = register_reasoning_tool(
+            InMemoryMemoryStore::shared(),
+            ReasoningRegistration::shared(),
+        )
+        .input_schema();
+        assert_eq!(schema.properties["namespace"]["default"], DEFAULT_NAMESPACE);
+        assert_eq!(schema.properties["profile"]["default"], "RDFS_FULL");
+        assert_eq!(schema.properties["schemaGraph"]["default"], SCHEMA_GRAPH);
+        assert_eq!(schema.properties["dataGraph"]["default"], LONGTERM_GRAPH);
+    }
+
+    #[test]
+    fn register_reasoning_blank_graph_args_reset_to_defaults() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        let res = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "register_reasoning",
+            ToolInvocation::new()
+                .with_arg("schemaGraph", serde_json::json!(""))
+                .with_arg("dataGraph", serde_json::json!(" ")),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["schemaGraph"], SCHEMA_GRAPH);
+        assert_eq!(res.content["dataGraph"], LONGTERM_GRAPH);
+    }
+
+    #[test]
+    fn register_reasoning_rejects_unadvertised_java_custom_profile() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        let res = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "register_reasoning",
+            ToolInvocation::new().with_arg("profile", serde_json::json!("CUSTOM")),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown reasoning profile"));
+    }
+
+    #[test]
+    fn register_reasoning_rejects_reserved_graphs() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        let res = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "register_reasoning",
+            ToolInvocation::new().with_arg("dataGraph", serde_json::json!(INFERRED_GRAPH)),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("reserved"));
+    }
+
+    #[test]
+    fn recall_memory_entail_requires_register_reasoning() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        let res = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("entail", serde_json::json!(true))
+                .with_arg("pattern", serde_json::json!({"subject": "http://ex/Alice"})),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("call register_reasoning first"));
+    }
+
+    #[test]
+    fn recall_memory_entail_rejects_text_mode() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        let register = run_with_memory_and_reasoning(
+            store.clone(),
+            registration.clone(),
+            "register_reasoning",
+            ToolInvocation::new(),
+        );
+        assert!(!register.is_error, "{:?}", register.content);
+
+        let res = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("entail", serde_json::json!(true))
+                .with_arg("text", serde_json::json!("Alice"))
+                .with_arg("pattern", serde_json::json!({"subject": "http://ex/Alice"})),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("plain pattern recall"));
+    }
+
+    #[test]
+    fn recall_memory_entail_rejects_graph_filters() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        let register = run_with_memory_and_reasoning(
+            store.clone(),
+            registration.clone(),
+            "register_reasoning",
+            ToolInvocation::new(),
+        );
+        assert!(!register.is_error, "{:?}", register.content);
+
+        let res = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("entail", serde_json::json!(true))
+                .with_arg("graph", serde_json::json!(LONGTERM_GRAPH))
+                .with_arg("pattern", serde_json::json!({"subject": "http://ex/Alice"})),
+        );
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("omit graph filters"));
+    }
+
+    #[test]
+    fn recall_memory_entail_returns_asserted_plus_inferred_rows() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        store_fact(
+            store.clone(),
+            Some(SCHEMA_GRAPH),
+            "http://ex/Person",
+            "rdfs:subClassOf",
+            "http://ex/Agent",
+            "uri",
+        );
+        store_fact(
+            store.clone(),
+            None,
+            "http://ex/Alice",
+            "rdf:type",
+            "http://ex/Person",
+            "uri",
+        );
+
+        let register = run_with_memory_and_reasoning(
+            store.clone(),
+            registration.clone(),
+            "register_reasoning",
+            ToolInvocation::new().with_arg("profile", serde_json::json!("RDFS_FULL")),
+        );
+        assert!(!register.is_error, "{:?}", register.content);
+        assert_eq!(register.content["profile"], "RDFS-Full");
+        assert!(register.content["entailed_count"].as_u64().unwrap() >= 1);
+
+        let inferred = run_with_memory_and_reasoning(
+            store.clone(),
+            registration.clone(),
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("entail", serde_json::json!(true))
+                .with_arg(
+                    "pattern",
+                    serde_json::json!({
+                        "subject": "http://ex/Alice",
+                        "predicate": "rdf:type",
+                        "object": "http://ex/Agent",
+                        "objectType": "uri"
+                    }),
+                ),
+        );
+        assert!(!inferred.is_error, "{:?}", inferred.content);
+        assert_eq!(inferred.content["entail"], true);
+        assert_eq!(inferred.content["profile"], "RDFS-Full");
+        assert_eq!(inferred.content["count"], 1);
+        assert_eq!(inferred.content["facts"][0]["s"], "http://ex/Alice");
+        assert_eq!(inferred.content["facts"][0]["o"], "http://ex/Agent");
+        assert_eq!(inferred.content["facts"][0]["inferred"], true);
+
+        let all_types = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("entail", serde_json::json!(true))
+                .with_arg(
+                    "pattern",
+                    serde_json::json!({
+                        "subject": "http://ex/Alice",
+                        "predicate": "rdf:type"
+                    }),
+                ),
+        );
+        assert!(!all_types.is_error, "{:?}", all_types.content);
+        let facts = all_types.content["facts"].as_array().expect("facts");
+        assert!(facts
+            .iter()
+            .any(|row| row["o"] == "http://ex/Person" && row["inferred"] == false));
+        assert!(facts
+            .iter()
+            .any(|row| row["o"] == "http://ex/Agent" && row["inferred"] == true));
+    }
+
+    #[test]
+    fn recall_memory_entail_computes_two_hop_rdfs_closure() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        store_fact(
+            store.clone(),
+            Some(SCHEMA_GRAPH),
+            "http://ex/Person",
+            "rdfs:subClassOf",
+            "http://ex/Human",
+            "uri",
+        );
+        store_fact(
+            store.clone(),
+            Some(SCHEMA_GRAPH),
+            "http://ex/Human",
+            "rdfs:subClassOf",
+            "http://ex/Agent",
+            "uri",
+        );
+        store_fact(
+            store.clone(),
+            None,
+            "http://ex/Alice",
+            "rdf:type",
+            "http://ex/Person",
+            "uri",
+        );
+        let register = run_with_memory_and_reasoning(
+            store.clone(),
+            registration.clone(),
+            "register_reasoning",
+            ToolInvocation::new().with_arg("profile", serde_json::json!("RDFS_FULL")),
+        );
+        assert!(!register.is_error, "{:?}", register.content);
+
+        let res = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("entail", serde_json::json!(true))
+                .with_arg(
+                    "pattern",
+                    serde_json::json!({
+                        "subject": "http://ex/Alice",
+                        "predicate": "rdf:type",
+                        "object": "http://ex/Agent",
+                        "objectType": "uri"
+                    }),
+                ),
+        );
+        assert!(!res.is_error, "{:?}", res.content);
+        assert_eq!(res.content["count"], 1);
+        assert_eq!(res.content["facts"][0]["o"], "http://ex/Agent");
+        assert_eq!(res.content["facts"][0]["inferred"], true);
+    }
+
+    #[test]
+    fn recall_memory_entail_registration_is_namespace_scoped() {
+        let store = InMemoryMemoryStore::shared();
+        let registration = ReasoningRegistration::shared();
+        let register = run_with_memory_and_reasoning(
+            store.clone(),
+            registration.clone(),
+            "register_reasoning",
+            ToolInvocation::new().with_arg("namespace", serde_json::json!("tenant-a")),
+        );
+        assert!(!register.is_error, "{:?}", register.content);
+        assert_eq!(register.content["namespace"], "tenant-a");
+
+        let other_namespace = run_with_memory_and_reasoning(
+            store,
+            registration,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("namespace", serde_json::json!("tenant-b"))
+                .with_arg("entail", serde_json::json!(true))
+                .with_arg("pattern", serde_json::json!({"subject": "http://ex/Alice"})),
+        );
+        assert!(other_namespace.is_error);
+        assert!(other_namespace.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("call register_reasoning first"));
     }
 
     #[test]

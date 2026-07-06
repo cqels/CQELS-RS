@@ -25,6 +25,7 @@
 //! | `store_memory`     | ✅ implemented (in-memory / sled) |
 //! | `recall_memory`    | ✅ implemented (in-memory / sled) |
 //! | `forget_memory`    | ✅ implemented (in-memory / sled) |
+//! | `register_reasoning` | ✅ implemented (memory entailment config) |
 //! | `register_stream_query` | ✅ implemented (engine-bound; see [`stream_query`]) |
 //! | `list_stream_queries` | ✅ implemented (engine-bound) |
 //! | `unregister_stream_query` | ✅ implemented (engine-bound) |
@@ -53,7 +54,8 @@ pub use stream_query::{
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{
     analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reason_tool,
-    reasoning_profiles_tool, recall_memory_tool, shacl_capabilities_tool, store_memory_tool,
+    reasoning_profiles_tool, recall_memory_tool, recall_memory_tool_with_reasoning,
+    register_reasoning_tool, shacl_capabilities_tool, store_memory_tool, ReasoningRegistration,
 };
 pub use transport::{handle_request, run_stdio, PROTOCOL_VERSION, SERVER_NAME};
 pub use validate::{validate_tool, validate_tool_with_solver, ValidateTool};
