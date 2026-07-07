@@ -27,6 +27,7 @@
 //! | `forget_memory`    | ✅ implemented (in-memory / sled) |
 //! | `register_reasoning` | ✅ implemented (memory entailment config) |
 //! | `register_stream_query` | ✅ implemented (engine-bound; see [`stream_query`]) |
+//! | `forget_stream_query` | ✅ implemented (Java-compatible engine-bound alias) |
 //! | `list_stream_queries` | ✅ implemented (engine-bound) |
 //! | `unregister_stream_query` | ✅ implemented (engine-bound) |
 //! | `poll_stream_results` | ✅ implemented (engine-bound) |
@@ -47,9 +48,10 @@ pub use memory::{InMemoryMemoryStore, MemoryError, MemoryFact, MemoryStore, Sled
 pub use registry::{McpError, ToolRegistry};
 pub use solve::{solve_tool, solve_tool_with_solver, SolveTool};
 pub use stream_query::{
-    list_stream_queries_tool, poll_stream_results_tool, register_stream_query_tool,
-    unregister_stream_query_tool, ListStreamQueriesTool, PollStreamResultsTool,
-    RegisterStreamQueryTool, StreamQueryHub, UnregisterStreamQueryTool,
+    forget_stream_query_tool, list_stream_queries_tool, poll_stream_results_tool,
+    register_stream_query_tool, unregister_stream_query_tool, ForgetStreamQueryTool,
+    ListStreamQueriesTool, PollStreamResultsTool, RegisterStreamQueryTool, StreamQueryHub,
+    UnregisterStreamQueryTool,
 };
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{

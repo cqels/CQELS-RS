@@ -15,6 +15,8 @@
 //!   hub's buffer.
 //! - [`list_stream_queries_tool`] — returns the IDs of currently
 //!   registered queries.
+//! - [`forget_stream_query_tool`] — Java-compatible alias that cancels
+//!   a query by `queryId` and reports `status: "forgotten"`.
 //! - [`unregister_stream_query_tool`] — cancels and removes a query by
 //!   ID.
 //! - [`poll_stream_results_tool`] — drains the buffered results for a
@@ -31,6 +33,7 @@
 //! let hub = StreamQueryHub::new(Arc::new(engine), rt.handle().clone());
 //! let mut reg = ToolRegistry::new();
 //! reg.install(register_stream_query_tool(hub.clone()));
+//! reg.install(forget_stream_query_tool(hub.clone()));
 //! reg.install(list_stream_queries_tool(hub.clone()));
 //! reg.install(unregister_stream_query_tool(hub.clone()));
 //! reg.install(poll_stream_results_tool(hub));
@@ -41,7 +44,7 @@ use std::sync::Arc;
 
 use cqels_engine::listener::listener_from_fn;
 use cqels_engine::CqelsEngine;
-use cqels_model::BindingSet;
+use cqels_model::{BindingSet, CqelsError};
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::runtime::Handle;
@@ -112,6 +115,16 @@ impl StreamQueryHub {
     fn forget_results(&self, query_id: &str) {
         self.inner.results.lock().remove(query_id);
     }
+
+    fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
+        let engine = self.inner.engine.clone();
+        let id_for_async = query_id.to_string();
+        self.inner
+            .handle
+            .block_on(async move { engine.unregister_query(&id_for_async).await })?;
+        self.forget_results(query_id);
+        Ok(())
+    }
 }
 
 // ─── register_stream_query ──────────────────────────────────────────
@@ -133,8 +146,8 @@ impl McpTool for RegisterStreamQueryTool {
     fn description(&self) -> &str {
         "Register a CqelsQL query against the live engine and stream its \
          results into an internal buffer. Returns the assigned `query_id`, \
-         which callers use with `poll_stream_results` and \
-         `unregister_stream_query`."
+         which callers use with `poll_stream_results`, \
+         `forget_stream_query`, or `unregister_stream_query`."
     }
 
     fn input_schema(&self) -> ToolInputSchema {
@@ -226,6 +239,81 @@ impl McpTool for ListStreamQueriesTool {
     }
 }
 
+// ─── forget_stream_query ────────────────────────────────────────────
+
+/// Constructs the Java-compatible `forget_stream_query` MCP tool.
+pub fn forget_stream_query_tool(hub: StreamQueryHub) -> ForgetStreamQueryTool {
+    ForgetStreamQueryTool { hub }
+}
+
+pub struct ForgetStreamQueryTool {
+    hub: StreamQueryHub,
+}
+
+impl McpTool for ForgetStreamQueryTool {
+    fn name(&self) -> &str {
+        "forget_stream_query"
+    }
+
+    fn description(&self) -> &str {
+        "Stop and deregister a continuous query previously created with \
+         register_stream_query: unregisters its engine subscription and \
+         discards its result buffer."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property(
+                "queryId",
+                json!({
+                    "type": "string",
+                    "description": "ID of the stream query to stop and deregister (as returned by register_stream_query)"
+                }),
+            )
+            .require("queryId")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let query_id = match query_id_for_forget(invocation) {
+            Some(query_id) => query_id,
+            None => return ToolResult::error("Missing required parameter: queryId"),
+        };
+
+        match self.hub.unregister_query(&query_id) {
+            Ok(()) => ToolResult::success(json!({
+                "queryId": query_id,
+                "status": "forgotten",
+            })),
+            Err(e) if stream_query_not_found(&e) => {
+                ToolResult::error(format!("No such registered stream query: {query_id}"))
+            }
+            Err(e) => ToolResult::error(format!("forget_stream_query failed: {e}")),
+        }
+    }
+}
+
+fn query_id_for_forget(invocation: &ToolInvocation) -> Option<String> {
+    // A present-but-invalid Java key should fail like Java rather than
+    // falling through to the Rust snake_case compatibility alias.
+    if invocation.get("queryId").is_some() {
+        return invocation
+            .get_str("queryId")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+    }
+
+    invocation
+        .get_str("query_id")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn stream_query_not_found(error: &CqelsError) -> bool {
+    matches!(error, CqelsError::Stream { message } if message.contains("not found"))
+}
+
 // ─── unregister_stream_query ────────────────────────────────────────
 
 /// Constructs the `unregister_stream_query` MCP tool.
@@ -263,21 +351,12 @@ impl McpTool for UnregisterStreamQueryTool {
         let Some(query_id) = invocation.get_str("query_id").map(str::to_string) else {
             return ToolResult::error("missing `query_id` argument");
         };
-        let engine = self.hub.inner.engine.clone();
-        let id_for_async = query_id.clone();
-        let result = self
-            .hub
-            .inner
-            .handle
-            .block_on(async move { engine.unregister_query(&id_for_async).await });
-        match result {
-            Ok(()) => {
-                self.hub.forget_results(&query_id);
-                ToolResult::success(json!({
-                    "ok": true,
-                    "query_id": query_id,
-                }))
-            }
+
+        match self.hub.unregister_query(&query_id) {
+            Ok(()) => ToolResult::success(json!({
+                "ok": true,
+                "query_id": query_id,
+            })),
             Err(e) => ToolResult::error(format!("unregister failed: {e}")),
         }
     }
@@ -390,6 +469,7 @@ mod tests {
     fn install_all(hub: &StreamQueryHub) -> ToolRegistry {
         let mut reg = ToolRegistry::new();
         reg.install(register_stream_query_tool(hub.clone()));
+        reg.install(forget_stream_query_tool(hub.clone()));
         reg.install(list_stream_queries_tool(hub.clone()));
         reg.install(unregister_stream_query_tool(hub.clone()));
         reg.install(poll_stream_results_tool(hub.clone()));
@@ -473,6 +553,97 @@ mod tests {
     }
 
     #[test]
+    fn forget_stream_query_accepts_java_query_id_and_returns_forgotten_status() {
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
+        let reg = install_all(&hub);
+        let res = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new().with_arg("query", json!(sample_query())),
+            )
+            .expect("dispatch");
+        let id = res.content["query_id"].as_str().unwrap().to_string();
+
+        let forget = reg
+            .call(
+                "forget_stream_query",
+                &ToolInvocation::new().with_arg("queryId", json!(id.clone())),
+            )
+            .expect("dispatch");
+        assert!(!forget.is_error, "forget failed: {:?}", forget.content);
+        assert_eq!(forget.content["queryId"], id);
+        assert_eq!(forget.content["status"], "forgotten");
+
+        let list = reg
+            .call("list_stream_queries", &ToolInvocation::new())
+            .expect("dispatch");
+        let ids: Vec<String> = list.content["query_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(!ids.contains(&id), "id {id} should be gone from {ids:?}");
+        assert_eq!(hub.buffered_count(&id), 0);
+    }
+
+    #[test]
+    fn forget_stream_query_second_call_reports_unknown_id() {
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
+        let reg = install_all(&hub);
+        let res = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new().with_arg("query", json!(sample_query())),
+            )
+            .expect("dispatch");
+        let id = res.content["query_id"].as_str().unwrap().to_string();
+
+        let first = reg
+            .call(
+                "forget_stream_query",
+                &ToolInvocation::new().with_arg("queryId", json!(id.clone())),
+            )
+            .expect("dispatch");
+        assert!(!first.is_error, "first forget failed: {:?}", first.content);
+
+        let second = reg
+            .call(
+                "forget_stream_query",
+                &ToolInvocation::new().with_arg("queryId", json!(id.clone())),
+            )
+            .expect("dispatch");
+        assert!(second.is_error);
+        assert_eq!(
+            second.content["message"],
+            format!("No such registered stream query: {id}")
+        );
+    }
+
+    #[test]
+    fn forget_stream_query_accepts_snake_case_alias() {
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
+        let reg = install_all(&hub);
+        let res = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new().with_arg("query", json!(sample_query())),
+            )
+            .expect("dispatch");
+        let id = res.content["query_id"].as_str().unwrap().to_string();
+
+        let forget = reg
+            .call(
+                "forget_stream_query",
+                &ToolInvocation::new().with_arg("query_id", json!(id.clone())),
+            )
+            .expect("dispatch");
+        assert!(!forget.is_error, "forget failed: {:?}", forget.content);
+        assert_eq!(forget.content["queryId"], id);
+        assert_eq!(forget.content["status"], "forgotten");
+    }
+
+    #[test]
     fn poll_returns_empty_for_fresh_registration() {
         let (hub, _rt) = fresh_hub_with_sensors_stream();
         let reg = install_all(&hub);
@@ -533,6 +704,45 @@ mod tests {
     }
 
     #[test]
+    fn forget_stream_query_rejects_missing_or_blank_query_id() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        for invocation in [
+            ToolInvocation::new(),
+            ToolInvocation::new().with_arg("queryId", json!("")),
+            ToolInvocation::new().with_arg("queryId", json!("   ")),
+            ToolInvocation::new().with_arg("query_id", json!("")),
+            ToolInvocation::new().with_arg("query_id", json!("   ")),
+        ] {
+            let res = reg
+                .call("forget_stream_query", &invocation)
+                .expect("dispatch");
+            assert!(res.is_error);
+            assert_eq!(
+                res.content["message"],
+                "Missing required parameter: queryId"
+            );
+        }
+    }
+
+    #[test]
+    fn forget_stream_query_rejects_unknown_id_with_java_message() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        let res = reg
+            .call(
+                "forget_stream_query",
+                &ToolInvocation::new().with_arg("queryId", json!("nonexistent-id")),
+            )
+            .expect("dispatch");
+        assert!(res.is_error);
+        assert_eq!(
+            res.content["message"],
+            "No such registered stream query: nonexistent-id"
+        );
+    }
+
+    #[test]
     fn drain_results_drains_buffer_in_fifo_order() {
         // Test the buffer plumbing directly without depending on engine
         // result delivery timing.
@@ -555,6 +765,7 @@ mod tests {
         let reg = install_all(&hub);
         for name in [
             "register_stream_query",
+            "forget_stream_query",
             "list_stream_queries",
             "unregister_stream_query",
             "poll_stream_results",
@@ -563,5 +774,12 @@ mod tests {
             let schema = tool.input_schema();
             assert_eq!(schema.type_field, "object");
         }
+
+        let forget_schema = reg
+            .get("forget_stream_query")
+            .expect("forget_stream_query installed")
+            .input_schema();
+        assert!(forget_schema.properties.contains_key("queryId"));
+        assert_eq!(forget_schema.required, vec!["queryId".to_string()]);
     }
 }
