@@ -1,6 +1,6 @@
 //! Entry-point binary for the `cqels-mcp` stdio server.
 //!
-//! Run with `cargo run -p cqels-mcp --bin cqels-mcp-server` and pipe
+//! Run with `cargo run -p cqels-mcp --bin cqels_mcp_server` and pipe
 //! line-delimited JSON-RPC requests on stdin. Responses are written to
 //! stdout, one per line.
 //!
@@ -8,7 +8,7 @@
 //!
 //! - Stateless: `parse_query`, `query`, `analyze_query`,
 //!   `reasoning_profiles`, `shacl_capabilities`, `reason`
-//!   (one-shot RETE inference).
+//!   (one-shot RETE inference), and `solve` (direct ASP solve).
 //! - Memory tools: `store_memory`, `recall_memory`, `forget_memory`,
 //!   and `register_reasoning`, backed by a [`SledMemoryStore`] when
 //!   the `CQELS_MCP_MEMORY_DIR` environment variable is set, otherwise
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use cqels_mcp::{
     analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reason_tool,
     reasoning_profiles_tool, recall_memory_tool_with_reasoning, register_reasoning_tool, run_stdio,
-    shacl_capabilities_tool, store_memory_tool, InMemoryMemoryStore, MemoryStore,
+    shacl_capabilities_tool, solve_tool, store_memory_tool, InMemoryMemoryStore, MemoryStore,
     ReasoningRegistration, SledMemoryStore, ToolRegistry,
 };
 
@@ -47,6 +47,7 @@ fn main() -> io::Result<()> {
     registry.install(reasoning_profiles_tool());
     registry.install(shacl_capabilities_tool());
     registry.install(reason_tool());
+    registry.install(solve_tool());
     registry.install(store_memory_tool(memory.clone()));
     registry.install(register_reasoning_tool(memory.clone(), reasoning.clone()));
     registry.install(recall_memory_tool_with_reasoning(memory.clone(), reasoning));
