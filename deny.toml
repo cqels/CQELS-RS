@@ -9,9 +9,16 @@ version = 2
 # with no native-link conflicts with oxigraph; dropping it would mean
 # losing the sled storage backend entirely. Revisit when sled 1.0
 # lands (currently in alpha) — its dep graph drops both of these.
+# `quick-xml 0.37.x` is pulled through `oxigraph 0.4.x` XML paths
+# (`oxrdfxml` and `sparesults`); CQELS currently feeds Oxigraph
+# Turtle/TriG fixtures and does not expose RDF/XML or SPARQL Results XML
+# ingestion. Revisit this exception when the Oxigraph/RDF I/O stack can
+# move quick-xml to the fixed 0.41+ line.
 ignore = [
     "RUSTSEC-2025-0057", # fxhash — unmaintained
     "RUSTSEC-2024-0384", # instant — unmaintained
+    "RUSTSEC-2026-0194", # quick-xml via oxigraph 0.4 — RDF/XML duplicate-attribute DoS
+    "RUSTSEC-2026-0195", # quick-xml via oxigraph 0.4 — NsReader namespace allocation DoS
 ]
 
 [licenses]
