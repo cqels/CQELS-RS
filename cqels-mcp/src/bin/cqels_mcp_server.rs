@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use cqels_engine::CqelsEngine;
 use cqels_mcp::{
-    analyze_query_tool, assemble_context_tool, cqels_prompt_registry,
+    analyze_query_tool, assemble_context_tool_with_access_policy, cqels_prompt_registry,
     cqels_resource_registry_with_streams, explain_decision_tool, forget_memory_tool,
     forget_stream_query_tool, list_procedures_tool, list_stream_queries_tool, parse_query_tool,
     poll_stream_results_tool, query_tool, reason_tool, reasoning_profiles_tool,
@@ -106,8 +106,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     registry.install(recall_episodes_tool(memory.clone()));
     registry.install(explain_decision_tool(memory.clone()));
     registry.install(recall_decisions_tool(memory.clone()));
-    registry.install(set_access_policy_tool(memory.clone(), access_policy));
-    registry.install(assemble_context_tool(memory));
+    registry.install(set_access_policy_tool(
+        memory.clone(),
+        access_policy.clone(),
+    ));
+    registry.install(assemble_context_tool_with_access_policy(
+        memory,
+        access_policy,
+    ));
     let prompts = cqels_prompt_registry();
     let resources = cqels_resource_registry_with_streams(stream_hub);
 

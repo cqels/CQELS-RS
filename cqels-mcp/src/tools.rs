@@ -1232,12 +1232,16 @@ fn meta_access_labels(meta: Option<&JsonValue>) -> Vec<String> {
     Vec::new()
 }
 
-fn statement_visible_to_role(statement: &MemoryStatement, grants: &HashSet<String>) -> bool {
-    let labels = meta_access_labels(statement.meta.as_ref());
+fn labels_visible_to_role(meta: Option<&JsonValue>, grants: &HashSet<String>) -> Option<bool> {
+    let labels = meta_access_labels(meta);
     if labels.is_empty() {
-        return grants.contains("*");
+        return None;
     }
-    labels.iter().any(|label| grants.contains(label))
+    Some(labels.iter().any(|label| grants.contains(label)))
+}
+
+fn statement_visible_to_role(statement: &MemoryStatement, grants: &HashSet<String>) -> bool {
+    labels_visible_to_role(statement.meta.as_ref(), grants).unwrap_or_else(|| grants.contains("*"))
 }
 
 fn policy_grants_for_recall(
@@ -1277,6 +1281,73 @@ fn policy_filter_facts_for_pattern(
     }
     facts.retain(|fact| !fact.facts.is_empty());
     facts
+}
+
+fn policy_grants_for_context(
+    access_policy: Option<&Arc<AccessPolicyRegistry>>,
+    namespace: &str,
+    role: Option<&str>,
+) -> Result<Option<HashSet<String>>, String> {
+    let Some(policy) = access_policy else {
+        return Ok(None);
+    };
+    if !policy.is_active(namespace) {
+        return Ok(None);
+    }
+    let Some(role) = role.map(str::trim).filter(|role| !role.is_empty()) else {
+        return Err("Access policy is active; assemble_context requires role".to_string());
+    };
+    Ok(Some(policy.labels_for(namespace, role).unwrap_or_default()))
+}
+
+fn context_content_from_visible_fact(fact: &MemoryFact) -> String {
+    serde_json::to_string(&json!({
+        "memory": fact.memory,
+        "graph": fact.graph,
+        "stream": fact.stream,
+        "facts": fact.facts,
+        "meta": fact.meta,
+    }))
+    .unwrap_or_else(|_| fact.content.clone())
+}
+
+fn policy_filter_facts_for_context(
+    facts: Vec<MemoryFact>,
+    grants: Option<&HashSet<String>>,
+) -> Vec<MemoryFact> {
+    let Some(grants) = grants else {
+        return facts;
+    };
+    facts
+        .into_iter()
+        .filter_map(|mut fact| {
+            let record_visibility = labels_visible_to_role(fact.meta.as_ref(), grants);
+            if record_visibility == Some(false) {
+                return None;
+            }
+
+            let had_statements = !fact.facts.is_empty();
+            if had_statements {
+                let allow_unlabelled = record_visibility == Some(true) || grants.contains("*");
+                fact.facts.retain(|statement| {
+                    labels_visible_to_role(statement.meta.as_ref(), grants)
+                        .unwrap_or(allow_unlabelled)
+                });
+                if fact.facts.is_empty() {
+                    return None;
+                }
+                fact.turtle = None;
+                fact.content = context_content_from_visible_fact(&fact);
+                return Some(fact);
+            }
+
+            if record_visibility == Some(true) || grants.contains("*") {
+                Some(fact)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn statement_matches(statement: &MemoryStatement, pattern: &MemoryPattern) -> bool {
@@ -2455,9 +2526,16 @@ fn execute_bound_procedure(
         "shacl" => {
             Ok(json!({"ok": true, "name": name, "kind": kind, "shapes": body, "options": options}))
         }
-        "sparql" | "cypher" => Ok(
-            json!({"ok": true, "name": name, "kind": kind, "dry_run": true, "query": body, "options": options}),
-        ),
+        "sparql" | "cypher" => Ok(json!({
+            "ok": true,
+            "name": name,
+            "kind": kind,
+            "dry_run": true,
+            "executed": false,
+            "note": format!("{kind} execution is not yet supported; returning a dry-run procedure payload"),
+            "query": body,
+            "options": options,
+        })),
         _ => Err(format!("kind must be one of {PROCEDURE_KINDS:?}")),
     }
 }
@@ -2467,6 +2545,7 @@ fn maybe_record_decision(
     namespace: &str,
     invocation: &ToolInvocation,
     procedure: &ProcedureRecord,
+    started_ms: i64,
     result: JsonValue,
 ) -> Result<Option<String>, String> {
     if procedure.kind == "cep" {
@@ -2491,7 +2570,6 @@ fn maybe_record_decision(
     if inputs.is_empty() && policy.as_deref().is_none_or(str::is_empty) && !override_flag {
         return Ok(None);
     }
-    let started_ms = current_time_ms();
     let ended_ms = current_time_ms();
     let seq = GENERATED_DECISION_ID.fetch_add(1, Ordering::Relaxed);
     let id = format!("cqels://memory/decision/{ended_ms}-{seq}");
@@ -2708,6 +2786,7 @@ impl McpTool for RunProcedureTool {
             Ok(bound) => bound,
             Err(message) => return ToolResult::error(message),
         };
+        let started_ms = current_time_ms();
         let result =
             match execute_bound_procedure(&procedure.kind, &procedure.name, &bound, options) {
                 Ok(result) => result,
@@ -2718,6 +2797,7 @@ impl McpTool for RunProcedureTool {
             &namespace,
             invocation,
             &procedure,
+            started_ms,
             result.clone(),
         ) {
             Ok(Some(decision)) => ToolResult::success(json!({
@@ -3189,13 +3269,28 @@ impl McpTool for SetAccessPolicyTool {
     }
 }
 
-/// Constructs Java alpha.8's `assemble_context` tool.
+/// Constructs Java alpha.8's `assemble_context` tool without governance.
 pub fn assemble_context_tool(store: Arc<dyn MemoryStore>) -> AssembleContextTool {
-    AssembleContextTool { store }
+    AssembleContextTool {
+        store,
+        access_policy: None,
+    }
+}
+
+/// Constructs Java alpha.8's `assemble_context` tool with access-policy enforcement.
+pub fn assemble_context_tool_with_access_policy(
+    store: Arc<dyn MemoryStore>,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> AssembleContextTool {
+    AssembleContextTool {
+        store,
+        access_policy: Some(access_policy),
+    }
 }
 
 pub struct AssembleContextTool {
     store: Arc<dyn MemoryStore>,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 impl McpTool for AssembleContextTool {
@@ -3214,6 +3309,10 @@ impl McpTool for AssembleContextTool {
             .with_property("limit", json!({"type": "integer", "default": 10}))
             .with_property("neighbors", json!({"type": "integer", "default": 5}))
             .with_property("budget", json!({"type": "integer", "default": 4000, "maximum": 200000}))
+            .with_property("role", json!({
+                "type": "string",
+                "description": "Caller role for alpha.8 access-policy enforcement. Required once set_access_policy has activated governance.",
+            }))
             .with_property("namespace", json!({"type": "string", "default": DEFAULT_NAMESPACE}))
             .require("task")
     }
@@ -3235,11 +3334,20 @@ impl McpTool for AssembleContextTool {
             .and_then(JsonValue::as_i64)
             .map(|n| n.clamp(1, 200_000) as usize)
             .unwrap_or(4000);
+        let grants = match policy_grants_for_context(
+            self.access_policy.as_ref(),
+            &namespace,
+            invocation.get_str("role"),
+        ) {
+            Ok(grants) => grants,
+            Err(message) => return ToolResult::error(message),
+        };
         let task_lower = task.to_lowercase();
         let records = match self.store.recall(&namespace, "") {
             Ok(records) => records,
             Err(e) => return ToolResult::error(format!("assemble_context recall failed: {e}")),
         };
+        let records = policy_filter_facts_for_context(records, grants.as_ref());
         let mut semantic = records
             .iter()
             .filter(|fact| {
@@ -5369,7 +5477,11 @@ mod tests {
         reg.install(recall_decisions_tool(store.clone()));
         reg.install(record_event_tool(store.clone()));
         reg.install(recall_episodes_tool(store.clone()));
-        reg.install(set_access_policy_tool(store, access_policy));
+        reg.install(set_access_policy_tool(store.clone(), access_policy.clone()));
+        reg.install(assemble_context_tool_with_access_policy(
+            store,
+            access_policy,
+        ));
         reg.call(name, &args).expect("dispatch")
     }
 
@@ -5530,5 +5642,64 @@ mod tests {
         let rows = visible.content["facts"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["s"], "http://ex/Visible");
+    }
+
+    #[test]
+    fn assemble_context_respects_active_access_policy() {
+        let store = InMemoryMemoryStore::shared();
+        let policy = AccessPolicyRegistry::shared();
+        for (subject, label) in [("http://ex/Visible", "team"), ("http://ex/Hidden", "other")] {
+            let stored = run_alpha8_memory(
+                store.clone(),
+                policy.clone(),
+                "store_memory",
+                ToolInvocation::new().with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": subject,
+                        "predicate": "http://ex/status",
+                        "object": "active",
+                        "meta": {"accessLabel": label}
+                    }]),
+                ),
+            );
+            assert!(!stored.is_error, "{:?}", stored.content);
+        }
+        let set = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "set_access_policy",
+            ToolInvocation::new()
+                .with_arg("role", serde_json::json!("analyst"))
+                .with_arg("labels", serde_json::json!(["team"])),
+        );
+        assert!(!set.is_error, "{:?}", set.content);
+
+        let missing_role = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "assemble_context",
+            ToolInvocation::new().with_arg("task", serde_json::json!("active")),
+        );
+        assert!(missing_role.is_error);
+        assert_eq!(
+            missing_role.content["message"],
+            "Access policy is active; assemble_context requires role"
+        );
+
+        let visible = run_alpha8_memory(
+            store,
+            policy,
+            "assemble_context",
+            ToolInvocation::new()
+                .with_arg("task", serde_json::json!("active"))
+                .with_arg("role", serde_json::json!("analyst")),
+        );
+        assert!(!visible.is_error, "{:?}", visible.content);
+        let semantic = visible.content["semantic"].as_array().unwrap();
+        assert_eq!(semantic.len(), 1);
+        assert_eq!(semantic[0]["facts"][0]["subject"], "http://ex/Visible");
+        let rendered = serde_json::to_string(&visible.content).unwrap();
+        assert!(!rendered.contains("http://ex/Hidden"));
     }
 }

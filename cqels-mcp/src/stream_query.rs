@@ -39,7 +39,7 @@
 //! reg.install(poll_stream_results_tool(hub));
 //! ```
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use cqels_engine::listener::listener_from_fn;
@@ -64,6 +64,7 @@ struct HubInner {
     handle: Handle,
     results: Mutex<HashMap<String, VecDeque<BindingSet>>>,
     registrations: Mutex<HashMap<String, StreamRegistration>>,
+    pending_registrations: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +90,7 @@ impl StreamQueryHub {
                 handle,
                 results: Mutex::new(HashMap::new()),
                 registrations: Mutex::new(HashMap::new()),
+                pending_registrations: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -279,10 +281,13 @@ impl McpTool for RegisterStreamQueryTool {
             .filter(|id| !id.is_empty())
             .map(str::to_string);
         if let Some(query_id) = requested_query_id.as_ref() {
-            if self.hub.inner.registrations.lock().contains_key(query_id) {
+            let registrations = self.hub.inner.registrations.lock();
+            let mut pending = self.hub.inner.pending_registrations.lock();
+            if registrations.contains_key(query_id) || !pending.insert(query_id.clone()) {
                 return ToolResult::error(format!("Query already registered: {query_id}"));
             }
         }
+        let reserved_query_id = requested_query_id.clone();
         let buffer_size = invocation
             .get("bufferSize")
             .and_then(|value| value.as_i64())
@@ -315,7 +320,6 @@ impl McpTool for RegisterStreamQueryTool {
             });
             let engine_query_id = engine.register_cqelsql_query(&query, listener).await?;
             let query_id = requested_query_id.unwrap_or_else(|| engine_query_id.clone());
-            *id_cell.lock() = Some(query_id.clone());
             hub_for_listener.inner.registrations.lock().insert(
                 query_id.clone(),
                 StreamRegistration {
@@ -323,8 +327,16 @@ impl McpTool for RegisterStreamQueryTool {
                     buffer_size,
                 },
             );
+            *id_cell.lock() = Some(query_id.clone());
             Ok::<(String, String), cqels_model::CqelsError>((query_id, engine_query_id))
         });
+        if let Some(query_id) = reserved_query_id {
+            self.hub
+                .inner
+                .pending_registrations
+                .lock()
+                .remove(&query_id);
+        }
 
         match registration {
             Ok((query_id, engine_query_id)) => ToolResult::success(json!({

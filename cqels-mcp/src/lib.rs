@@ -81,13 +81,13 @@ pub use stream_query::{
 };
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{
-    analyze_query_tool, assemble_context_tool, explain_decision_tool, forget_memory_tool,
-    list_procedures_tool, parse_query_tool, query_tool, reason_tool, reasoning_profiles_tool,
-    recall_decisions_tool, recall_episodes_tool, recall_memory_tool,
-    recall_memory_tool_with_reasoning, recall_memory_tool_with_reasoning_and_access_policy,
-    record_event_tool, register_reasoning_tool, run_procedure_tool, save_procedure_tool,
-    set_access_policy_tool, shacl_capabilities_tool, store_memory_tool, AccessPolicyRegistry,
-    ReasoningRegistration,
+    analyze_query_tool, assemble_context_tool, assemble_context_tool_with_access_policy,
+    explain_decision_tool, forget_memory_tool, list_procedures_tool, parse_query_tool, query_tool,
+    reason_tool, reasoning_profiles_tool, recall_decisions_tool, recall_episodes_tool,
+    recall_memory_tool, recall_memory_tool_with_reasoning,
+    recall_memory_tool_with_reasoning_and_access_policy, record_event_tool,
+    register_reasoning_tool, run_procedure_tool, save_procedure_tool, set_access_policy_tool,
+    shacl_capabilities_tool, store_memory_tool, AccessPolicyRegistry, ReasoningRegistration,
 };
 pub use transport::{
     handle_request, handle_request_with_prompts, handle_request_with_prompts_and_resources,
