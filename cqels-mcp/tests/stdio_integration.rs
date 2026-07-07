@@ -3,13 +3,11 @@
 //!
 //! Mirrors the registration order of `src/bin/cqels_mcp_server.rs` and
 //! drives the registries through `run_stdio_with_prompts_and_resources` with a real
-//! line-delimited request batch. Asserts each of the 12 default stdio
-//! tools (`parse_query`, `query`, `analyze_query`, `reasoning_profiles`,
-//! `shacl_capabilities`, `reason`, `validate`, `solve`, `store_memory`,
-//! `recall_memory`, `register_reasoning`, `forget_memory`) returns a
-//! non-error response with the expected shape, and verifies
-//! Java-compatible CQELS prompt templates and resources are advertised
-//! and renderable.
+//! line-delimited request batch. Asserts the default 26-tool stdio surface
+//! is advertised, exercises representative stateless, memory, stream,
+//! procedure, episodic, decision, governance, and working-memory calls,
+//! and verifies Java-compatible CQELS prompt templates and resources are
+//! advertised and renderable.
 //! Catches regressions in the transport / registration order that
 //! per-tool, per-prompt, or per-resource unit tests still pass.
 //!
@@ -21,14 +19,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cqels_asp::{AnswerSet, AspError, AspSolver, Atom};
+use cqels_engine::CqelsEngine;
 use cqels_mcp::{
-    analyze_query_tool, cqels_prompt_registry, cqels_resource_registry, forget_memory_tool,
-    parse_query_tool, query_tool, reason_tool, reasoning_profiles_tool,
-    recall_memory_tool_with_reasoning, register_reasoning_tool,
-    run_stdio_with_prompts_and_resources, shacl_capabilities_tool, solve_tool_with_solver,
-    store_memory_tool, validate_tool_with_solver, InMemoryMemoryStore, MemoryStore,
-    ReasoningRegistration, ToolRegistry, RESOURCE_KG_STATS, RESOURCE_QUERY_RESULTS_TEMPLATE,
-    RESOURCE_REASONING,
+    analyze_query_tool, assemble_context_tool, cqels_prompt_registry,
+    cqels_resource_registry_with_streams, explain_decision_tool, forget_memory_tool,
+    forget_stream_query_tool, list_procedures_tool, list_stream_queries_tool, parse_query_tool,
+    poll_stream_results_tool, query_tool, reason_tool, reasoning_profiles_tool,
+    recall_decisions_tool, recall_episodes_tool,
+    recall_memory_tool_with_reasoning_and_access_policy, record_event_tool,
+    register_reasoning_tool, register_stream_query_tool, run_procedure_tool,
+    run_stdio_with_prompts_and_resources, save_procedure_tool, set_access_policy_tool,
+    shacl_capabilities_tool, solve_tool_with_solver, store_memory_tool,
+    unregister_stream_query_tool, validate_tool_with_solver, AccessPolicyRegistry,
+    InMemoryMemoryStore, MemoryStore, ReasoningRegistration, StreamQueryHub, ToolRegistry,
+    RESOURCE_KG_STATS, RESOURCE_QUERY_RESULTS_TEMPLATE, RESOURCE_REASONING,
 };
 use serde_json::{json, Value};
 
@@ -50,15 +54,21 @@ impl AspSolver for StdioValidateMockSolver {
     }
 }
 
-fn make_full_registry() -> ToolRegistry {
+fn make_full_registry(stream_hub: StreamQueryHub) -> ToolRegistry {
     let memory: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
     let reasoning = ReasoningRegistration::shared();
+    let access_policy = AccessPolicyRegistry::shared();
     let validate_solver: Arc<dyn AspSolver> = Arc::new(StdioValidateMockSolver);
     let solve_solver: Arc<dyn AspSolver> = Arc::new(StdioSolveMockSolver);
     let mut reg = ToolRegistry::new();
     reg.install(parse_query_tool());
     reg.install(query_tool());
     reg.install(analyze_query_tool());
+    reg.install(register_stream_query_tool(stream_hub.clone()));
+    reg.install(forget_stream_query_tool(stream_hub.clone()));
+    reg.install(list_stream_queries_tool(stream_hub.clone()));
+    reg.install(unregister_stream_query_tool(stream_hub.clone()));
+    reg.install(poll_stream_results_tool(stream_hub));
     reg.install(reasoning_profiles_tool());
     reg.install(shacl_capabilities_tool());
     reg.install(reason_tool());
@@ -66,8 +76,21 @@ fn make_full_registry() -> ToolRegistry {
     reg.install(solve_tool_with_solver(solve_solver));
     reg.install(store_memory_tool(memory.clone()));
     reg.install(register_reasoning_tool(memory.clone(), reasoning.clone()));
-    reg.install(recall_memory_tool_with_reasoning(memory.clone(), reasoning));
-    reg.install(forget_memory_tool(memory));
+    reg.install(recall_memory_tool_with_reasoning_and_access_policy(
+        memory.clone(),
+        reasoning,
+        access_policy.clone(),
+    ));
+    reg.install(forget_memory_tool(memory.clone()));
+    reg.install(save_procedure_tool(memory.clone()));
+    reg.install(list_procedures_tool(memory.clone()));
+    reg.install(run_procedure_tool(memory.clone()));
+    reg.install(record_event_tool(memory.clone()));
+    reg.install(recall_episodes_tool(memory.clone()));
+    reg.install(explain_decision_tool(memory.clone()));
+    reg.install(recall_decisions_tool(memory.clone()));
+    reg.install(set_access_policy_tool(memory.clone(), access_policy));
+    reg.install(assemble_context_tool(memory));
     reg
 }
 
@@ -117,6 +140,27 @@ fn stdio_dispatches_every_tool_in_one_session() {
     let register_reasoning_args = json!({});
     let recall_args = json!({ "query": "IoT sensor" });
     let forget_args = json!({ "id": "alice-likes-stream" });
+    let save_proc_args = json!({
+        "name": "ancestor",
+        "kind": "asp",
+        "body": "ancestor(tom,bob).",
+        "description": "ancestor rule"
+    });
+    let run_proc_args = json!({
+        "name": "ancestor",
+        "inputs": ["cqels://memory/event/demo"],
+        "policy": "demo-policy"
+    });
+    let record_event_args = json!({
+        "subject": "http://ex.org/alice",
+        "predicate": "http://ex.org/observed",
+        "object": "42",
+        "time": "2026-07-07T00:00:00Z"
+    });
+    let access_policy_args = json!({
+        "role": "analyst",
+        "labels": ["*"]
+    });
 
     let mut lines = Vec::new();
     lines.push(json!({"jsonrpc":"2.0","id":0,"method":"initialize"}).to_string());
@@ -133,11 +177,32 @@ fn stdio_dispatches_every_tool_in_one_session() {
     lines.push(call_line(11, "register_reasoning", register_reasoning_args));
     lines.push(call_line(12, "recall_memory", recall_args));
     lines.push(call_line(13, "forget_memory", forget_args));
-    lines.push(json!({"jsonrpc":"2.0","id":14,"method":"prompts/list"}).to_string());
+    lines.push(call_line(14, "list_stream_queries", json!({})));
+    lines.push(call_line(15, "save_procedure", save_proc_args));
+    lines.push(call_line(16, "list_procedures", json!({})));
+    lines.push(call_line(17, "run_procedure", run_proc_args));
+    lines.push(call_line(18, "record_event", record_event_args));
+    lines.push(call_line(
+        19,
+        "recall_episodes",
+        json!({"entity": "http://ex.org/alice"}),
+    ));
+    lines.push(call_line(
+        20,
+        "recall_decisions",
+        json!({"policy": "demo-policy"}),
+    ));
+    lines.push(call_line(
+        21,
+        "assemble_context",
+        json!({"task": "ancestor"}),
+    ));
+    lines.push(call_line(22, "set_access_policy", access_policy_args));
+    lines.push(json!({"jsonrpc":"2.0","id":23,"method":"prompts/list"}).to_string());
     lines.push(
         json!({
             "jsonrpc":"2.0",
-            "id":15,
+            "id":24,
             "method":"prompts/get",
             "params": {
                 "name": "recent_events_window",
@@ -146,12 +211,12 @@ fn stdio_dispatches_every_tool_in_one_session() {
         })
         .to_string(),
     );
-    lines.push(json!({"jsonrpc":"2.0","id":16,"method":"resources/list"}).to_string());
-    lines.push(json!({"jsonrpc":"2.0","id":17,"method":"resources/templates/list"}).to_string());
+    lines.push(json!({"jsonrpc":"2.0","id":25,"method":"resources/list"}).to_string());
+    lines.push(json!({"jsonrpc":"2.0","id":26,"method":"resources/templates/list"}).to_string());
     lines.push(
         json!({
             "jsonrpc": "2.0",
-            "id": 18,
+            "id": 27,
             "method": "resources/read",
             "params": { "uri": RESOURCE_KG_STATS }
         })
@@ -160,7 +225,7 @@ fn stdio_dispatches_every_tool_in_one_session() {
     lines.push(
         json!({
             "jsonrpc": "2.0",
-            "id": 19,
+            "id": 28,
             "method": "resources/read",
             "params": { "uri": RESOURCE_REASONING }
         })
@@ -168,9 +233,19 @@ fn stdio_dispatches_every_tool_in_one_session() {
     );
     let input = lines.join("\n") + "\n";
 
-    let reg = make_full_registry();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let engine = CqelsEngine::builder()
+        .id("stdio-integration")
+        .build()
+        .expect("engine");
+    runtime.block_on(engine.start()).expect("engine start");
+    let stream_hub = StreamQueryHub::new(Arc::new(engine), runtime.handle().clone());
+    let reg = make_full_registry(stream_hub.clone());
     let prompts = cqels_prompt_registry();
-    let resources = cqels_resource_registry();
+    let resources = cqels_resource_registry_with_streams(stream_hub);
     let mut output: Vec<u8> = Vec::new();
     run_stdio_with_prompts_and_resources(
         &reg,
@@ -187,7 +262,7 @@ fn stdio_dispatches_every_tool_in_one_session() {
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).expect("parse response"))
         .collect();
-    assert_eq!(responses.len(), 20, "one response per request");
+    assert_eq!(responses.len(), 29, "one response per request");
 
     assert_eq!(responses[0]["id"], 0);
     assert!(responses[0]["result"]["protocolVersion"].is_string());
@@ -197,12 +272,17 @@ fn stdio_dispatches_every_tool_in_one_session() {
     let tools = responses[1]["result"]["tools"]
         .as_array()
         .expect("tools array");
-    assert_eq!(tools.len(), 12, "12 tools registered");
+    assert_eq!(tools.len(), 26, "26 tools registered");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "parse_query",
         "query",
         "analyze_query",
+        "register_stream_query",
+        "forget_stream_query",
+        "list_stream_queries",
+        "unregister_stream_query",
+        "poll_stream_results",
         "reasoning_profiles",
         "shacl_capabilities",
         "reason",
@@ -212,6 +292,15 @@ fn stdio_dispatches_every_tool_in_one_session() {
         "register_reasoning",
         "recall_memory",
         "forget_memory",
+        "save_procedure",
+        "list_procedures",
+        "run_procedure",
+        "record_event",
+        "recall_episodes",
+        "explain_decision",
+        "recall_decisions",
+        "set_access_policy",
+        "assemble_context",
     ] {
         assert!(
             names.contains(&expected),
@@ -296,7 +385,41 @@ fn stdio_dispatches_every_tool_in_one_session() {
     let forgotten = assert_tool_ok(&responses[13], 13);
     assert_eq!(forgotten["removed"], true);
 
-    let prompt_list = responses[14]["result"]["prompts"]
+    let stream_queries = assert_tool_ok(&responses[14], 14);
+    assert_eq!(stream_queries["count"], 0);
+
+    let saved_proc = assert_tool_ok(&responses[15], 15);
+    assert_eq!(saved_proc["name"], "ancestor");
+    assert_eq!(saved_proc["kind"], "asp");
+
+    let listed_proc = assert_tool_ok(&responses[16], 16);
+    assert_eq!(listed_proc["procedures"].as_array().unwrap().len(), 1);
+
+    let ran_proc = assert_tool_ok(&responses[17], 17);
+    assert!(ran_proc["decision"]
+        .as_str()
+        .unwrap()
+        .starts_with("cqels://memory/decision/"));
+    assert_eq!(ran_proc["result"]["program"], "ancestor(tom,bob).");
+
+    let recorded_event = assert_tool_ok(&responses[18], 18);
+    assert_eq!(recorded_event["recorded"], true);
+
+    let episodes = assert_tool_ok(&responses[19], 19);
+    assert_eq!(episodes["events"].as_array().unwrap().len(), 1);
+
+    let decisions = assert_tool_ok(&responses[20], 20);
+    assert_eq!(decisions["decisions"].as_array().unwrap().len(), 1);
+
+    let context = assert_tool_ok(&responses[21], 21);
+    assert_eq!(context["task"], "ancestor");
+    assert_eq!(context["procedures"].as_array().unwrap().len(), 1);
+
+    let policy = assert_tool_ok(&responses[22], 22);
+    assert_eq!(policy["active"], true);
+    assert_eq!(policy["role"], "analyst");
+
+    let prompt_list = responses[23]["result"]["prompts"]
         .as_array()
         .expect("prompts array");
     assert_eq!(prompt_list.len(), 8, "8 prompts registered");
@@ -317,8 +440,8 @@ fn stdio_dispatches_every_tool_in_one_session() {
         assert!(prompt_names.contains(&expected));
     }
 
-    assert_eq!(responses[15]["id"], 15);
-    let message = &responses[15]["result"]["messages"][0];
+    assert_eq!(responses[24]["id"], 24);
+    let message = &responses[24]["result"]["messages"][0];
     assert_eq!(message["role"], "user");
     assert_eq!(message["content"]["type"], "text");
     assert!(message["content"]["text"]
@@ -326,7 +449,7 @@ fn stdio_dispatches_every_tool_in_one_session() {
         .unwrap()
         .contains("FROM STREAM SensorData [RANGE 30s]"));
 
-    let resources_list = responses[16]["result"]["resources"]
+    let resources_list = responses[25]["result"]["resources"]
         .as_array()
         .expect("resources array");
     assert_eq!(resources_list.len(), 4, "4 static resources registered");
@@ -337,20 +460,20 @@ fn stdio_dispatches_every_tool_in_one_session() {
     assert!(resource_uris.contains(&RESOURCE_KG_STATS));
     assert!(resource_uris.contains(&RESOURCE_REASONING));
 
-    let templates = responses[17]["result"]["resourceTemplates"]
+    let templates = responses[26]["result"]["resourceTemplates"]
         .as_array()
         .expect("resourceTemplates array");
     assert_eq!(templates.len(), 1);
     assert_eq!(templates[0]["uriTemplate"], RESOURCE_QUERY_RESULTS_TEMPLATE);
 
-    let stats_content = &responses[18]["result"]["contents"][0];
+    let stats_content = &responses[27]["result"]["contents"][0];
     assert_eq!(stats_content["uri"], RESOURCE_KG_STATS);
     assert_eq!(stats_content["mimeType"], "application/json");
     let stats_body: Value = serde_json::from_str(stats_content["text"].as_str().unwrap()).unwrap();
     assert!(stats_body["tripleCount"].is_number());
     assert_eq!(stats_body["registeredQueries"], 0);
 
-    let reasoning_content = &responses[19]["result"]["contents"][0];
+    let reasoning_content = &responses[28]["result"]["contents"][0];
     assert_eq!(reasoning_content["uri"], RESOURCE_REASONING);
     let reasoning_body: Value =
         serde_json::from_str(reasoning_content["text"].as_str().unwrap()).unwrap();

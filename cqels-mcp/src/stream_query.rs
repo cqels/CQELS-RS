@@ -63,7 +63,17 @@ struct HubInner {
     engine: Arc<CqelsEngine>,
     handle: Handle,
     results: Mutex<HashMap<String, VecDeque<BindingSet>>>,
+    registrations: Mutex<HashMap<String, StreamRegistration>>,
 }
+
+#[derive(Clone, Debug)]
+struct StreamRegistration {
+    engine_query_id: String,
+    buffer_size: usize,
+}
+
+const DEFAULT_BUFFER_SIZE: usize = 100;
+const MAX_BUFFER_SIZE: usize = 100_000;
 
 impl StreamQueryHub {
     /// Constructs a new hub bound to `engine` and `handle`.
@@ -78,6 +88,7 @@ impl StreamQueryHub {
                 engine,
                 handle,
                 results: Mutex::new(HashMap::new()),
+                registrations: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -94,10 +105,15 @@ impl StreamQueryHub {
 
     /// Returns the IDs of all currently registered stream queries.
     pub fn registered_query_ids(&self) -> Vec<String> {
-        let engine = self.inner.engine.clone();
-        self.inner
-            .handle
-            .block_on(async move { engine.registered_query_ids().await })
+        let mut ids = self
+            .inner
+            .registrations
+            .lock()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
     }
 
     /// Returns the names of all currently registered input streams.
@@ -120,12 +136,19 @@ impl StreamQueryHub {
     }
 
     fn record_result(&self, query_id: String, result: BindingSet) {
-        self.inner
-            .results
+        let buffer_size = self
+            .inner
+            .registrations
             .lock()
-            .entry(query_id)
-            .or_default()
-            .push_back(result);
+            .get(&query_id)
+            .map(|registration| registration.buffer_size)
+            .unwrap_or(DEFAULT_BUFFER_SIZE);
+        let mut guard = self.inner.results.lock();
+        let buffer = guard.entry(query_id).or_default();
+        buffer.push_back(result);
+        while buffer.len() > buffer_size {
+            buffer.pop_front();
+        }
     }
 
     fn forget_results(&self, query_id: &str) {
@@ -133,8 +156,16 @@ impl StreamQueryHub {
     }
 
     fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
+        let registration = self
+            .inner
+            .registrations
+            .lock()
+            .remove(query_id)
+            .ok_or_else(|| CqelsError::Stream {
+                message: format!("stream query '{query_id}' not found"),
+            })?;
         let engine = self.inner.engine.clone();
-        let id_for_async = query_id.to_string();
+        let id_for_async = registration.engine_query_id;
         self.inner
             .handle
             .block_on(async move { engine.unregister_query(&id_for_async).await })?;
@@ -175,6 +206,46 @@ impl McpTool for RegisterStreamQueryTool {
                     "description": "CqelsQL query text to register"
                 }),
             )
+            .with_property(
+                "language",
+                json!({
+                    "type": "string",
+                    "enum": ["cqelsql"],
+                    "default": "cqelsql",
+                    "description": "Query language. This Rust MCP server currently accepts cqelsql."
+                }),
+            )
+            .with_property(
+                "queryId",
+                json!({
+                    "type": "string",
+                    "description": "Optional stable MCP-facing query ID. Defaults to the engine query ID."
+                }),
+            )
+            .with_property(
+                "bufferSize",
+                json!({
+                    "type": "integer",
+                    "default": DEFAULT_BUFFER_SIZE,
+                    "description": "Maximum buffered result rows retained for polling, clamped to [1, 100000]."
+                }),
+            )
+            .with_property(
+                "notify",
+                json!({
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether clients intend to use resource update notifications. The transport exposes notification payload helpers but does not push unsolicited messages."
+                }),
+            )
+            .with_property(
+                "cep",
+                json!({
+                    "type": "boolean",
+                    "default": false,
+                    "description": "CEP registration flag from Java alpha.8. CEP-path registration is not yet available in this Rust MCP transport and fails loud when true."
+                }),
+            )
             .require("query")
     }
 
@@ -182,6 +253,45 @@ impl McpTool for RegisterStreamQueryTool {
         let Some(query) = invocation.get_str("query").map(str::to_string) else {
             return ToolResult::error("missing `query` argument");
         };
+        let language = invocation
+            .get_str("language")
+            .map(str::trim)
+            .filter(|language| !language.is_empty())
+            .unwrap_or("cqelsql")
+            .to_ascii_lowercase();
+        if language != "cqelsql" {
+            return ToolResult::error(format!(
+                "unsupported register_stream_query language '{language}'; supported: cqelsql"
+            ));
+        }
+        let cep = invocation
+            .get("cep")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if cep {
+            return ToolResult::error(
+                "cep=true stream queries are not yet supported by cqels-rs MCP",
+            );
+        }
+        let requested_query_id = invocation
+            .get_str("queryId")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        if let Some(query_id) = requested_query_id.as_ref() {
+            if self.hub.inner.registrations.lock().contains_key(query_id) {
+                return ToolResult::error(format!("Query already registered: {query_id}"));
+            }
+        }
+        let buffer_size = invocation
+            .get("bufferSize")
+            .and_then(|value| value.as_i64())
+            .map(|value| value.clamp(1, MAX_BUFFER_SIZE as i64) as usize)
+            .unwrap_or(DEFAULT_BUFFER_SIZE);
+        let notify = invocation
+            .get("notify")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         let engine = self.hub.inner.engine.clone();
         let hub_for_listener = self.hub.clone();
 
@@ -196,21 +306,36 @@ impl McpTool for RegisterStreamQueryTool {
             let id_cell: Arc<parking_lot::Mutex<Option<String>>> =
                 Arc::new(parking_lot::Mutex::new(None));
             let id_cell_listener = id_cell.clone();
+            let hub_for_results = hub_for_listener.clone();
             let listener = listener_from_fn(move |result: BindingSet| {
                 let id_guard = id_cell_listener.lock();
                 if let Some(id) = id_guard.as_ref() {
-                    hub_for_listener.record_result(id.clone(), result);
+                    hub_for_results.record_result(id.clone(), result);
                 }
             });
-            let id = engine.register_cqelsql_query(&query, listener).await?;
-            *id_cell.lock() = Some(id.clone());
-            Ok::<String, cqels_model::CqelsError>(id)
+            let engine_query_id = engine.register_cqelsql_query(&query, listener).await?;
+            let query_id = requested_query_id.unwrap_or_else(|| engine_query_id.clone());
+            *id_cell.lock() = Some(query_id.clone());
+            hub_for_listener.inner.registrations.lock().insert(
+                query_id.clone(),
+                StreamRegistration {
+                    engine_query_id: engine_query_id.clone(),
+                    buffer_size,
+                },
+            );
+            Ok::<(String, String), cqels_model::CqelsError>((query_id, engine_query_id))
         });
 
         match registration {
-            Ok(query_id) => ToolResult::success(json!({
+            Ok((query_id, engine_query_id)) => ToolResult::success(json!({
                 "ok": true,
                 "query_id": query_id,
+                "queryId": query_id,
+                "engineQueryId": engine_query_id,
+                "status": "registered",
+                "bufferSize": buffer_size,
+                "notify": notify,
+                "cep": cep,
             })),
             Err(e) => ToolResult::error(format!("register failed: {e}")),
         }
@@ -242,12 +367,7 @@ impl McpTool for ListStreamQueriesTool {
     }
 
     fn call(&self, _invocation: &ToolInvocation) -> ToolResult {
-        let engine = self.hub.inner.engine.clone();
-        let ids = self
-            .hub
-            .inner
-            .handle
-            .block_on(async move { engine.registered_query_ids().await });
+        let ids = self.hub.registered_query_ids();
         ToolResult::success(json!({
             "count": ids.len(),
             "query_ids": ids,
@@ -528,6 +648,80 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         assert!(ids.contains(&id), "list should contain {id}; got {ids:?}");
+    }
+
+    #[test]
+    fn register_accepts_java_query_id_and_buffer_options() {
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
+        let reg = install_all(&hub);
+        let res = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new()
+                    .with_arg("query", json!(sample_query()))
+                    .with_arg("queryId", json!("custom-q"))
+                    .with_arg("bufferSize", json!(1))
+                    .with_arg("notify", json!(true)),
+            )
+            .expect("dispatch");
+        assert!(!res.is_error, "register failed: {:?}", res.content);
+        assert_eq!(res.content["query_id"], "custom-q");
+        assert_eq!(res.content["queryId"], "custom-q");
+        assert_eq!(res.content["bufferSize"], 1);
+        assert_eq!(res.content["notify"], true);
+        assert!(res.content["engineQueryId"].is_string());
+
+        let list = reg
+            .call("list_stream_queries", &ToolInvocation::new())
+            .expect("dispatch");
+        assert_eq!(list.content["query_ids"], json!(["custom-q"]));
+
+        let duplicate = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new()
+                    .with_arg("query", json!(sample_query()))
+                    .with_arg("queryId", json!("custom-q")),
+            )
+            .expect("dispatch");
+        assert!(duplicate.is_error);
+        assert_eq!(
+            duplicate.content["message"],
+            "Query already registered: custom-q"
+        );
+    }
+
+    #[test]
+    fn register_rejects_unsupported_java_options_loudly() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        let cypher = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new()
+                    .with_arg("query", json!("MATCH (n) RETURN n"))
+                    .with_arg("language", json!("cypher")),
+            )
+            .expect("dispatch");
+        assert!(cypher.is_error);
+        assert!(cypher.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported"));
+
+        let cep = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new()
+                    .with_arg("query", json!(sample_query()))
+                    .with_arg("cep", json!(true)),
+            )
+            .expect("dispatch");
+        assert!(cep.is_error);
+        assert!(cep.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("cep=true"));
     }
 
     #[test]

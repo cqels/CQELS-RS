@@ -8,10 +8,11 @@ This document is a point-in-time snapshot proving the Rust port is at
 feature parity with `cqels-java`. For the contributor-facing
 day-to-day test workflow, see [`testing.md`](./testing.md).
 
-**Latest delta (2026-07-06):** alpha.8 MCP resources were added to
-`cqels-mcp`. `cargo test -p cqels-mcp` now passes **80** unit tests plus
-the stdio integration test, and `cargo test --workspace` passed for the
-full workspace after the change.
+**Latest delta (2026-07-07):** the default `cqels-mcp` server now wires
+Java alpha.8's full memory/procedure/episodic/decision/governance/working
+tool surface plus the live stream-query hub. `cargo test -p cqels-mcp`
+now passes **179** unit tests plus the stdio integration test, and
+`cargo test --workspace` passed for the full workspace after the change.
 
 ---
 
@@ -19,7 +20,7 @@ full workspace after the change.
 
 | Metric | Value |
 |---|---|
-| **Total tests** | **1,840 passing** (default features) + 43 optional-feature tests = **~1,880** |
+| **Total tests** | **1,845 passing** (default features) + 43 optional-feature tests = **~1,888** |
 | **Failures** | **0** |
 | **Ignored** | 4 (live-server or opt-in doc tests gated by env vars / explicit examples) |
 | **Test groups** | 51 across 15 workspace crates |
@@ -37,7 +38,7 @@ full workspace after the change.
 | Clippy (workspace) | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
 | Clippy (kuksa feature) | `cargo clippy -p cqels-cdsp --features kuksa --all-targets -- -D warnings` | ✅ clean |
 | Clippy (thrift feature) | `cargo clippy -p cqels-storage-iotdb --features thrift --all-targets -- -D warnings` | ✅ clean |
-| Tests | `cargo test --workspace` | ✅ 1840 passed, 4 ignored |
+| Tests | `cargo test --workspace` | ✅ 1845 passed, 4 ignored |
 | Tests (kuksa feature) | `cargo test -p cqels-cdsp --features kuksa` | ✅ 27 passed, 1 ignored (`KUKSA_HOST`) |
 | Tests (thrift feature) | `cargo test -p cqels-storage-iotdb --features thrift` | ✅ 16 passed, 2 ignored (`IOTDB_HOST`) |
 | Docs | `RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps` | ✅ clean |
@@ -53,7 +54,7 @@ full workspace after the change.
 | `cqels-engine` | **137** | `ReactiveStreamEngine`, CEP runtime, persistence wiring | `cqels-engine` |
 | `cqels-model` | **107** | RDF model, BindingSet, statements, terms | `cqels-model` |
 | `cqels-geo` | **67** | GeoSPARQL spatial reasoning | `cqels-geo` |
-| `cqels-mcp` | **174** | MCP tool/prompt/resource surface + JSON-RPC stdio / HTTP transports | `cqels-mcp` |
+| `cqels-mcp` | **179** | MCP tool/prompt/resource surface + JSON-RPC stdio / HTTP transports | `cqels-mcp` |
 | `cqels-shacl` | **60** | SHACL validation engine, repair candidates | `cqels-shacl` |
 | `cqels-asp` | **50** | ASP solver trait, Clingo subprocess solver | `cqels-asp` |
 | `cqels-cdsp` | **15** | COVESA VSS signal envelope + mapper + source | `cqels-cdsp` |
@@ -63,9 +64,9 @@ full workspace after the change.
 | `cqels-storage-lmdb` | **8** | LMDB embedded backend via `heed` | (Rust-only fill-in) |
 | `cqels-storage-rocksdb` | **8** | RocksDB backend (real C++ library) | `cqels-storage-rocksdb` |
 | `cqels-storage-spi` | **14** | Trait-only crate (impls live in backend crates) | `cqels-storage-spi` |
-| **TOTAL (lib unit)** | **1,575** | | |
+| **TOTAL (lib unit)** | **1,580** | | |
 | Integration + doc tests across the workspace | **265** | | |
-| **GRAND TOTAL** | **1,840** | | |
+| **GRAND TOTAL** | **1,845** | | |
 
 ---
 
@@ -107,7 +108,7 @@ the tests that prove the port.
 | RocksDB backend (lifts `links = "rocksdb"` oxigraph clash) | `cqels-storage-rocksdb` | 8 tests, same shape |
 | IoTDB time-series adapter | `cqels-storage-iotdb` — narrow `IotDbExecutor` trait + in-memory ref impl | 14 tests (executor-level + backend-level) |
 | IoTDB **real Thrift client** | `cqels-storage-iotdb::ThriftIotDbExecutor` (feature `thrift`) | 2 unit tests + 1 `IOTDB_HOST`-gated live round-trip |
-| MCP tool + prompt + resource surface (Java's `cqels-mcp`) | `cqels-mcp` (`query`, `parse_query`, `analyze_query`, `reasoning_profiles`, `shacl_capabilities`, `reason`, `store/recall/forget_memory`, `register_reasoning`, `validate`, `solve`, 8 CQELS prompt templates; resources `cqels://kg/stats`, `cqels://streams`, `cqels://queries`, `cqels://reasoning/capabilities`, `cqels://queries/{queryId}/results`; stdio + HTTP JSON-RPC transports) | 99 stateless/memory/reasoning tool tests + 19 prompt/transport tests + 13 engine-bound stream-query tool tests + 8 SHACL `validate` tests + 8 ASP `solve` tests + 7 resource tests + 7 resource/combined transport tests + 13 HTTP transport tests = **174** |
+| MCP tool + prompt + resource surface (Java's `cqels-mcp`) | `cqels-mcp` (`query`, `parse_query`, `analyze_query`, `reasoning_profiles`, `shacl_capabilities`, `reason`, `store/recall/forget_memory`, `register_stream_query`/`forget_stream_query`, `save/list/run_procedure`, `record_event`/`recall_episodes`, `explain_decision`/`recall_decisions`, `register_reasoning`, `set_access_policy`, `assemble_context`, `validate`, `solve`, 8 CQELS prompt templates; resources `cqels://kg/stats`, `cqels://streams`, `cqels://queries`, `cqels://reasoning/capabilities`, `cqels://queries/{queryId}/results`; stdio + HTTP JSON-RPC transports) | 102 stateless/memory/reasoning/alpha8 tool tests + 19 prompt/transport tests + 15 engine-bound stream-query tool tests + 8 SHACL `validate` tests + 8 ASP `solve` tests + 7 resource tests + 7 resource/combined transport tests + 13 HTTP transport tests = **179** |
 | MCP `register_stream_query` engine wiring | `cqels-mcp::stream_query::StreamQueryHub` | `stream_query::tests::*` (8 tests; race-fixed in `fcdef33`) |
 | MCP `validate` (SHACL bridge) | `cqels-mcp::validate` (any `Arc<dyn AspSolver>`) | 8 tests with recording `MockSolver` |
 | MCP `solve` (ASP bridge) | `cqels-mcp::solve` | 8 tests |
@@ -158,7 +159,7 @@ These appear in the Java codebase but are deliberately not ported, per
 
 | Build invocation | Build OK | Tests passing |
 |---|:---:|:---:|
-| `cargo build --workspace` | ✅ | 1,840 passed, 4 ignored |
+| `cargo build --workspace` | ✅ | 1,845 passed, 4 ignored |
 | `cargo build -p cqels-cdsp --features kuksa` | ✅ | 27 / 27 |
 | `cargo build -p cqels-storage-iotdb --features thrift` | ✅ | 16 / 16 |
 
@@ -175,7 +176,7 @@ Five consecutive isolated runs after the fix and the latest full-workspace
 run on the alpha.8 MCP parity stack produced:
 
 ```
-Latest full workspace: passed=1840 failed=0 ignored=4
+Latest full workspace: passed=1845 failed=0 ignored=4
 ```
 
 No failures were observed in the latest full-workspace run.

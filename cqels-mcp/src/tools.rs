@@ -4,13 +4,10 @@
 //! SHACL surfaces without requiring a running engine:
 //! `parse_query` (lex/parse only), `query` (parse + dry-run validate),
 //! `analyze_query` (full compile + planner-decision report),
-//! `reasoning_profiles`, `shacl_capabilities`. Memory tools
-//! (`store_memory`/`recall_memory`/`forget_memory`) are backed by
-//! pluggable [`MemoryStore`] implementations.
-//!
-//! Full registration of stream queries against a live engine is a
-//! follow-up that requires wiring `cqels_engine::CqelsEngine` into the
-//! tool handler.
+//! `reasoning_profiles`, `shacl_capabilities`. Memory tools are backed
+//! by pluggable [`MemoryStore`] implementations, including Java alpha.8's
+//! procedural, episodic, decision-lineage, governance, and working-memory
+//! MCP handles.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +22,7 @@ use cqels_reasoning::{ReasoningConfig, ReasoningProfile, ReteNetwork};
 #[allow(deprecated)]
 use oxigraph::io::{GraphFormat, GraphParser};
 use parking_lot::RwLock;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 
 use crate::memory::{MemoryFact, MemoryPayload, MemoryStatement, MemoryStore};
 use crate::tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
@@ -596,19 +593,75 @@ const SHORTTERM_MEMORY: &str = "shortterm";
 const LONGTERM_GRAPH: &str = "cqels://memory/longterm";
 const SCHEMA_GRAPH: &str = "cqels://memory/schema";
 const INFERRED_GRAPH: &str = "cqels://memory/inferred";
+const POLICY_GRAPH: &str = "cqels://memory/policy";
+const PROCEDURES_GRAPH: &str = "cqels://memory/procedures";
+const DECISIONS_GRAPH: &str = "cqels://memory/decisions";
+const EPISODIC_GRAPH: &str = "cqels://memory/episodic";
 const DEFAULT_STREAM: &str = "shortterm";
 const DEFAULT_RECALL_LIMIT: usize = 50;
 const MAX_RECALL_LIMIT: usize = 1000;
 const RESERVED_GRAPHS: &[&str] = &[
     "cqels://memory/annotations",
-    "cqels://memory/policy",
-    "cqels://memory/procedures",
-    "cqels://memory/decisions",
-    "cqels://memory/episodic",
+    POLICY_GRAPH,
+    PROCEDURES_GRAPH,
+    DECISIONS_GRAPH,
+    EPISODIC_GRAPH,
     INFERRED_GRAPH,
 ];
 
 static GENERATED_MEMORY_ID: AtomicU64 = AtomicU64::new(1);
+static GENERATED_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+static GENERATED_DECISION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Shared statement-level access policy state for alpha.8 governance.
+///
+/// The policy graph itself is also written to the configured [`MemoryStore`]
+/// so durable stores retain the grant records. Runtime enforcement uses this
+/// shared state, matching Java alpha.8's host-scoped policy posture.
+pub struct AccessPolicyRegistry {
+    inner: RwLock<HashMap<String, HashMap<String, HashSet<String>>>>,
+}
+
+impl AccessPolicyRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn shared() -> Arc<Self> {
+        Arc::new(Self::new())
+    }
+
+    fn set_role(&self, namespace: &str, role: String, labels: HashSet<String>) {
+        self.inner
+            .write()
+            .entry(namespace.to_string())
+            .or_default()
+            .insert(role, labels);
+    }
+
+    fn is_active(&self, namespace: &str) -> bool {
+        self.inner
+            .read()
+            .get(namespace)
+            .is_some_and(|roles| !roles.is_empty())
+    }
+
+    fn labels_for(&self, namespace: &str, role: &str) -> Option<HashSet<String>> {
+        self.inner
+            .read()
+            .get(namespace)
+            .and_then(|roles| roles.get(role))
+            .cloned()
+    }
+}
+
+impl Default for AccessPolicyRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone, Debug)]
 struct ReasoningRegistrationState {
@@ -1160,6 +1213,70 @@ fn pattern_statement_rows(
         }
     }
     rows
+}
+
+fn meta_access_labels(meta: Option<&JsonValue>) -> Vec<String> {
+    let Some(meta) = meta.and_then(JsonValue::as_object) else {
+        return Vec::new();
+    };
+    if let Some(label) = meta.get("accessLabel").and_then(JsonValue::as_str) {
+        return vec![label.to_string()];
+    }
+    if let Some(labels) = meta.get("accessLabels").and_then(JsonValue::as_array) {
+        return labels
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    Vec::new()
+}
+
+fn statement_visible_to_role(statement: &MemoryStatement, grants: &HashSet<String>) -> bool {
+    let labels = meta_access_labels(statement.meta.as_ref());
+    if labels.is_empty() {
+        return grants.contains("*");
+    }
+    labels.iter().any(|label| grants.contains(label))
+}
+
+fn policy_grants_for_recall(
+    access_policy: Option<&Arc<AccessPolicyRegistry>>,
+    namespace: &str,
+    role: Option<&str>,
+    has_pattern: bool,
+) -> Result<Option<HashSet<String>>, String> {
+    let Some(policy) = access_policy else {
+        return Ok(None);
+    };
+    if !policy.is_active(namespace) {
+        return Ok(None);
+    }
+    if !has_pattern {
+        return Err(
+            "Access policy is active; recall_memory requires pattern recall with a role"
+                .to_string(),
+        );
+    }
+    let Some(role) = role.map(str::trim).filter(|role| !role.is_empty()) else {
+        return Err("Access policy is active; recall_memory requires role".to_string());
+    };
+    Ok(Some(policy.labels_for(namespace, role).unwrap_or_default()))
+}
+
+fn policy_filter_facts_for_pattern(
+    mut facts: Vec<MemoryFact>,
+    grants: Option<&HashSet<String>>,
+) -> Vec<MemoryFact> {
+    let Some(grants) = grants else {
+        return facts;
+    };
+    for fact in &mut facts {
+        fact.facts
+            .retain(|statement| statement_visible_to_role(statement, grants));
+    }
+    facts.retain(|fact| !fact.facts.is_empty());
+    facts
 }
 
 fn statement_matches(statement: &MemoryStatement, pattern: &MemoryPattern) -> bool {
@@ -1725,6 +1842,7 @@ pub fn recall_memory_tool(store: Arc<dyn MemoryStore>) -> RecallMemoryTool {
     RecallMemoryTool {
         store,
         registration: None,
+        access_policy: None,
     }
 }
 
@@ -1737,12 +1855,28 @@ pub fn recall_memory_tool_with_reasoning(
     RecallMemoryTool {
         store,
         registration: Some(registration),
+        access_policy: None,
+    }
+}
+
+/// Constructs a `recall_memory` tool with ontology-aware recall and
+/// alpha.8 governance support.
+pub fn recall_memory_tool_with_reasoning_and_access_policy(
+    store: Arc<dyn MemoryStore>,
+    registration: Arc<ReasoningRegistration>,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> RecallMemoryTool {
+    RecallMemoryTool {
+        store,
+        registration: Some(registration),
+        access_policy: Some(access_policy),
     }
 }
 
 pub struct RecallMemoryTool {
     store: Arc<dyn MemoryStore>,
     registration: Option<Arc<ReasoningRegistration>>,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 impl McpTool for RecallMemoryTool {
@@ -1791,6 +1925,10 @@ impl McpTool for RecallMemoryTool {
                 "type": "string",
                 "description": "Optional named graph URI to search for pattern recall. Defaults to all non-reserved longterm RDF memory graphs.",
             }))
+            .with_property("role", json!({
+                "type": "string",
+                "description": "Caller role for alpha.8 access-policy enforcement. Required once set_access_policy has activated governance.",
+            }))
             .with_property("entail", json!({
                 "type": "boolean",
                 "default": false,
@@ -1826,6 +1964,15 @@ impl McpTool for RecallMemoryTool {
                 Ok(pattern) => pattern,
                 Err(message) => return ToolResult::error(message),
             };
+        let grants = match policy_grants_for_recall(
+            self.access_policy.as_ref(),
+            &namespace,
+            invocation.get_str("role"),
+            pattern.is_some(),
+        ) {
+            Ok(grants) => grants,
+            Err(message) => return ToolResult::error(message),
+        };
         let format = match recall_format(invocation) {
             Ok(format) => format,
             Err(message) => return ToolResult::error(message),
@@ -1843,6 +1990,13 @@ impl McpTool for RecallMemoryTool {
                 return ToolResult::error(
                     "entail:true uses the active register_reasoning dataGraph; omit graph filters",
                 );
+            }
+            if let Some(grants) = grants.as_ref() {
+                if !grants.contains("*") {
+                    return ToolResult::error(
+                        "Access policy is active; entail:true recall requires wildcard grant",
+                    );
+                }
             }
             let Some(registration) = self.registration.as_ref() else {
                 return ToolResult::error(
@@ -1884,11 +2038,13 @@ impl McpTool for RecallMemoryTool {
             Ok(facts) => {
                 let limit = recall_limit(invocation);
                 if let Some(pattern) = pattern.as_ref() {
+                    let facts = policy_filter_facts_for_pattern(facts, grants.as_ref());
                     let rows = pattern_statement_rows(facts, pattern, limit);
                     return ToolResult::success(json!({
                     "namespace": namespace,
                     "query": query,
                     "graph": pattern.graph.as_deref(),
+                    "role": invocation.get_str("role"),
                     "format": format,
                     "count": rows.len(),
                     "facts": rows,
@@ -2034,6 +2190,1141 @@ impl McpTool for ForgetMemoryTool {
             })),
             Err(e) => ToolResult::error(format!("forget failed: {e}")),
         }
+    }
+}
+
+// ─── alpha.8 memory tools ───────────────────────────────────────────
+
+const PROCEDURE_KINDS: &[&str] = &["asp", "shacl", "sparql", "cqelsql", "cypher", "cep"];
+
+fn current_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn system_memory_fact(
+    namespace: &str,
+    id: String,
+    graph: &str,
+    content: JsonValue,
+    facts: Vec<MemoryStatement>,
+    meta: JsonValue,
+) -> Result<MemoryFact, String> {
+    let content =
+        serde_json::to_string(&content).map_err(|e| format!("failed to encode content: {e}"))?;
+    Ok(MemoryFact::with_structured_payload(
+        namespace.to_string(),
+        id,
+        content,
+        MemoryPayload {
+            memory: LONGTERM_MEMORY.to_string(),
+            graph: Some(graph.to_string()),
+            stream: None,
+            facts,
+            turtle: None,
+            meta: Some(meta),
+        },
+    ))
+}
+
+fn recall_graph_records(
+    store: &dyn MemoryStore,
+    namespace: &str,
+    graph: &str,
+) -> Result<Vec<MemoryFact>, String> {
+    let mut records = store
+        .recall(namespace, "")
+        .map_err(|e| format!("recall for graph '{graph}' failed: {e}"))?
+        .into_iter()
+        .filter(|fact| fact.memory == LONGTERM_MEMORY && memory_fact_graph(fact) == graph)
+        .collect::<Vec<_>>();
+    records.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(records)
+}
+
+fn string_arg(invocation: &ToolInvocation, key: &str) -> Option<String> {
+    invocation
+        .get_str(key)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn json_object_arg(
+    invocation: &ToolInvocation,
+    key: &str,
+) -> Result<serde_json::Map<String, JsonValue>, String> {
+    match invocation.get(key) {
+        Some(value) => value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| format!("{key} must be an object")),
+        None => Ok(serde_json::Map::new()),
+    }
+}
+
+fn clamped_tool_limit(invocation: &ToolInvocation, default: usize) -> usize {
+    invocation
+        .get("limit")
+        .and_then(JsonValue::as_i64)
+        .map(|n| n.clamp(1, MAX_RECALL_LIMIT as i64) as usize)
+        .unwrap_or(default)
+}
+
+fn parse_digits_i32(value: &str, start: usize, end: usize) -> Option<i32> {
+    value.get(start..end)?.parse().ok()
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - i32::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let mp = month as i32 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) as i64
+}
+
+fn parse_time_ms(value: &str) -> Result<i64, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("time must not be empty".to_string());
+    }
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return trimmed
+            .parse::<i64>()
+            .map_err(|_| format!("invalid millisecond timestamp: {trimmed}"));
+    }
+    if trimmed.len() < 10
+        || trimmed.as_bytes().get(4) != Some(&b'-')
+        || trimmed.as_bytes().get(7) != Some(&b'-')
+    {
+        return Err("expected an xsd:date or xsd:dateTime".to_string());
+    }
+    let year = parse_digits_i32(trimmed, 0, 4).ok_or_else(|| "invalid year".to_string())?;
+    let month = parse_digits_i32(trimmed, 5, 7).ok_or_else(|| "invalid month".to_string())?;
+    let day = parse_digits_i32(trimmed, 8, 10).ok_or_else(|| "invalid day".to_string())?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err("invalid xsd:date".to_string());
+    }
+    let mut hour = 0;
+    let mut minute = 0;
+    let mut second = 0;
+    if trimmed.len() > 10 {
+        let sep = trimmed.as_bytes()[10];
+        if sep != b'T' && sep != b' ' {
+            return Err("expected 'T' between date and time".to_string());
+        }
+        let time = trimmed[11..].trim_end_matches('Z');
+        let time = time.split_once('.').map(|(whole, _)| whole).unwrap_or(time);
+        let parts = time.split(':').collect::<Vec<_>>();
+        if parts.len() < 2 {
+            return Err("invalid xsd:dateTime".to_string());
+        }
+        hour = parts[0]
+            .parse::<i32>()
+            .map_err(|_| "invalid hour".to_string())?;
+        minute = parts[1]
+            .parse::<i32>()
+            .map_err(|_| "invalid minute".to_string())?;
+        second = parts
+            .get(2)
+            .map(|s| s.parse::<i32>().map_err(|_| "invalid second".to_string()))
+            .transpose()?
+            .unwrap_or(0);
+        if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
+            return Err("invalid xsd:dateTime".to_string());
+        }
+    }
+    let days = days_from_civil(year, month as u32, day as u32);
+    Ok((((days * 24 + hour as i64) * 60 + minute as i64) * 60 + second as i64) * 1000)
+}
+
+fn normalized_time_arg(
+    value: Option<String>,
+    invalid_prefix: &str,
+) -> Result<(String, i64), String> {
+    match value {
+        Some(value) => {
+            let ms = parse_time_ms(&value).map_err(|_| invalid_prefix.to_string())?;
+            Ok((value, ms))
+        }
+        None => {
+            let ms = current_time_ms();
+            Ok((ms.to_string(), ms))
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProcedureRecord {
+    name: String,
+    kind: String,
+    body: String,
+    description: Option<String>,
+}
+
+fn procedure_id(name: &str) -> String {
+    format!("procedure:{name}")
+}
+
+fn procedure_from_fact(fact: &MemoryFact) -> Option<ProcedureRecord> {
+    let meta = fact.meta.as_ref()?.as_object()?;
+    Some(ProcedureRecord {
+        name: meta.get("name")?.as_str()?.to_string(),
+        kind: meta.get("kind")?.as_str()?.to_string(),
+        body: meta.get("body")?.as_str()?.to_string(),
+        description: meta
+            .get("description")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn load_procedure(
+    store: &dyn MemoryStore,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<ProcedureRecord>, String> {
+    Ok(recall_graph_records(store, namespace, PROCEDURES_GRAPH)?
+        .into_iter()
+        .find(|fact| fact.id == procedure_id(name))
+        .and_then(|fact| procedure_from_fact(&fact)))
+}
+
+fn bind_procedure_params(
+    body: &str,
+    params: &serde_json::Map<String, JsonValue>,
+) -> Result<String, String> {
+    let mut out = body.to_string();
+    for (key, value) in params {
+        let replacement = match value {
+            JsonValue::String(s) => s.clone(),
+            JsonValue::Number(n) => n.to_string(),
+            JsonValue::Bool(b) => b.to_string(),
+            JsonValue::Null => String::new(),
+            other => serde_json::to_string(other)
+                .map_err(|e| format!("failed to encode param '{key}': {e}"))?,
+        };
+        out = out.replace(&format!("{{{{{key}}}}}"), &replacement);
+    }
+    let mut rest = out.as_str();
+    while let Some(start) = rest.find("{{") {
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find("}}") else {
+            break;
+        };
+        let name = after_start[..end].trim();
+        if !name.is_empty() {
+            return Err(format!("Missing argument for procedure parameter: {name}"));
+        }
+        rest = &after_start[end + 2..];
+    }
+    Ok(out)
+}
+
+fn execute_bound_procedure(
+    kind: &str,
+    name: &str,
+    body: &str,
+    options: JsonValue,
+) -> Result<JsonValue, String> {
+    match kind {
+        "cqelsql" => {
+            CqelsQlParser::parse(body)
+                .map_err(|e| format!("cqelsql procedure parse failed: {e}"))?;
+            Ok(
+                json!({"ok": true, "name": name, "kind": kind, "dry_run": true, "query": body, "options": options}),
+            )
+        }
+        "cep" => {
+            let parsed = CqelsQlParser::parse(body)
+                .map_err(|e| format!("cep procedure parse failed: {e}"))?;
+            if parsed.seq_constraint.is_none() {
+                return Err("cep procedure requires FILTER(SEQ(...))".to_string());
+            }
+            Ok(
+                json!({"ok": true, "name": name, "kind": kind, "dry_run": true, "queryId": format!("proc:{name}"), "query": body, "options": options}),
+            )
+        }
+        "asp" => {
+            Ok(json!({"ok": true, "name": name, "kind": kind, "program": body, "options": options}))
+        }
+        "shacl" => {
+            Ok(json!({"ok": true, "name": name, "kind": kind, "shapes": body, "options": options}))
+        }
+        "sparql" | "cypher" => Ok(
+            json!({"ok": true, "name": name, "kind": kind, "dry_run": true, "query": body, "options": options}),
+        ),
+        _ => Err(format!("kind must be one of {PROCEDURE_KINDS:?}")),
+    }
+}
+
+fn maybe_record_decision(
+    store: &dyn MemoryStore,
+    namespace: &str,
+    invocation: &ToolInvocation,
+    procedure: &ProcedureRecord,
+    result: JsonValue,
+) -> Result<Option<String>, String> {
+    if procedure.kind == "cep" {
+        return Ok(None);
+    }
+    let inputs = invocation
+        .get("inputs")
+        .and_then(JsonValue::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let policy = string_arg(invocation, "policy");
+    let override_flag = invocation
+        .get("override")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    if inputs.is_empty() && policy.as_deref().is_none_or(str::is_empty) && !override_flag {
+        return Ok(None);
+    }
+    let started_ms = current_time_ms();
+    let ended_ms = current_time_ms();
+    let seq = GENERATED_DECISION_ID.fetch_add(1, Ordering::Relaxed);
+    let id = format!("cqels://memory/decision/{ended_ms}-{seq}");
+    let meta = json!({
+        "id": id,
+        "procedure": procedure.name,
+        "kind": procedure.kind,
+        "inputs": inputs,
+        "policy": policy,
+        "override": override_flag,
+        "startedAt": started_ms.to_string(),
+        "startedAtMs": started_ms,
+        "endedAt": ended_ms.to_string(),
+        "endedAtMs": ended_ms,
+        "output": result,
+    });
+    let fact = system_memory_fact(
+        namespace,
+        id.clone(),
+        DECISIONS_GRAPH,
+        meta.clone(),
+        Vec::new(),
+        meta,
+    )?;
+    store
+        .store(fact)
+        .map_err(|e| format!("decision trace store failed: {e}"))?;
+    Ok(Some(id))
+}
+
+/// Constructs Java alpha.8's `save_procedure` tool.
+pub fn save_procedure_tool(store: Arc<dyn MemoryStore>) -> SaveProcedureTool {
+    SaveProcedureTool { store }
+}
+
+pub struct SaveProcedureTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for SaveProcedureTool {
+    fn name(&self) -> &str {
+        "save_procedure"
+    }
+
+    fn description(&self) -> &str {
+        "Save a named, runnable procedure into procedural memory."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("name", json!({"type": "string"}))
+            .with_property("kind", json!({"type": "string", "enum": PROCEDURE_KINDS}))
+            .with_property("body", json!({"type": "string"}))
+            .with_property("description", json!({"type": "string"}))
+            .with_property(
+                "namespace",
+                json!({"type": "string", "default": DEFAULT_NAMESPACE}),
+            )
+            .require("name")
+            .require("kind")
+            .require("body")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let Some(name) = string_arg(invocation, "name") else {
+            return ToolResult::error("Missing required parameter: name");
+        };
+        let Some(kind) = string_arg(invocation, "kind") else {
+            return ToolResult::error(format!("kind must be one of {PROCEDURE_KINDS:?}"));
+        };
+        if !PROCEDURE_KINDS.contains(&kind.as_str()) {
+            return ToolResult::error(format!("kind must be one of {PROCEDURE_KINDS:?}"));
+        }
+        let Some(body) = string_arg(invocation, "body") else {
+            return ToolResult::error("Missing required parameter: body");
+        };
+        let description = string_arg(invocation, "description");
+        let meta = json!({
+            "name": name,
+            "kind": kind,
+            "body": body,
+            "description": description,
+        });
+        let fact = match system_memory_fact(
+            &namespace,
+            procedure_id(&name),
+            PROCEDURES_GRAPH,
+            meta.clone(),
+            Vec::new(),
+            meta,
+        ) {
+            Ok(fact) => fact,
+            Err(message) => return ToolResult::error(message),
+        };
+        match self.store.store(fact) {
+            Ok(()) => ToolResult::success(json!({
+                "ok": true,
+                "namespace": namespace,
+                "name": name,
+                "kind": kind,
+                "message": format!("Saved procedure '{name}' ({kind})"),
+            })),
+            Err(e) => ToolResult::error(format!("save_procedure failed: {e}")),
+        }
+    }
+}
+
+/// Constructs Java alpha.8's `list_procedures` tool.
+pub fn list_procedures_tool(store: Arc<dyn MemoryStore>) -> ListProceduresTool {
+    ListProceduresTool { store }
+}
+
+pub struct ListProceduresTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for ListProceduresTool {
+    fn name(&self) -> &str {
+        "list_procedures"
+    }
+
+    fn description(&self) -> &str {
+        "List saved procedures with their kind and description."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object().with_property(
+            "namespace",
+            json!({"type": "string", "default": DEFAULT_NAMESPACE}),
+        )
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let mut procedures =
+            match recall_graph_records(self.store.as_ref(), &namespace, PROCEDURES_GRAPH) {
+                Ok(records) => records
+                    .into_iter()
+                    .filter_map(|fact| procedure_from_fact(&fact))
+                    .map(|proc| {
+                        json!({
+                            "name": proc.name,
+                            "kind": proc.kind,
+                            "description": proc.description,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                Err(message) => return ToolResult::error(message),
+            };
+        procedures.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        ToolResult::success(json!({
+            "namespace": namespace,
+            "procedures": procedures,
+        }))
+    }
+}
+
+/// Constructs Java alpha.8's `run_procedure` tool.
+pub fn run_procedure_tool(store: Arc<dyn MemoryStore>) -> RunProcedureTool {
+    RunProcedureTool { store }
+}
+
+pub struct RunProcedureTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for RunProcedureTool {
+    fn name(&self) -> &str {
+        "run_procedure"
+    }
+
+    fn description(&self) -> &str {
+        "Run a saved procedure by name, binding {{param}} placeholders."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("name", json!({"type": "string"}))
+            .with_property("params", json!({"type": "object"}))
+            .with_property("options", json!({"type": "object"}))
+            .with_property(
+                "inputs",
+                json!({"type": "array", "items": {"type": "string"}}),
+            )
+            .with_property("policy", json!({"type": "string"}))
+            .with_property("override", json!({"type": "boolean"}))
+            .with_property(
+                "namespace",
+                json!({"type": "string", "default": DEFAULT_NAMESPACE}),
+            )
+            .require("name")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let Some(name) = string_arg(invocation, "name") else {
+            return ToolResult::error("Missing required parameter: name");
+        };
+        let procedure = match load_procedure(self.store.as_ref(), &namespace, &name) {
+            Ok(Some(procedure)) => procedure,
+            Ok(None) => return ToolResult::error(format!("No such procedure: {name}")),
+            Err(message) => return ToolResult::error(message),
+        };
+        let params = match json_object_arg(invocation, "params") {
+            Ok(params) => params,
+            Err(message) => return ToolResult::error(message),
+        };
+        let options = match json_object_arg(invocation, "options") {
+            Ok(options) => JsonValue::Object(options),
+            Err(message) => return ToolResult::error(message),
+        };
+        let bound = match bind_procedure_params(&procedure.body, &params) {
+            Ok(bound) => bound,
+            Err(message) => return ToolResult::error(message),
+        };
+        let result =
+            match execute_bound_procedure(&procedure.kind, &procedure.name, &bound, options) {
+                Ok(result) => result,
+                Err(message) => return ToolResult::error(message),
+            };
+        match maybe_record_decision(
+            self.store.as_ref(),
+            &namespace,
+            invocation,
+            &procedure,
+            result.clone(),
+        ) {
+            Ok(Some(decision)) => ToolResult::success(json!({
+                "decision": decision,
+                "result": result,
+            })),
+            Ok(None) => ToolResult::success(result),
+            Err(message) => ToolResult::error(message),
+        }
+    }
+}
+
+/// Constructs Java alpha.8's `record_event` tool.
+pub fn record_event_tool(store: Arc<dyn MemoryStore>) -> RecordEventTool {
+    RecordEventTool { store }
+}
+
+pub struct RecordEventTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for RecordEventTool {
+    fn name(&self) -> &str {
+        "record_event"
+    }
+
+    fn description(&self) -> &str {
+        "Record a timestamped event into episodic memory."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("subject", json!({"type": "string"}))
+            .with_property("predicate", json!({"type": "string"}))
+            .with_property("object", json!({"type": "string"}))
+            .with_property(
+                "objectType",
+                json!({"type": "string", "enum": ["uri", "literal"], "default": "literal"}),
+            )
+            .with_property("time", json!({"type": "string"}))
+            .with_property(
+                "namespace",
+                json!({"type": "string", "default": DEFAULT_NAMESPACE}),
+            )
+            .require("subject")
+            .require("predicate")
+            .require("object")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let Some(subject) = string_arg(invocation, "subject") else {
+            return ToolResult::error("record_event requires subject, predicate and object");
+        };
+        let Some(predicate) = string_arg(invocation, "predicate") else {
+            return ToolResult::error("record_event requires subject, predicate and object");
+        };
+        let Some(object) = string_arg(invocation, "object") else {
+            return ToolResult::error("record_event requires subject, predicate and object");
+        };
+        let object_type = invocation.get_str("objectType").unwrap_or("literal");
+        if object_type != "uri" && object_type != "literal" {
+            return ToolResult::error("objectType must be either 'uri' or 'literal'");
+        }
+        let (at, time_ms) = match normalized_time_arg(
+            string_arg(invocation, "time"),
+            "Invalid time: expected an xsd:date or xsd:dateTime",
+        ) {
+            Ok(time) => time,
+            Err(message) => return ToolResult::error(message),
+        };
+        let subject = match expand_memory_iri(&subject) {
+            Ok(value) => value,
+            Err(message) => {
+                return ToolResult::error(format!(
+                    "subject/predicate/object must be an absolute IRI or known prefix: {message}"
+                ))
+            }
+        };
+        let predicate = match expand_memory_iri(&predicate) {
+            Ok(value) => value,
+            Err(message) => {
+                return ToolResult::error(format!(
+                    "subject/predicate/object must be an absolute IRI or known prefix: {message}"
+                ))
+            }
+        };
+        let object = if object_type == "uri" {
+            match expand_memory_iri(&object) {
+                Ok(value) => value,
+                Err(message) => {
+                    return ToolResult::error(format!(
+                    "subject/predicate/object must be an absolute IRI or known prefix: {message}"
+                ))
+                }
+            }
+        } else {
+            object
+        };
+        let seq = GENERATED_EVENT_ID.fetch_add(1, Ordering::Relaxed);
+        let event = format!("cqels://memory/event/{time_ms}-{seq}");
+        let statement = MemoryStatement {
+            subject,
+            predicate,
+            object,
+            object_type: object_type.to_string(),
+            datatype: None,
+            language: None,
+            meta: Some(json!({"event": event, "at": at, "time_ms": time_ms})),
+        };
+        let meta = json!({"event": event, "at": at, "time_ms": time_ms});
+        let fact = match system_memory_fact(
+            &namespace,
+            event.clone(),
+            EPISODIC_GRAPH,
+            meta.clone(),
+            vec![statement],
+            meta,
+        ) {
+            Ok(fact) => fact,
+            Err(message) => return ToolResult::error(message),
+        };
+        match self.store.store(fact) {
+            Ok(()) => ToolResult::success(json!({
+                "recorded": true,
+                "event": event,
+                "at": at,
+            })),
+            Err(e) => ToolResult::error(format!("record_event failed: {e}")),
+        }
+    }
+}
+
+/// Constructs Java alpha.8's `recall_episodes` tool.
+pub fn recall_episodes_tool(store: Arc<dyn MemoryStore>) -> RecallEpisodesTool {
+    RecallEpisodesTool { store }
+}
+
+pub struct RecallEpisodesTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for RecallEpisodesTool {
+    fn name(&self) -> &str {
+        "recall_episodes"
+    }
+
+    fn description(&self) -> &str {
+        "Recall past events by time range and/or entity."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("since", json!({"type": "string"}))
+            .with_property("until", json!({"type": "string"}))
+            .with_property("entity", json!({"type": "string"}))
+            .with_property("predicate", json!({"type": "string"}))
+            .with_property(
+                "limit",
+                json!({"type": "integer", "default": DEFAULT_RECALL_LIMIT}),
+            )
+            .with_property("newestFirst", json!({"type": "boolean", "default": true}))
+            .with_property(
+                "namespace",
+                json!({"type": "string", "default": DEFAULT_NAMESPACE}),
+            )
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let since = match string_arg(invocation, "since")
+            .map(|v| parse_time_ms(&v))
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(message) => return ToolResult::error(message),
+        };
+        let until = match string_arg(invocation, "until")
+            .map(|v| parse_time_ms(&v))
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(message) => return ToolResult::error(message),
+        };
+        let entity = string_arg(invocation, "entity")
+            .map(|entity| expand_memory_iri(&entity).unwrap_or(entity));
+        let predicate = match string_arg(invocation, "predicate")
+            .map(|predicate| expand_memory_iri(&predicate))
+            .transpose()
+        {
+            Ok(predicate) => predicate,
+            Err(message) => return ToolResult::error(message),
+        };
+        let limit = clamped_tool_limit(invocation, DEFAULT_RECALL_LIMIT);
+        let newest_first = invocation
+            .get("newestFirst")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true);
+        let mut events = match recall_graph_records(self.store.as_ref(), &namespace, EPISODIC_GRAPH)
+        {
+            Ok(records) => records
+                .into_iter()
+                .filter_map(|fact| {
+                    let statement = fact.facts.first()?;
+                    let meta = fact.meta.as_ref()?.as_object()?;
+                    let time_ms = meta.get("time_ms")?.as_i64()?;
+                    if since.is_some_and(|since| time_ms < since)
+                        || until.is_some_and(|until| time_ms >= until)
+                    {
+                        return None;
+                    }
+                    if let Some(entity) = &entity {
+                        if statement.subject != *entity && statement.object != *entity {
+                            return None;
+                        }
+                    }
+                    if let Some(predicate) = &predicate {
+                        if statement.predicate != *predicate {
+                            return None;
+                        }
+                    }
+                    Some(json!({
+                        "id": fact.id,
+                        "subject": statement.subject,
+                        "predicate": statement.predicate,
+                        "object": statement.object,
+                        "objectType": statement.object_type,
+                        "at": meta.get("at").cloned().unwrap_or_else(|| json!(time_ms.to_string())),
+                        "time_ms": time_ms,
+                    }))
+                })
+                .collect::<Vec<_>>(),
+            Err(message) => return ToolResult::error(message),
+        };
+        events.sort_by(|a, b| a["time_ms"].as_i64().cmp(&b["time_ms"].as_i64()));
+        if newest_first {
+            events.reverse();
+        }
+        events.truncate(limit);
+        ToolResult::success(json!({
+            "namespace": namespace,
+            "events": events,
+        }))
+    }
+}
+
+/// Constructs Java alpha.8's `explain_decision` tool.
+pub fn explain_decision_tool(store: Arc<dyn MemoryStore>) -> ExplainDecisionTool {
+    ExplainDecisionTool { store }
+}
+
+pub struct ExplainDecisionTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for ExplainDecisionTool {
+    fn name(&self) -> &str {
+        "explain_decision"
+    }
+
+    fn description(&self) -> &str {
+        "Reconstruct a recorded decision trace."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("id", json!({"type": "string"}))
+            .with_property(
+                "namespace",
+                json!({"type": "string", "default": DEFAULT_NAMESPACE}),
+            )
+            .require("id")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let Some(id) = string_arg(invocation, "id") else {
+            return ToolResult::error("explain_decision requires id");
+        };
+        let found = match recall_graph_records(self.store.as_ref(), &namespace, DECISIONS_GRAPH) {
+            Ok(records) => records.into_iter().find(|fact| fact.id == id),
+            Err(message) => return ToolResult::error(message),
+        };
+        let Some(fact) = found else {
+            return ToolResult::error(format!("No such decision: {id}"));
+        };
+        ToolResult::success(fact.meta.unwrap_or_else(|| json!({"id": id})))
+    }
+}
+
+/// Constructs Java alpha.8's `recall_decisions` tool.
+pub fn recall_decisions_tool(store: Arc<dyn MemoryStore>) -> RecallDecisionsTool {
+    RecallDecisionsTool { store }
+}
+
+pub struct RecallDecisionsTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for RecallDecisionsTool {
+    fn name(&self) -> &str {
+        "recall_decisions"
+    }
+
+    fn description(&self) -> &str {
+        "Find recorded decisions by time range, policy, and override flag."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("since", json!({"type": "string"}))
+            .with_property("until", json!({"type": "string"}))
+            .with_property("policy", json!({"type": "string"}))
+            .with_property("override", json!({"type": "boolean"}))
+            .with_property(
+                "limit",
+                json!({"type": "integer", "default": DEFAULT_RECALL_LIMIT}),
+            )
+            .with_property(
+                "namespace",
+                json!({"type": "string", "default": DEFAULT_NAMESPACE}),
+            )
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let since = match string_arg(invocation, "since")
+            .map(|v| parse_time_ms(&v))
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(message) => return ToolResult::error(message),
+        };
+        let until = match string_arg(invocation, "until")
+            .map(|v| parse_time_ms(&v))
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(message) => return ToolResult::error(message),
+        };
+        let policy = string_arg(invocation, "policy");
+        let override_filter = invocation.get("override").and_then(JsonValue::as_bool);
+        let limit = clamped_tool_limit(invocation, DEFAULT_RECALL_LIMIT);
+        let mut decisions = match recall_graph_records(self.store.as_ref(), &namespace, DECISIONS_GRAPH) {
+            Ok(records) => records
+                .into_iter()
+                .filter_map(|fact| {
+                    let meta = fact.meta.as_ref()?.as_object()?;
+                    let ended_ms = meta.get("endedAtMs")?.as_i64()?;
+                    if since.is_some_and(|since| ended_ms < since)
+                        || until.is_some_and(|until| ended_ms >= until)
+                    {
+                        return None;
+                    }
+                    if let Some(policy) = &policy {
+                        if meta.get("policy").and_then(JsonValue::as_str) != Some(policy.as_str()) {
+                            return None;
+                        }
+                    }
+                    if let Some(expected) = override_filter {
+                        if meta.get("override").and_then(JsonValue::as_bool) != Some(expected) {
+                            return None;
+                        }
+                    }
+                    Some(json!({
+                        "id": fact.id,
+                        "endedAt": meta.get("endedAt").cloned().unwrap_or_else(|| json!(ended_ms.to_string())),
+                        "endedAtMs": ended_ms,
+                    }))
+                })
+                .collect::<Vec<_>>(),
+            Err(message) => return ToolResult::error(message),
+        };
+        decisions.sort_by(|a, b| a["endedAtMs"].as_i64().cmp(&b["endedAtMs"].as_i64()));
+        decisions.reverse();
+        decisions.truncate(limit);
+        ToolResult::success(json!({
+            "namespace": namespace,
+            "decisions": decisions,
+        }))
+    }
+}
+
+/// Constructs Java alpha.8's `set_access_policy` tool.
+pub fn set_access_policy_tool(
+    store: Arc<dyn MemoryStore>,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> SetAccessPolicyTool {
+    SetAccessPolicyTool {
+        store,
+        access_policy,
+    }
+}
+
+pub struct SetAccessPolicyTool {
+    store: Arc<dyn MemoryStore>,
+    access_policy: Arc<AccessPolicyRegistry>,
+}
+
+impl McpTool for SetAccessPolicyTool {
+    fn name(&self) -> &str {
+        "set_access_policy"
+    }
+
+    fn description(&self) -> &str {
+        "Grant a role the access labels it may see and activate governance."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("role", json!({"type": "string"}))
+            .with_property(
+                "labels",
+                json!({"type": "array", "items": {"type": "string"}}),
+            )
+            .with_property(
+                "namespace",
+                json!({"type": "string", "default": DEFAULT_NAMESPACE}),
+            )
+            .require("role")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let Some(role) = string_arg(invocation, "role") else {
+            return ToolResult::error("set_access_policy requires a role");
+        };
+        let labels = invocation
+            .get("labels")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(JsonValue::as_str)
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_string)
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        if labels.is_empty() {
+            return ToolResult::error(
+                "set_access_policy requires at least one label (use \"*\" to also grant unlabelled statements)",
+            );
+        }
+        let meta = json!({"role": role, "labels": labels.iter().cloned().collect::<Vec<_>>()});
+        let fact = match system_memory_fact(
+            &namespace,
+            format!("policy:{role}"),
+            POLICY_GRAPH,
+            meta.clone(),
+            Vec::new(),
+            meta,
+        ) {
+            Ok(fact) => fact,
+            Err(message) => return ToolResult::error(message),
+        };
+        if let Err(e) = self.store.store(fact) {
+            return ToolResult::error(format!("set_access_policy failed: {e}"));
+        }
+        self.access_policy
+            .set_role(&namespace, role.clone(), labels);
+        ToolResult::success(json!({
+            "ok": true,
+            "namespace": namespace,
+            "role": role,
+            "active": true,
+        }))
+    }
+}
+
+/// Constructs Java alpha.8's `assemble_context` tool.
+pub fn assemble_context_tool(store: Arc<dyn MemoryStore>) -> AssembleContextTool {
+    AssembleContextTool { store }
+}
+
+pub struct AssembleContextTool {
+    store: Arc<dyn MemoryStore>,
+}
+
+impl McpTool for AssembleContextTool {
+    fn name(&self) -> &str {
+        "assemble_context"
+    }
+
+    fn description(&self) -> &str {
+        "Assemble a ranked, budget-bounded working-memory context bundle."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("task", json!({"type": "string"}))
+            .with_property("mode", json!({"type": "string", "enum": ["lexical", "vector", "hybrid"], "default": "lexical"}))
+            .with_property("limit", json!({"type": "integer", "default": 10}))
+            .with_property("neighbors", json!({"type": "integer", "default": 5}))
+            .with_property("budget", json!({"type": "integer", "default": 4000, "maximum": 200000}))
+            .with_property("namespace", json!({"type": "string", "default": DEFAULT_NAMESPACE}))
+            .require("task")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let namespace = namespace_from(invocation);
+        let Some(task) = string_arg(invocation, "task") else {
+            return ToolResult::error("assemble_context requires task");
+        };
+        let mode = invocation.get_str("mode").unwrap_or("lexical");
+        if mode != "lexical" {
+            return ToolResult::error(format!(
+                "assemble_context mode '{mode}' requires vector search, which is disabled"
+            ));
+        }
+        let limit = clamped_tool_limit(invocation, 10);
+        let budget = invocation
+            .get("budget")
+            .and_then(JsonValue::as_i64)
+            .map(|n| n.clamp(1, 200_000) as usize)
+            .unwrap_or(4000);
+        let task_lower = task.to_lowercase();
+        let records = match self.store.recall(&namespace, "") {
+            Ok(records) => records,
+            Err(e) => return ToolResult::error(format!("assemble_context recall failed: {e}")),
+        };
+        let mut semantic = records
+            .iter()
+            .filter(|fact| {
+                fact.memory == LONGTERM_MEMORY
+                    && validate_writable_graph(memory_fact_graph(fact)).is_ok()
+                    && (fact.content.to_lowercase().contains(&task_lower)
+                        || fact.facts.iter().any(|stmt| {
+                            stmt.subject.to_lowercase().contains(&task_lower)
+                                || stmt.predicate.to_lowercase().contains(&task_lower)
+                                || stmt.object.to_lowercase().contains(&task_lower)
+                        }))
+            })
+            .take(limit)
+            .map(|fact| {
+                json!({
+                    "id": fact.id,
+                    "score": 1.0,
+                    "content": fact.content,
+                    "facts": fact.facts,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut procedures = records
+            .iter()
+            .filter(|fact| memory_fact_graph(fact) == PROCEDURES_GRAPH)
+            .filter_map(procedure_from_fact)
+            .filter(|proc| {
+                proc.name.to_lowercase().contains(&task_lower)
+                    || proc
+                        .description
+                        .as_ref()
+                        .is_some_and(|desc| desc.to_lowercase().contains(&task_lower))
+            })
+            .take(limit)
+            .map(|proc| {
+                json!({
+                    "name": proc.name,
+                    "kind": proc.kind,
+                    "description": proc.description,
+                    "run": "run_procedure",
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut episodic = records
+            .iter()
+            .filter(|fact| memory_fact_graph(fact) == EPISODIC_GRAPH)
+            .filter_map(|fact| {
+                let statement = fact.facts.first()?;
+                Some(json!({
+                    "id": fact.id,
+                    "subject": statement.subject,
+                    "predicate": statement.predicate,
+                    "object": statement.object,
+                    "at": fact.meta.as_ref().and_then(|meta| meta.get("at")).cloned(),
+                }))
+            })
+            .take(limit)
+            .collect::<Vec<_>>();
+        let mut truncated = false;
+        while serde_json::to_string(&json!({
+            "semantic": &semantic,
+            "procedures": &procedures,
+            "episodic": &episodic,
+        }))
+        .map(|text| text.len() > budget)
+        .unwrap_or(false)
+            && (!semantic.is_empty() || !procedures.is_empty() || !episodic.is_empty())
+        {
+            truncated = true;
+            if !semantic.is_empty() {
+                semantic.pop();
+            } else if !procedures.is_empty() {
+                procedures.pop();
+            } else {
+                episodic.pop();
+            }
+        }
+        ToolResult::success(json!({
+            "task": task,
+            "mode": mode,
+            "semantic": semantic,
+            "procedures": procedures,
+            "episodic": episodic,
+            "truncated": truncated,
+        }))
     }
 }
 
@@ -4055,5 +5346,189 @@ mod tests {
             ToolInvocation::new().with_arg("query", serde_json::json!("42")),
         );
         assert_eq!(recall2.content["count"], 0);
+    }
+
+    fn run_alpha8_memory(
+        store: Arc<InMemoryMemoryStore>,
+        access_policy: Arc<AccessPolicyRegistry>,
+        name: &str,
+        args: ToolInvocation,
+    ) -> ToolResult {
+        let reasoning = ReasoningRegistration::shared();
+        let mut reg = ToolRegistry::new();
+        reg.install(store_memory_tool(store.clone()));
+        reg.install(recall_memory_tool_with_reasoning_and_access_policy(
+            store.clone(),
+            reasoning,
+            access_policy.clone(),
+        ));
+        reg.install(save_procedure_tool(store.clone()));
+        reg.install(list_procedures_tool(store.clone()));
+        reg.install(run_procedure_tool(store.clone()));
+        reg.install(explain_decision_tool(store.clone()));
+        reg.install(recall_decisions_tool(store.clone()));
+        reg.install(record_event_tool(store.clone()));
+        reg.install(recall_episodes_tool(store.clone()));
+        reg.install(set_access_policy_tool(store, access_policy));
+        reg.call(name, &args).expect("dispatch")
+    }
+
+    #[test]
+    fn procedure_run_records_explainable_decision() {
+        let store = InMemoryMemoryStore::shared();
+        let policy = AccessPolicyRegistry::shared();
+        let save = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "save_procedure",
+            ToolInvocation::new()
+                .with_arg("name", serde_json::json!("classify"))
+                .with_arg("kind", serde_json::json!("asp"))
+                .with_arg("body", serde_json::json!("decision({{entity}})."))
+                .with_arg("description", serde_json::json!("classify an entity")),
+        );
+        assert!(!save.is_error, "{:?}", save.content);
+
+        let missing_param = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "run_procedure",
+            ToolInvocation::new().with_arg("name", serde_json::json!("classify")),
+        );
+        assert!(missing_param.is_error);
+        assert_eq!(
+            missing_param.content["message"],
+            "Missing argument for procedure parameter: entity"
+        );
+
+        let listed = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "list_procedures",
+            ToolInvocation::new(),
+        );
+        assert_eq!(listed.content["procedures"].as_array().unwrap().len(), 1);
+
+        let run = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "run_procedure",
+            ToolInvocation::new()
+                .with_arg("name", serde_json::json!("classify"))
+                .with_arg("params", serde_json::json!({"entity": "alice"}))
+                .with_arg("inputs", serde_json::json!(["cqels://memory/event/e1"]))
+                .with_arg("policy", serde_json::json!("demo")),
+        );
+        assert!(!run.is_error, "{:?}", run.content);
+        assert_eq!(run.content["result"]["program"], "decision(alice).");
+        let decision = run.content["decision"].as_str().unwrap();
+
+        let explained = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "explain_decision",
+            ToolInvocation::new().with_arg("id", serde_json::json!(decision)),
+        );
+        assert!(!explained.is_error, "{:?}", explained.content);
+        assert_eq!(explained.content["procedure"], "classify");
+        assert_eq!(explained.content["policy"], "demo");
+
+        let recalled = run_alpha8_memory(
+            store,
+            policy,
+            "recall_decisions",
+            ToolInvocation::new().with_arg("policy", serde_json::json!("demo")),
+        );
+        assert_eq!(recalled.content["decisions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn episodic_tools_record_and_recall_events() {
+        let store = InMemoryMemoryStore::shared();
+        let policy = AccessPolicyRegistry::shared();
+        let recorded = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "record_event",
+            ToolInvocation::new()
+                .with_arg("subject", serde_json::json!("http://ex/Alice"))
+                .with_arg("predicate", serde_json::json!("http://ex/saw"))
+                .with_arg("object", serde_json::json!("http://ex/Bob"))
+                .with_arg("objectType", serde_json::json!("uri"))
+                .with_arg("time", serde_json::json!("2026-07-07")),
+        );
+        assert!(!recorded.is_error, "{:?}", recorded.content);
+
+        let recalled = run_alpha8_memory(
+            store,
+            policy,
+            "recall_episodes",
+            ToolInvocation::new()
+                .with_arg("entity", serde_json::json!("http://ex/Bob"))
+                .with_arg("since", serde_json::json!("2026-07-01"))
+                .with_arg("until", serde_json::json!("2026-08-01")),
+        );
+        let events = recalled.content["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["subject"], "http://ex/Alice");
+    }
+
+    #[test]
+    fn access_policy_filters_pattern_recall_by_role() {
+        let store = InMemoryMemoryStore::shared();
+        let policy = AccessPolicyRegistry::shared();
+        for (subject, label) in [("http://ex/Visible", "team"), ("http://ex/Hidden", "other")] {
+            let stored = run_alpha8_memory(
+                store.clone(),
+                policy.clone(),
+                "store_memory",
+                ToolInvocation::new().with_arg(
+                    "facts",
+                    serde_json::json!([{
+                        "subject": subject,
+                        "predicate": "http://ex/status",
+                        "object": "active",
+                        "meta": {"accessLabel": label}
+                    }]),
+                ),
+            );
+            assert!(!stored.is_error, "{:?}", stored.content);
+        }
+        let set = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "set_access_policy",
+            ToolInvocation::new()
+                .with_arg("role", serde_json::json!("analyst"))
+                .with_arg("labels", serde_json::json!(["team"])),
+        );
+        assert!(!set.is_error, "{:?}", set.content);
+
+        let missing_role = run_alpha8_memory(
+            store.clone(),
+            policy.clone(),
+            "recall_memory",
+            ToolInvocation::new().with_arg(
+                "pattern",
+                serde_json::json!({"predicate": "http://ex/status"}),
+            ),
+        );
+        assert!(missing_role.is_error);
+
+        let visible = run_alpha8_memory(
+            store,
+            policy,
+            "recall_memory",
+            ToolInvocation::new()
+                .with_arg("role", serde_json::json!("analyst"))
+                .with_arg(
+                    "pattern",
+                    serde_json::json!({"predicate": "http://ex/status"}),
+                ),
+        );
+        assert!(!visible.is_error, "{:?}", visible.content);
+        let rows = visible.content["facts"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["s"], "http://ex/Visible");
     }
 }

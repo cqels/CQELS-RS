@@ -30,6 +30,15 @@
 //! | `list_stream_queries` | ✅ implemented (engine-bound) |
 //! | `unregister_stream_query` | ✅ implemented (engine-bound) |
 //! | `poll_stream_results` | ✅ implemented (engine-bound) |
+//! | `save_procedure`    | ✅ implemented (procedural memory) |
+//! | `list_procedures`   | ✅ implemented (procedural memory) |
+//! | `run_procedure`     | ✅ implemented (placeholder binding + dry-run dispatch) |
+//! | `record_event`      | ✅ implemented (episodic memory) |
+//! | `recall_episodes`   | ✅ implemented (episodic filters) |
+//! | `explain_decision`  | ✅ implemented (decision lineage) |
+//! | `recall_decisions`  | ✅ implemented (decision filters) |
+//! | `set_access_policy` | ✅ implemented (role/label grants) |
+//! | `assemble_context`  | ✅ implemented (lexical working-memory bundle) |
 //! | `reason`           | ✅ implemented (one-shot RETE inference) |
 //! | `validate`         | ✅ implemented (SHACL bridge; see [`validate`]) |
 //! | `solve`            | ✅ implemented (ASP bridge; see [`solve`]) |
@@ -72,9 +81,13 @@ pub use stream_query::{
 };
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{
-    analyze_query_tool, forget_memory_tool, parse_query_tool, query_tool, reason_tool,
-    reasoning_profiles_tool, recall_memory_tool, recall_memory_tool_with_reasoning,
-    register_reasoning_tool, shacl_capabilities_tool, store_memory_tool, ReasoningRegistration,
+    analyze_query_tool, assemble_context_tool, explain_decision_tool, forget_memory_tool,
+    list_procedures_tool, parse_query_tool, query_tool, reason_tool, reasoning_profiles_tool,
+    recall_decisions_tool, recall_episodes_tool, recall_memory_tool,
+    recall_memory_tool_with_reasoning, recall_memory_tool_with_reasoning_and_access_policy,
+    record_event_tool, register_reasoning_tool, run_procedure_tool, save_procedure_tool,
+    set_access_policy_tool, shacl_capabilities_tool, store_memory_tool, AccessPolicyRegistry,
+    ReasoningRegistration,
 };
 pub use transport::{
     handle_request, handle_request_with_prompts, handle_request_with_prompts_and_resources,
