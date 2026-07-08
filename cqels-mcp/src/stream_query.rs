@@ -73,6 +73,27 @@ struct StreamRegistration {
     buffer_size: usize,
 }
 
+struct PendingRegistrationGuard {
+    hub: StreamQueryHub,
+    query_id: String,
+}
+
+impl PendingRegistrationGuard {
+    fn new(hub: StreamQueryHub, query_id: String) -> Self {
+        Self { hub, query_id }
+    }
+}
+
+impl Drop for PendingRegistrationGuard {
+    fn drop(&mut self) {
+        self.hub
+            .inner
+            .pending_registrations
+            .lock()
+            .remove(&self.query_id);
+    }
+}
+
 const DEFAULT_BUFFER_SIZE: usize = 100;
 const MAX_BUFFER_SIZE: usize = 100_000;
 
@@ -287,7 +308,9 @@ impl McpTool for RegisterStreamQueryTool {
                 return ToolResult::error(format!("Query already registered: {query_id}"));
             }
         }
-        let reserved_query_id = requested_query_id.clone();
+        let _pending_guard = requested_query_id
+            .as_ref()
+            .map(|query_id| PendingRegistrationGuard::new(self.hub.clone(), query_id.clone()));
         let buffer_size = invocation
             .get("bufferSize")
             .and_then(|value| value.as_i64())
@@ -330,14 +353,6 @@ impl McpTool for RegisterStreamQueryTool {
             *id_cell.lock() = Some(query_id.clone());
             Ok::<(String, String), cqels_model::CqelsError>((query_id, engine_query_id))
         });
-        if let Some(query_id) = reserved_query_id {
-            self.hub
-                .inner
-                .pending_registrations
-                .lock()
-                .remove(&query_id);
-        }
-
         match registration {
             Ok((query_id, engine_query_id)) => ToolResult::success(json!({
                 "ok": true,
@@ -701,6 +716,22 @@ mod tests {
             duplicate.content["message"],
             "Query already registered: custom-q"
         );
+    }
+
+    #[test]
+    fn pending_registration_guard_removes_reserved_query_id() {
+        let (hub, _rt) = fresh_hub();
+        hub.inner
+            .pending_registrations
+            .lock()
+            .insert("custom-q".to_string());
+
+        {
+            let _guard = PendingRegistrationGuard::new(hub.clone(), "custom-q".to_string());
+            assert!(hub.inner.pending_registrations.lock().contains("custom-q"));
+        }
+
+        assert!(!hub.inner.pending_registrations.lock().contains("custom-q"));
     }
 
     #[test]
