@@ -17,6 +17,7 @@ cqels-reasoning.workspace = true
 cqels-shacl.workspace = true
 async-trait.workspace = true
 oxigraph.workspace = true
+oxttl = "=0.1.8"
 axum = "0.7"
 serde.workspace = true
 serde_json.workspace = true

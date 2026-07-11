@@ -5,6 +5,7 @@
 //! optional reasoning integration.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use futures::StreamExt;
 
@@ -28,7 +29,7 @@ use crate::runtime::CqelsRuntime;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), cqels_model::CqelsError> {
-/// let mut engine = CqelsEngine::builder()
+/// let engine = CqelsEngine::builder()
 ///     .id("my-engine")
 ///     .broadcast_capacity(1024)
 ///     .build()?;
@@ -45,7 +46,7 @@ use crate::runtime::CqelsRuntime;
 pub struct CqelsEngine {
     id: String,
     runtime: CqelsRuntime,
-    stream_senders: HashMap<String, DataStream>,
+    stream_senders: Mutex<HashMap<String, DataStream>>,
     persistence: Option<PersistenceCoordinator>,
 }
 
@@ -84,27 +85,28 @@ impl CqelsEngine {
     /// Creates a named data stream and registers it with the engine.
     ///
     /// Returns a [`DataStream`] that can be used to push elements.
-    pub async fn create_stream(&mut self, name: &str) -> Result<DataStream, CqelsError> {
-        if self.stream_senders.contains_key(name) {
-            return Err(CqelsError::Stream {
-                message: format!("stream '{}' already exists", name),
-            });
-        }
-
+    pub async fn create_stream(&self, name: &str) -> Result<DataStream, CqelsError> {
         let (tx, stream) = create_stream_pair(4096);
         self.runtime.register_stream(name, stream).await?;
 
         let data_stream = DataStream::new(name.to_string(), tx);
         // Keep a reference by cloning the sender
         let probe = DataStream::new(name.to_string(), data_stream.tx.clone());
-        self.stream_senders.insert(name.to_string(), probe);
+        self.stream_senders
+            .lock()
+            .expect("stream sender registry mutex poisoned")
+            .insert(name.to_string(), probe);
 
         Ok(data_stream)
     }
 
-    /// Returns a reference to a previously created data stream.
-    pub fn get_stream(&self, name: &str) -> Option<&DataStream> {
-        self.stream_senders.get(name)
+    /// Returns a clone of a previously created data stream handle.
+    pub fn get_stream(&self, name: &str) -> Option<DataStream> {
+        self.stream_senders
+            .lock()
+            .expect("stream sender registry mutex poisoned")
+            .get(name)
+            .cloned()
     }
 
     /// Closes a previously-created data stream by dropping the
@@ -122,10 +124,13 @@ impl CqelsEngine {
     /// forwarding task. Use it when correctness of in-flight events
     /// matters (parity tests, replay drains). For abrupt shutdown
     /// use [`Self::stop`].
-    pub async fn close_stream(&mut self, name: &str) -> Result<(), CqelsError> {
+    pub async fn close_stream(&self, name: &str) -> Result<(), CqelsError> {
         // 1. Drop the engine's mpsc Sender clone. Combined with the
         //    caller having dropped theirs, the mpsc starts closing.
-        self.stream_senders.remove(name);
+        self.stream_senders
+            .lock()
+            .expect("stream sender registry mutex poisoned")
+            .remove(name);
         // 2. Take the forwarding task's JoinHandle out of the engine
         //    so we can await its natural completion. Removing the
         //    StreamState also drops the engine's `broadcast::Sender`,
@@ -439,7 +444,7 @@ impl CqelsEngineBuilder {
         Ok(CqelsEngine {
             id,
             runtime,
-            stream_senders: HashMap::new(),
+            stream_senders: Mutex::new(HashMap::new()),
             persistence,
         })
     }
@@ -482,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_stream() {
-        let mut engine = CqelsEngine::builder().build().unwrap();
+        let engine = CqelsEngine::builder().build().unwrap();
         let stream = engine.create_stream("test-stream").await.unwrap();
         assert_eq!(stream.name(), "test-stream");
         assert!(engine.get_stream("test-stream").is_some());
@@ -491,15 +496,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_stream_rejected() {
-        let mut engine = CqelsEngine::builder().build().unwrap();
+        let engine = CqelsEngine::builder().build().unwrap();
         engine.create_stream("dup").await.unwrap();
         let result = engine.create_stream("dup").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
+    async fn concurrent_create_stream_allows_only_one_winner() {
+        let engine = std::sync::Arc::new(CqelsEngine::builder().build().unwrap());
+        let first = {
+            let engine = engine.clone();
+            async move { engine.create_stream("race").await }
+        };
+        let second = {
+            let engine = engine.clone();
+            async move { engine.create_stream("race").await }
+        };
+
+        let (a, b) = tokio::join!(first, second);
+        let successes = usize::from(a.is_ok()) + usize::from(b.is_ok());
+
+        assert_eq!(successes, 1);
+        assert!(engine.get_stream("race").is_some());
+        assert_eq!(engine.registered_stream_names().await, vec!["race"]);
+    }
+
+    #[tokio::test]
     async fn test_push_data_through_stream() {
-        let mut engine = CqelsEngine::builder().build().unwrap();
+        let engine = CqelsEngine::builder().build().unwrap();
         let stream = engine.create_stream("data").await.unwrap();
         engine.start().await.unwrap();
 

@@ -32,6 +32,7 @@ use cqels_mcp::{
     shacl_capabilities_tool, solve_tool_with_solver, store_memory_tool,
     unregister_stream_query_tool, validate_tool_with_solver, AccessPolicyRegistry,
     InMemoryMemoryStore, MemoryStore, ReasoningRegistration, StreamQueryHub, ToolRegistry,
+    RESOURCE_DOC_CEP, RESOURCE_DOC_CQELSQL, RESOURCE_ENGINE_STATUS, RESOURCE_KG_NAMESPACES,
     RESOURCE_KG_STATS, RESOURCE_QUERY_RESULTS_TEMPLATE, RESOURCE_REASONING,
 };
 use serde_json::{json, Value};
@@ -458,13 +459,17 @@ fn stdio_dispatches_every_tool_in_one_session() {
     let resources_list = responses[25]["result"]["resources"]
         .as_array()
         .expect("resources array");
-    assert_eq!(resources_list.len(), 4, "4 static resources registered");
+    assert_eq!(resources_list.len(), 8, "8 static resources registered");
     let resource_uris: Vec<&str> = resources_list
         .iter()
         .map(|resource| resource["uri"].as_str().unwrap())
         .collect();
     assert!(resource_uris.contains(&RESOURCE_KG_STATS));
+    assert!(resource_uris.contains(&RESOURCE_KG_NAMESPACES));
+    assert!(resource_uris.contains(&RESOURCE_ENGINE_STATUS));
     assert!(resource_uris.contains(&RESOURCE_REASONING));
+    assert!(resource_uris.contains(&RESOURCE_DOC_CQELSQL));
+    assert!(resource_uris.contains(&RESOURCE_DOC_CEP));
 
     let templates = responses[26]["result"]["resourceTemplates"]
         .as_array()

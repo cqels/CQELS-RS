@@ -78,7 +78,7 @@ impl QueryResultListener<BindingSet> for BindingCollector {
 
 #[tokio::test]
 async fn test_ask_query_via_facade() {
-    let mut engine = CqelsEngine::builder().id("ask-e2e").build().unwrap();
+    let engine = CqelsEngine::builder().id("ask-e2e").build().unwrap();
 
     let stream = engine.create_stream("sensors").await.unwrap();
 
@@ -111,7 +111,7 @@ async fn test_ask_query_via_facade() {
 
 #[tokio::test]
 async fn test_construct_query_via_facade() {
-    let mut engine = CqelsEngine::builder().id("construct-e2e").build().unwrap();
+    let engine = CqelsEngine::builder().id("construct-e2e").build().unwrap();
 
     let stream = engine.create_stream("sensors").await.unwrap();
 
@@ -152,7 +152,7 @@ async fn test_describe_query_via_facade() {
     use cqels_model::term::{IriTerm, LiteralTerm};
     use cqels_model::Term;
 
-    let mut engine = CqelsEngine::builder().id("describe-e2e").build().unwrap();
+    let engine = CqelsEngine::builder().id("describe-e2e").build().unwrap();
 
     // Load static data that DESCRIBE will look up
     let stmts = vec![
@@ -210,7 +210,7 @@ async fn test_describe_query_via_facade() {
 
 #[tokio::test]
 async fn test_query_lifecycle_register_unregister() {
-    let mut engine = CqelsEngine::builder().id("lifecycle-e2e").build().unwrap();
+    let engine = CqelsEngine::builder().id("lifecycle-e2e").build().unwrap();
 
     let _stream = engine.create_stream("s").await.unwrap();
 

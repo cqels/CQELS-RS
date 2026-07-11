@@ -63,7 +63,7 @@ async fn test_persistence_push_events_and_recover() {
 
     // Phase 1: Create engine, push events
     {
-        let mut engine = CqelsEngine::builder()
+        let engine = CqelsEngine::builder()
             .id("e2e-persist-1")
             .persistence_config(config.clone())
             .build()

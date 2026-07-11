@@ -68,7 +68,7 @@ fn bench_data_stream_push(c: &mut Criterion) {
             |b, elements| {
                 b.iter(|| {
                     rt.block_on(async {
-                        let mut engine = cqels_engine::CqelsEngine::builder()
+                        let engine = cqels_engine::CqelsEngine::builder()
                             .id("bench")
                             .broadcast_capacity(count as usize * 2)
                             .build()

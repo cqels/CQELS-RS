@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct DataStream {
     name: String,
     pub(crate) tx: mpsc::Sender<StreamElement>,

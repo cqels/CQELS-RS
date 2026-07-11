@@ -11,54 +11,65 @@
 //! Registered surface:
 //!
 //! - Stateless/introspection: `parse_query`, `query`, `analyze_query`,
-//!   `reasoning_profiles`, `shacl_capabilities`, `reason`, `validate`,
-//!   and `solve`.
+//!   `validate_stream_query`, `reasoning_profiles`, `shacl_capabilities`,
+//!   `reason`, `validate`, and `solve`.
 //! - Java alpha.8 memory surface: `store_memory`, `recall_memory`,
 //!   `forget_memory`, `register_stream_query`, `forget_stream_query`,
 //!   `save_procedure`, `list_procedures`, `run_procedure`, `record_event`,
 //!   `recall_episodes`, `explain_decision`, `recall_decisions`,
 //!   `register_reasoning`, `set_access_policy`, and `assemble_context`.
 //!   Memory-backed tools use [`SledMemoryStore`] when `CQELS_MCP_MEMORY_DIR`
-//!   is set, otherwise [`InMemoryMemoryStore`].
-//! - Rust convenience stream tools: `list_stream_queries`,
-//!   `unregister_stream_query`, and `poll_stream_results`.
+//!   is set, or under a child directory of Java-compatible
+//!   `CQELS_MCP_RDF_STORE_PATH`, otherwise
+//!   [`InMemoryMemoryStore`].
+//! - Stream tools: `create_stream`, `push_stream_events`,
+//!   `register_stream_query`, `forget_stream_query`, `list_stream_queries`,
+//!   `unregister_stream_query`, `poll_stream_results`, `watch_invariant`,
+//!   and `register_rules`.
 //! - Prompt templates: Java-compatible CQELS workflow/query prompts
 //!   exposed through `prompts/list` and `prompts/get`.
 //! - Resources:
 //! - `cqels://kg/stats`
+//! - `cqels://kg/namespaces`
+//! - `cqels://engine/status`
 //! - `cqels://streams`
 //! - `cqels://queries`
 //! - `cqels://reasoning/capabilities`
+//! - `cqels://docs/cqelsql`
+//! - `cqels://docs/cep`
 //! - `cqels://queries/{queryId}/results` template
 
 use std::error::Error;
 use std::io::{self, BufReader};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use cqels_engine::CqelsEngine;
 use cqels_mcp::{
     analyze_query_tool, assemble_context_tool_with_access_policy, cqels_prompt_registry,
-    cqels_resource_registry_with_streams, explain_decision_tool, forget_memory_tool,
-    forget_stream_query_tool, list_procedures_tool, list_stream_queries_tool, parse_query_tool,
-    poll_stream_results_tool, query_tool, reason_tool, reasoning_profiles_tool,
-    recall_decisions_tool, recall_episodes_tool,
+    cqels_resource_registry_with_streams, create_stream_tool, explain_decision_tool,
+    forget_memory_tool, forget_stream_query_tool, list_procedures_tool, list_stream_queries_tool,
+    parse_query_tool, poll_stream_results_tool, push_stream_events_tool, query_tool, reason_tool,
+    reasoning_profiles_tool, recall_decisions_tool, recall_episodes_tool,
     recall_memory_tool_with_reasoning_and_access_policy, record_event_tool,
-    register_reasoning_tool, register_stream_query_tool, run_http_with_prompts_and_resources,
-    run_procedure_tool, run_stdio_with_prompts_and_resources, save_procedure_tool,
-    server_transport_from_env, set_access_policy_tool, shacl_capabilities_tool, solve_tool,
-    store_memory_tool, unregister_stream_query_tool, validate_tool, AccessPolicyRegistry,
+    register_reasoning_tool, register_rules_tool, register_stream_query_tool,
+    run_http_with_prompts_and_resources, run_procedure_tool, run_stdio_with_prompts_and_resources,
+    save_procedure_tool, server_transport_from_env, set_access_policy_tool,
+    shacl_capabilities_tool, solve_tool, store_memory_tool, unregister_stream_query_tool,
+    validate_stream_query_tool, validate_tool, watch_invariant_tool, AccessPolicyRegistry,
     InMemoryMemoryStore, MemoryStore, ReasoningRegistration, ServerTransport, SledMemoryStore,
     StreamQueryHub, ToolRegistry,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let memory: Arc<dyn MemoryStore> = match std::env::var("CQELS_MCP_MEMORY_DIR") {
-        Ok(path) if !path.is_empty() => match SledMemoryStore::open(&path) {
+    let memory: Arc<dyn MemoryStore> = match persistent_memory_dir() {
+        Some(path) => match SledMemoryStore::open(&path) {
             Ok(store) => Arc::new(store),
             Err(e) => {
                 eprintln!(
-                    "cqels-mcp: failed to open sled memory store at {path}: {e}; \
-                     falling back to in-memory"
+                    "cqels-mcp: failed to open sled memory store at {}: {e}; \
+                     falling back to in-memory",
+                    path.display()
                 );
                 Arc::new(InMemoryMemoryStore::new())
             }
@@ -81,11 +92,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     registry.install(parse_query_tool());
     registry.install(query_tool());
     registry.install(analyze_query_tool());
+    registry.install(validate_stream_query_tool());
+    registry.install(create_stream_tool(stream_hub.clone()));
+    registry.install(push_stream_events_tool(stream_hub.clone()));
     registry.install(register_stream_query_tool(stream_hub.clone()));
     registry.install(forget_stream_query_tool(stream_hub.clone()));
     registry.install(list_stream_queries_tool(stream_hub.clone()));
     registry.install(unregister_stream_query_tool(stream_hub.clone()));
     registry.install(poll_stream_results_tool(stream_hub.clone()));
+    registry.install(watch_invariant_tool(stream_hub.clone()));
+    registry.install(register_rules_tool(stream_hub.clone()));
     registry.install(reasoning_profiles_tool());
     registry.install(shacl_capabilities_tool());
     registry.install(reason_tool());
@@ -137,4 +153,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn persistent_memory_dir() -> Option<PathBuf> {
+    std::env::var("CQELS_MCP_MEMORY_DIR")
+        .ok()
+        .and_then(nonblank_env_value)
+        .map(PathBuf::from)
+        .or_else(rdf_store_alias_memory_dir)
+}
+
+fn rdf_store_alias_memory_dir() -> Option<PathBuf> {
+    let root = std::env::var("CQELS_MCP_RDF_STORE_PATH")
+        .ok()
+        .and_then(nonblank_env_value)
+        .map(PathBuf::from)?;
+
+    if let Err(e) = std::fs::create_dir_all(&root) {
+        eprintln!(
+            "cqels-mcp: failed to prepare CQELS_MCP_RDF_STORE_PATH root {}: {e}; \
+             sled open will fall back to in-memory if the child path is unusable",
+            root.display()
+        );
+    }
+
+    let memory_dir = root.join("cqels-mcp-memory");
+    eprintln!(
+        "cqels-mcp: using CQELS_MCP_RDF_STORE_PATH for MCP memory compatibility; \
+         sled files live under {} and pushed stream events are not persisted",
+        memory_dir.display()
+    );
+    Some(memory_dir)
+}
+
+fn nonblank_env_value(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }

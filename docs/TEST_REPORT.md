@@ -1,18 +1,21 @@
 # CQELS-RS Test Report — Java Parity Verification
 
 **Repository:** `HiveIntel/cqels-rs`
-**Captured at:** alpha.8 MCP parity stack (2026-07-07)
+**Captured at:** alpha.10 MCP parity stack (2026-07-11)
 **Toolchain:** Rust 1.83+ (MSRV), Cargo 1.95.0
 
 This document is a point-in-time snapshot proving the Rust port is at
 feature parity with `cqels-java`. For the contributor-facing
 day-to-day test workflow, see [`testing.md`](./testing.md).
 
-**Latest delta (2026-07-07):** the default `cqels-mcp` server now wires
-Java alpha.8's full memory/procedure/episodic/decision/governance/working
-tool surface plus the live stream-query hub. `cargo test -p cqels-mcp`
-now passes **181** unit tests plus the stdio integration test, and
-`cargo test --workspace` passed for the full workspace after the change.
+**Latest delta (2026-07-11):** the default `cqels-mcp` server now wires
+Java alpha.10's stream-ingest and continuous-reasoning MCP surface:
+`create_stream`, `push_stream_events`, `validate_stream_query`,
+`watch_invariant`, `register_rules`, RDF-message parsing, opt-in
+`CQELS_MCP_REASONING`, initialize instructions, live namespace/status/docs
+resources, and Java-compatible `CQELS_MCP_RDF_STORE_PATH` aliasing.
+`cargo test -p cqels-mcp` now passes **191** unit tests plus the stdio
+integration test.
 
 ---
 
@@ -20,7 +23,7 @@ now passes **181** unit tests plus the stdio integration test, and
 
 | Metric | Value |
 |---|---|
-| **Total tests** | **1,847 passing** (default features) + 43 optional-feature tests = **~1,890** |
+| **Total tests** | **1,858 passing** (default features) + 43 optional-feature tests = **~1,901** |
 | **Failures** | **0** |
 | **Ignored** | 4 (live-server or opt-in doc tests gated by env vars / explicit examples) |
 | **Test groups** | 51 across 15 workspace crates |
@@ -38,7 +41,7 @@ now passes **181** unit tests plus the stdio integration test, and
 | Clippy (workspace) | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
 | Clippy (kuksa feature) | `cargo clippy -p cqels-cdsp --features kuksa --all-targets -- -D warnings` | ✅ clean |
 | Clippy (thrift feature) | `cargo clippy -p cqels-storage-iotdb --features thrift --all-targets -- -D warnings` | ✅ clean |
-| Tests | `cargo test --workspace` | ✅ 1847 passed, 4 ignored |
+| Tests | `cargo test --workspace` | ✅ 1858 passed, 4 ignored |
 | Tests (kuksa feature) | `cargo test -p cqels-cdsp --features kuksa` | ✅ 27 passed, 1 ignored (`KUKSA_HOST`) |
 | Tests (thrift feature) | `cargo test -p cqels-storage-iotdb --features thrift` | ✅ 16 passed, 2 ignored (`IOTDB_HOST`) |
 | Docs | `RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps` | ✅ clean |
@@ -51,10 +54,10 @@ now passes **181** unit tests plus the stdio integration test, and
 |---|---:|---|---|
 | `cqels-core` | **743** | Stream operators, parser, compiler, query pipeline | `cqels-core` |
 | `cqels-reasoning` | **160** | RETE network, RDFS / OWL profiles, rule sets | `cqels-reasoning` |
-| `cqels-engine` | **137** | `ReactiveStreamEngine`, CEP runtime, persistence wiring | `cqels-engine` |
+| `cqels-engine` | **138** | `ReactiveStreamEngine`, CEP runtime, persistence wiring | `cqels-engine` |
 | `cqels-model` | **107** | RDF model, BindingSet, statements, terms | `cqels-model` |
 | `cqels-geo` | **67** | GeoSPARQL spatial reasoning | `cqels-geo` |
-| `cqels-mcp` | **181** | MCP tool/prompt/resource surface + JSON-RPC stdio / HTTP transports | `cqels-mcp` |
+| `cqels-mcp` | **191** | MCP tool/prompt/resource surface + JSON-RPC stdio / HTTP transports | `cqels-mcp` |
 | `cqels-shacl` | **60** | SHACL validation engine, repair candidates | `cqels-shacl` |
 | `cqels-asp` | **50** | ASP solver trait, Clingo subprocess solver | `cqels-asp` |
 | `cqels-cdsp` | **15** | COVESA VSS signal envelope + mapper + source | `cqels-cdsp` |
@@ -64,9 +67,9 @@ now passes **181** unit tests plus the stdio integration test, and
 | `cqels-storage-lmdb` | **8** | LMDB embedded backend via `heed` | (Rust-only fill-in) |
 | `cqels-storage-rocksdb` | **8** | RocksDB backend (real C++ library) | `cqels-storage-rocksdb` |
 | `cqels-storage-spi` | **14** | Trait-only crate (impls live in backend crates) | `cqels-storage-spi` |
-| **TOTAL (lib unit)** | **1,582** | | |
+| **TOTAL (lib unit)** | **1,593** | | |
 | Integration + doc tests across the workspace | **265** | | |
-| **GRAND TOTAL** | **1,847** | | |
+| **GRAND TOTAL** | **1,858** | | |
 
 ---
 
@@ -108,8 +111,8 @@ the tests that prove the port.
 | RocksDB backend (lifts `links = "rocksdb"` oxigraph clash) | `cqels-storage-rocksdb` | 8 tests, same shape |
 | IoTDB time-series adapter | `cqels-storage-iotdb` — narrow `IotDbExecutor` trait + in-memory ref impl | 14 tests (executor-level + backend-level) |
 | IoTDB **real Thrift client** | `cqels-storage-iotdb::ThriftIotDbExecutor` (feature `thrift`) | 2 unit tests + 1 `IOTDB_HOST`-gated live round-trip |
-| MCP tool + prompt + resource surface (Java's `cqels-mcp`) | `cqels-mcp` (`query`, `parse_query`, `analyze_query`, `reasoning_profiles`, `shacl_capabilities`, `reason`, `store/recall/forget_memory`, `register_stream_query`/`forget_stream_query`, `save/list/run_procedure`, `record_event`/`recall_episodes`, `explain_decision`/`recall_decisions`, `register_reasoning`, `set_access_policy`, `assemble_context`, `validate`, `solve`, 8 CQELS prompt templates; resources `cqels://kg/stats`, `cqels://streams`, `cqels://queries`, `cqels://reasoning/capabilities`, `cqels://queries/{queryId}/results`; stdio + HTTP JSON-RPC transports) | 103 stateless/memory/reasoning/alpha8 tool tests + 19 prompt/transport tests + 16 engine-bound stream-query tool tests + 8 SHACL `validate` tests + 8 ASP `solve` tests + 7 resource tests + 7 resource/combined transport tests + 13 HTTP transport tests = **181** |
-| MCP `register_stream_query` engine wiring | `cqels-mcp::stream_query::StreamQueryHub` | `stream_query::tests::*` (16 tests; custom `queryId` / buffer coverage plus unregister race regression) |
+| MCP tool + prompt + resource surface (Java's `cqels-mcp`) | `cqels-mcp` (`query`, `parse_query`, `analyze_query`, `validate_stream_query`, `reasoning_profiles`, `shacl_capabilities`, `reason`, `store/recall/forget_memory`, `create_stream`, `push_stream_events`, `register_stream_query`/`forget_stream_query`, `watch_invariant`, `register_rules`, `save/list/run_procedure`, `record_event`/`recall_episodes`, `explain_decision`/`recall_decisions`, `register_reasoning`, `set_access_policy`, `assemble_context`, `validate`, `solve`, initialize instructions, 8 CQELS prompt templates; resources `cqels://kg/stats`, `cqels://kg/namespaces`, `cqels://engine/status`, `cqels://streams`, `cqels://queries`, `cqels://reasoning/capabilities`, `cqels://docs/cqelsql`, `cqels://docs/cep`, `cqels://queries/{queryId}/results`; stdio + HTTP JSON-RPC transports; `CQELS_MCP_RDF_STORE_PATH` accepted as an alias root for MCP memory records/procedure definitions, with sled data kept under `<path>/cqels-mcp-memory` and not used for pushed stream events) | 191 `cqels-mcp` unit tests plus stdio integration, covering stateless/memory/reasoning tools, stream ingest/query/observer tools, SHACL `validate`, ASP `solve`, resources, prompts, stdio, and HTTP transport |
+| MCP stream ingest/query/observer wiring | `cqels-mcp::stream_query::StreamQueryHub` | `stream_query::tests::*` (25 tests; custom `queryId` / buffer coverage, RDF-message ingest, `watch_invariant`, `register_rules`, `CQELS_MCP_REASONING`, bounded ASP delta dedup, reasoned observer batching, plus unregister race regression) |
 | MCP `validate` (SHACL bridge) | `cqels-mcp::validate` (any `Arc<dyn AspSolver>`) | 8 tests with recording `MockSolver` |
 | MCP `solve` (ASP bridge) | `cqels-mcp::solve` | 8 tests |
 | COVESA CDSP / VSS signal ingestion | `cqels-cdsp` | 15 default + 12 with `kuksa` feature = 27 (live test gated by `KUKSA_HOST`) |
@@ -152,6 +155,10 @@ These appear in the Java codebase but are deliberately not ported, per
   byte-based Rust SPI is sufficient for the backends we ship.
 - Java's `LogicalToRDFConverter` — the Rust port uses a typed
   `Statement` model throughout instead.
+- Java alpha.10's JVM deploy-time extension mechanisms
+  (`cqels-plugin-spi`, `ServiceLoader` plugin discovery, and
+  `ServiceLoader` embedding-provider discovery). Rust extension points are
+  native traits/registries rather than jar/classpath loading.
 
 ---
 
@@ -159,7 +166,7 @@ These appear in the Java codebase but are deliberately not ported, per
 
 | Build invocation | Build OK | Tests passing |
 |---|:---:|:---:|
-| `cargo build --workspace` | ✅ | 1,847 passed, 4 ignored |
+| `cargo build --workspace` | ✅ | 1,858 passed, 4 ignored |
 | `cargo build -p cqels-cdsp --features kuksa` | ✅ | 27 / 27 |
 | `cargo build -p cqels-storage-iotdb --features thrift` | ✅ | 16 / 16 |
 
@@ -173,10 +180,10 @@ was stabilized in commit `fcdef33` by pre-registering the stream the
 query subscribes to, eliminating a race between the engine's
 auto-cleanup-on-empty-stream path and the explicit `unregister` call.
 Five consecutive isolated runs after the fix and the latest full-workspace
-run on the alpha.8 MCP parity stack produced:
+run on the alpha.10 MCP parity stack produced:
 
 ```
-Latest full workspace: passed=1847 failed=0 ignored=4
+Latest full workspace: passed=1858 failed=0 ignored=4
 ```
 
 No failures were observed in the latest full-workspace run.
@@ -186,7 +193,8 @@ No failures were observed in the latest full-workspace run.
 ## 9. Parity verdict
 
 **The Rust port is at feature parity with cqels-java for every
-checklist item in [`JAVA_PARITY_PLAN.md`](./JAVA_PARITY_PLAN.md).**
+non-out-of-scope checklist item in
+[`JAVA_PARITY_PLAN.md`](./JAVA_PARITY_PLAN.md).**
 Specifically:
 
 - **Phase 1** (core correctness): ✅ complete

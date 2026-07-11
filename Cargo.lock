@@ -459,6 +459,7 @@ dependencies = [
  "cqels-reasoning",
  "cqels-shacl",
  "oxigraph",
+ "oxttl",
  "parking_lot 0.12.5",
  "serde",
  "serde_json",

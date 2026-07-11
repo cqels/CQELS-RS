@@ -212,7 +212,7 @@ fn parse_term(s: &str) -> Term {
 // ─── End-to-end run on the engine ───────────────────────────────────────────
 
 async fn run_workload(workload: &Workload) -> Result<usize, String> {
-    let mut engine = CqelsEngine::builder()
+    let engine = CqelsEngine::builder()
         .build()
         .map_err(|e| format!("build engine: {e}"))?;
 

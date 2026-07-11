@@ -41,12 +41,23 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+use cqels_asp::{AnswerSet, AspFactMapper, AspSolver, ClingoSubprocessSolver};
+use cqels_core::parser::{CqelsQlParser, CypherQlParser};
+use cqels_core::stream::{RdfStreamElement, StreamElement};
 use cqels_engine::listener::listener_from_fn;
 use cqels_engine::CqelsEngine;
-use cqels_model::{BindingSet, CqelsError};
+use cqels_model::{BindingSet, CqelsError, IriTerm, LiteralTerm, Statement, Term};
+use cqels_reasoning::{ReasoningProfile, ReteNetwork};
+use cqels_shacl::{
+    ShaclShapeGraph, ShaclShapeParser, ShaclStreamSolveConfig, ShaclValidationEngine,
+    ShaclViolation,
+};
+use oxttl::NQuadsParser;
 use parking_lot::Mutex;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use tokio::runtime::Handle;
 
 use crate::tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
@@ -63,14 +74,64 @@ struct HubInner {
     engine: Arc<CqelsEngine>,
     handle: Handle,
     results: Mutex<HashMap<String, VecDeque<BindingSet>>>,
+    json_results: Mutex<HashMap<String, VecDeque<JsonValue>>>,
     registrations: Mutex<HashMap<String, StreamRegistration>>,
+    observers: Mutex<HashMap<String, ObserverRegistration>>,
+    observer_evaluation: Mutex<()>,
     pending_registrations: Mutex<HashSet<String>>,
+    stream_reasoning: Option<StreamReasoningState>,
 }
 
 #[derive(Clone, Debug)]
 struct StreamRegistration {
     engine_query_id: String,
     buffer_size: usize,
+}
+
+#[derive(Clone)]
+struct ObserverRegistration {
+    stream: String,
+    buffer_size: usize,
+    kind: ObserverKind,
+}
+
+#[derive(Clone)]
+enum ObserverKind {
+    WatchInvariant {
+        shape_graph: ShaclShapeGraph,
+        report_conforming: bool,
+        solver: Arc<dyn AspSolver>,
+    },
+    Rules {
+        rules: String,
+        result_predicate: String,
+        arg_names: Vec<String>,
+        emit_delta: bool,
+        max_facts: usize,
+        facts: Vec<Statement>,
+        emitted: HashSet<String>,
+        emitted_order: VecDeque<String>,
+        solver: Arc<dyn AspSolver>,
+    },
+}
+
+struct StreamReasoningState {
+    profile: ReasoningProfile,
+    networks: Mutex<HashMap<String, ReteNetwork>>,
+}
+
+#[derive(Clone)]
+struct DynAspSolver(Arc<dyn AspSolver>);
+
+#[async_trait]
+impl AspSolver for DynAspSolver {
+    async fn solve(
+        &self,
+        program: &str,
+        max_models: usize,
+    ) -> Result<Vec<AnswerSet>, cqels_asp::AspError> {
+        self.0.solve(program, max_models).await
+    }
 }
 
 struct PendingRegistrationGuard {
@@ -105,37 +166,71 @@ impl StreamQueryHub {
     /// runtime, or be the handle of a runtime executing on a different
     /// thread — otherwise `block_on` will deadlock.
     pub fn new(engine: Arc<CqelsEngine>, handle: Handle) -> Self {
+        Self::new_with_stream_reasoning(engine, handle, stream_reasoning_profile_from_env())
+    }
+
+    /// Constructs a new hub with an explicit stream-reasoning profile.
+    ///
+    /// `None` keeps reasoning disabled. `Some(ReasoningProfile::Rdfs)` or
+    /// `Some(ReasoningProfile::RdfsFull)` mirrors Java alpha.10's
+    /// `CQELS_MCP_REASONING` opt-in stream reasoning path.
+    pub fn new_with_stream_reasoning(
+        engine: Arc<CqelsEngine>,
+        handle: Handle,
+        stream_reasoning_profile: Option<ReasoningProfile>,
+    ) -> Self {
         Self {
             inner: Arc::new(HubInner {
                 engine,
                 handle,
                 results: Mutex::new(HashMap::new()),
+                json_results: Mutex::new(HashMap::new()),
                 registrations: Mutex::new(HashMap::new()),
+                observers: Mutex::new(HashMap::new()),
+                observer_evaluation: Mutex::new(()),
                 pending_registrations: Mutex::new(HashSet::new()),
+                stream_reasoning: stream_reasoning_profile.map(|profile| StreamReasoningState {
+                    profile,
+                    networks: Mutex::new(HashMap::new()),
+                }),
             }),
         }
     }
 
     /// Returns the buffered result count for `query_id`.
     pub fn buffered_count(&self, query_id: &str) -> usize {
-        self.inner
+        let binding_count = self
+            .inner
             .results
             .lock()
             .get(query_id)
             .map(VecDeque::len)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        let json_count = self
+            .inner
+            .json_results
+            .lock()
+            .get(query_id)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        binding_count + json_count
     }
 
     /// Returns the IDs of all currently registered stream queries.
     pub fn registered_query_ids(&self) -> Vec<String> {
-        let mut ids = self
-            .inner
-            .registrations
-            .lock()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut ids = {
+            let mut ids = self
+                .inner
+                .registrations
+                .lock()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            ids.extend(self.inner.observers.lock().keys().cloned());
+            ids
+        };
         ids.sort();
+        ids.dedup();
         ids
     }
 
@@ -147,6 +242,18 @@ impl StreamQueryHub {
             .block_on(async move { engine.registered_stream_names().await })
     }
 
+    /// Returns the configured stream-reasoning profile name, if enabled.
+    pub fn stream_reasoning_profile(&self) -> Option<String> {
+        self.inner
+            .stream_reasoning
+            .as_ref()
+            .map(|state| match state.profile {
+                ReasoningProfile::Rdfs => "rdfs".to_string(),
+                ReasoningProfile::RdfsFull => "rdfs-full".to_string(),
+                _ => state.profile.name().to_string(),
+            })
+    }
+
     /// Drains up to `max` buffered results for `query_id`. Returns the
     /// drained results in FIFO order.
     pub fn drain_results(&self, query_id: &str, max: usize) -> Vec<BindingSet> {
@@ -156,6 +263,129 @@ impl StreamQueryHub {
         };
         let take = max.min(buffer.len());
         buffer.drain(..take).collect()
+    }
+
+    /// Drains up to `max` buffered results as JSON values. Engine query
+    /// [`BindingSet`] values are serialized through serde; observer tools
+    /// already buffer JSON payloads.
+    pub fn drain_result_values(&self, query_id: &str, max: usize) -> Vec<JsonValue> {
+        let mut out = {
+            let mut guard = self.inner.json_results.lock();
+            if let Some(buffer) = guard.get_mut(query_id) {
+                let take = max.min(buffer.len());
+                buffer.drain(..take).collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        };
+        if out.len() >= max {
+            return out;
+        }
+        let remaining = max.saturating_sub(out.len());
+        out.extend(
+            self.drain_results(query_id, remaining)
+                .into_iter()
+                .map(|binding| {
+                    serde_json::to_value(binding).unwrap_or_else(|e| {
+                        json!({
+                            "serialization_error": e.to_string(),
+                        })
+                    })
+                }),
+        );
+        out
+    }
+
+    /// Creates a stream if it is not already registered. Returns `true`
+    /// when a new stream was created and `false` when it already existed.
+    pub fn create_stream(&self, name: &str) -> Result<bool, CqelsError> {
+        if self.inner.engine.get_stream(name).is_some() {
+            return Ok(false);
+        }
+        let engine = self.inner.engine.clone();
+        let stream_name = name.to_string();
+        self.inner.handle.block_on(async move {
+            match engine.create_stream(&stream_name).await {
+                Ok(_) => Ok(true),
+                Err(e @ CqelsError::Stream { .. }) => {
+                    if engine
+                        .registered_stream_names()
+                        .await
+                        .iter()
+                        .any(|registered| registered == &stream_name)
+                    {
+                        Ok(false)
+                    } else {
+                        Err(e)
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        })
+    }
+
+    /// Pushes one RDF observation to a named stream and then feeds the
+    /// same observation into MCP-level continuous observers.
+    pub fn push_observation(
+        &self,
+        stream: &str,
+        statements: Vec<Statement>,
+        timestamp: i64,
+    ) -> Result<usize, CqelsError> {
+        self.create_stream(stream)?;
+        let Some(data_stream) = self.inner.engine.get_stream(stream) else {
+            return Err(CqelsError::Stream {
+                message: format!("stream '{stream}' could not be resolved after creation"),
+            });
+        };
+        let inferred = self.apply_stream_reasoning(stream, &statements, timestamp);
+        let pushed_statement_count = statements.len() + inferred.len();
+        let elements = statements
+            .iter()
+            .chain(inferred.iter())
+            .cloned()
+            .map(|statement| StreamElement::Rdf(RdfStreamElement::new(statement, timestamp)))
+            .collect::<Vec<_>>();
+        self.inner.handle.block_on(async {
+            for element in elements {
+                data_stream.push(element).await?;
+            }
+            Ok::<(), CqelsError>(())
+        })?;
+        if inferred.is_empty() {
+            self.process_observation(stream, &statements, timestamp);
+        } else {
+            let mut observer_statements = statements.clone();
+            observer_statements.extend(inferred);
+            self.process_observation(stream, &observer_statements, timestamp);
+        }
+        Ok(pushed_statement_count)
+    }
+
+    fn apply_stream_reasoning(
+        &self,
+        stream: &str,
+        statements: &[Statement],
+        timestamp: i64,
+    ) -> Vec<Statement> {
+        let Some(reasoning) = self.inner.stream_reasoning.as_ref() else {
+            return Vec::new();
+        };
+        let mut networks = reasoning.networks.lock();
+        let network = networks
+            .entry(stream.to_string())
+            .or_insert_with(|| ReteNetwork::compile(reasoning.profile.create_config()));
+        statements
+            .iter()
+            .flat_map(|statement| {
+                let element = RdfStreamElement::new(statement.clone(), timestamp);
+                network
+                    .process_element(&element)
+                    .into_iter()
+                    .map(|inferred| inferred.statement)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     fn record_result(&self, query_id: String, result: BindingSet) {
@@ -174,11 +404,30 @@ impl StreamQueryHub {
         }
     }
 
+    fn record_json_result_with_size(
+        &self,
+        query_id: String,
+        result: JsonValue,
+        buffer_size: usize,
+    ) {
+        let mut guard = self.inner.json_results.lock();
+        let buffer = guard.entry(query_id).or_default();
+        buffer.push_back(result);
+        while buffer.len() > buffer_size {
+            buffer.pop_front();
+        }
+    }
+
     fn forget_results(&self, query_id: &str) {
         self.inner.results.lock().remove(query_id);
+        self.inner.json_results.lock().remove(query_id);
     }
 
     fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
+        if self.inner.observers.lock().remove(query_id).is_some() {
+            self.forget_results(query_id);
+            return Ok(());
+        }
         let registration = self
             .inner
             .registrations
@@ -194,6 +443,710 @@ impl StreamQueryHub {
             .block_on(async move { engine.unregister_query(&id_for_async).await })?;
         self.forget_results(query_id);
         Ok(())
+    }
+
+    fn register_observer(&self, query_id: String, registration: ObserverRegistration) {
+        self.inner.observers.lock().insert(query_id, registration);
+    }
+
+    fn process_observation(&self, stream: &str, statements: &[Statement], timestamp: i64) {
+        let _evaluation_guard = self.inner.observer_evaluation.lock();
+        let query_ids = {
+            let observers = self.inner.observers.lock();
+            observers
+                .iter()
+                .filter(|(_, registration)| registration.stream == stream)
+                .map(|(query_id, _)| query_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        for query_id in query_ids {
+            let Some(mut registration) = self.inner.observers.lock().get(&query_id).cloned() else {
+                continue;
+            };
+            if registration.stream != stream {
+                continue;
+            }
+            let result =
+                self.evaluate_observer(&query_id, &mut registration, statements, timestamp);
+            let mut observers = self.inner.observers.lock();
+            let Some(current) = observers.get_mut(&query_id) else {
+                continue;
+            };
+            *current = registration;
+            if let Some(result) = result {
+                self.record_json_result_with_size(query_id, result, current.buffer_size);
+            }
+        }
+    }
+
+    fn evaluate_observer(
+        &self,
+        query_id: &str,
+        registration: &mut ObserverRegistration,
+        statements: &[Statement],
+        timestamp: i64,
+    ) -> Option<JsonValue> {
+        match &mut registration.kind {
+            ObserverKind::WatchInvariant {
+                shape_graph,
+                report_conforming,
+                solver,
+            } => {
+                let engine = ShaclValidationEngine::new(
+                    ShaclStreamSolveConfig::default(),
+                    DynAspSolver(solver.clone()),
+                );
+                let result = self.inner.handle.block_on(async {
+                    engine
+                        .validate(shape_graph, statements, timestamp, query_id)
+                        .await
+                });
+                match result {
+                    Ok(validation) => {
+                        if validation.conforms && !*report_conforming {
+                            return None;
+                        }
+                        Some(json!({
+                            "queryId": query_id,
+                            "type": "watch_invariant",
+                            "stream": registration.stream,
+                            "timestamp": timestamp,
+                            "conforms": validation.conforms,
+                            "status": format!("{:?}", validation.status),
+                            "violation_count": validation.violations.len(),
+                            "violations": violations_to_json(&validation.violations),
+                        }))
+                    }
+                    Err(e) => Some(json!({
+                        "queryId": query_id,
+                        "type": "watch_invariant",
+                        "stream": registration.stream,
+                        "timestamp": timestamp,
+                        "error": e.to_string(),
+                    })),
+                }
+            }
+            ObserverKind::Rules {
+                rules,
+                result_predicate,
+                arg_names,
+                emit_delta,
+                max_facts,
+                facts,
+                emitted,
+                emitted_order,
+                solver,
+            } => {
+                facts.extend(statements.iter().cloned());
+                if facts.len() > *max_facts {
+                    let drop_count = facts.len() - *max_facts;
+                    facts.drain(..drop_count);
+                }
+                let fact_program = AspFactMapper::statements_to_program(facts);
+                let full_program = if fact_program.is_empty() {
+                    rules.clone()
+                } else {
+                    format!("{rules}\n{fact_program}")
+                };
+                let answer_sets = self
+                    .inner
+                    .handle
+                    .block_on(async { solver.solve(&full_program, 1).await });
+                match answer_sets {
+                    Ok(answer_sets) => {
+                        let mut rows = Vec::new();
+                        for answer_set in &answer_sets {
+                            for atom in answer_set.query_predicate(result_predicate) {
+                                let atom_key = atom.to_string();
+                                if *emit_delta {
+                                    if !emitted.insert(atom_key.clone()) {
+                                        continue;
+                                    }
+                                    emitted_order.push_back(atom_key);
+                                    while emitted_order.len() > *max_facts {
+                                        if let Some(oldest) = emitted_order.pop_front() {
+                                            emitted.remove(&oldest);
+                                        }
+                                    }
+                                }
+                                rows.push(json!({
+                                    "predicate": atom.predicate,
+                                    "terms": atom.terms,
+                                    "bindings": atom_terms_to_bindings(&atom.terms, arg_names),
+                                }));
+                            }
+                        }
+                        Some(json!({
+                            "queryId": query_id,
+                            "type": "register_rules",
+                            "stream": registration.stream,
+                            "timestamp": timestamp,
+                            "resultPredicate": result_predicate,
+                            "count": rows.len(),
+                            "results": rows,
+                        }))
+                    }
+                    Err(e) => Some(json!({
+                        "queryId": query_id,
+                        "type": "register_rules",
+                        "stream": registration.stream,
+                        "timestamp": timestamp,
+                        "error": e.to_string(),
+                    })),
+                }
+            }
+        }
+    }
+}
+
+// ─── create_stream ──────────────────────────────────────────────────
+
+/// Constructs the Java alpha.9-compatible `create_stream` MCP tool.
+pub fn create_stream_tool(hub: StreamQueryHub) -> CreateStreamTool {
+    CreateStreamTool { hub }
+}
+
+pub struct CreateStreamTool {
+    hub: StreamQueryHub,
+}
+
+impl McpTool for CreateStreamTool {
+    fn name(&self) -> &str {
+        "create_stream"
+    }
+
+    fn description(&self) -> &str {
+        "Create a named RDF input stream if it does not already exist. \
+         Idempotent: existing streams are reported as already available."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property(
+                "stream",
+                json!({
+                    "type": "string",
+                    "description": "Input stream name to create."
+                }),
+            )
+            .require("stream")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(stream) = required_nonempty_str(invocation, "stream") else {
+            return ToolResult::error("missing `stream` argument");
+        };
+        match self.hub.create_stream(&stream) {
+            Ok(created) => ToolResult::success(json!({
+                "ok": true,
+                "stream": stream,
+                "created": created,
+                "status": if created { "created" } else { "exists" },
+            })),
+            Err(e) => ToolResult::error(format!("create_stream failed: {e}")),
+        }
+    }
+}
+
+// ─── push_stream_events ─────────────────────────────────────────────
+
+/// Constructs the Java alpha.9-compatible `push_stream_events` MCP tool.
+pub fn push_stream_events_tool(hub: StreamQueryHub) -> PushStreamEventsTool {
+    PushStreamEventsTool { hub }
+}
+
+pub struct PushStreamEventsTool {
+    hub: StreamQueryHub,
+}
+
+const MAX_PUSH_EVENTS: usize = 1000;
+const MAX_PUSH_STATEMENTS: usize = 100_000;
+const MAX_NQUADS_CHARS: usize = 2_000_000;
+
+impl McpTool for PushStreamEventsTool {
+    fn name(&self) -> &str {
+        "push_stream_events"
+    }
+
+    fn description(&self) -> &str {
+        "Push one or more RDF observations into a named stream. Each event \
+         may contain `facts` ({subject,predicate,object,objectType}) and/or \
+         RDF-message N-Quads in `nquads`; all statements in an observation \
+         share the event timestamp."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property(
+                "stream",
+                json!({
+                    "type": "string",
+                    "description": "Input stream name. Created automatically if needed."
+                }),
+            )
+            .with_property(
+                "events",
+                json!({
+                    "type": "array",
+                    "description": "Events to push. Each item may include eventTime, facts, and/or nquads.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "eventTime": { "description": "Unix milliseconds, numeric string, or UTC RFC3339 timestamp." },
+                            "facts": { "type": "array" },
+                            "nquads": { "type": "string" }
+                        }
+                    }
+                }),
+            )
+            .require("stream")
+            .require("events")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(stream) = required_nonempty_str(invocation, "stream") else {
+            return ToolResult::error("missing `stream` argument");
+        };
+        let Some(events) = invocation.get("events").and_then(JsonValue::as_array) else {
+            return ToolResult::error("missing or non-array `events` argument");
+        };
+        if events.len() > MAX_PUSH_EVENTS {
+            return ToolResult::error(format!(
+                "too many events: {} > {MAX_PUSH_EVENTS}",
+                events.len()
+            ));
+        }
+
+        let mut observations = Vec::new();
+        let mut statement_count = 0usize;
+        for (event_index, event) in events.iter().enumerate() {
+            let Some(object) = event.as_object() else {
+                return ToolResult::error(format!("events[{event_index}] must be an object"));
+            };
+            let timestamp = match parse_event_time(object.get("eventTime")) {
+                Ok(timestamp) => timestamp,
+                Err(e) => return ToolResult::error(format!("events[{event_index}].{e}")),
+            };
+            let mut event_observations = Vec::new();
+            if let Some(facts) = object.get("facts") {
+                match parse_fact_array(facts, &format!("events[{event_index}].facts")) {
+                    Ok(statements) => event_observations.push(statements),
+                    Err(e) => return ToolResult::error(e),
+                }
+            }
+            if let Some(nquads) = object.get("nquads").and_then(JsonValue::as_str) {
+                if nquads.len() > MAX_NQUADS_CHARS {
+                    return ToolResult::error(format!(
+                        "events[{event_index}].nquads exceeds {MAX_NQUADS_CHARS} characters"
+                    ));
+                }
+                match parse_nquads_messages(nquads) {
+                    Ok(mut messages) => event_observations.append(&mut messages),
+                    Err(e) => {
+                        return ToolResult::error(format!("events[{event_index}].nquads: {e}"));
+                    }
+                }
+            }
+            if event_observations.is_empty() {
+                return ToolResult::error(format!(
+                    "events[{event_index}] requires `facts` and/or `nquads`"
+                ));
+            }
+            for statements in event_observations {
+                if let Err(e) = validate_statement_graphs(&statements) {
+                    return ToolResult::error(e);
+                }
+                statement_count += statements.len();
+                if statement_count > MAX_PUSH_STATEMENTS {
+                    return ToolResult::error(format!(
+                        "too many statements: {statement_count} > {MAX_PUSH_STATEMENTS}"
+                    ));
+                }
+                observations.push((timestamp, statements));
+            }
+        }
+
+        let observation_count = observations.len();
+        let mut pushed_statements = 0usize;
+        for (timestamp, statements) in observations {
+            match self
+                .hub
+                .push_observation(&stream, statements.clone(), timestamp)
+            {
+                Ok(count) => pushed_statements += count,
+                Err(e) => return ToolResult::error(format!("push_stream_events failed: {e}")),
+            }
+        }
+
+        ToolResult::success(json!({
+            "ok": true,
+            "stream": stream,
+            "eventCount": events.len(),
+            "observationCount": observation_count,
+            "inputStatementCount": statement_count,
+            "statementCount": pushed_statements,
+        }))
+    }
+}
+
+// ─── validate_stream_query ──────────────────────────────────────────
+
+/// Constructs the Java alpha.9-compatible `validate_stream_query` MCP tool.
+pub fn validate_stream_query_tool() -> ValidateStreamQueryTool {
+    ValidateStreamQueryTool
+}
+
+pub struct ValidateStreamQueryTool;
+
+impl McpTool for ValidateStreamQueryTool {
+    fn name(&self) -> &str {
+        "validate_stream_query"
+    }
+
+    fn description(&self) -> &str {
+        "Validate stream query syntax without registering it. Supports \
+         `cqelsql` and `cypher` language values."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property(
+                "query",
+                json!({
+                    "type": "string",
+                    "description": "Query text to validate."
+                }),
+            )
+            .with_property(
+                "language",
+                json!({
+                    "type": "string",
+                    "enum": ["cqelsql", "cypher"],
+                    "default": "cqelsql"
+                }),
+            )
+            .require("query")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(query) = invocation.get_str("query") else {
+            return ToolResult::error("missing `query` argument");
+        };
+        let language = invocation
+            .get_str("language")
+            .unwrap_or("cqelsql")
+            .trim()
+            .to_ascii_lowercase();
+        match language.as_str() {
+            "cqelsql" => match CqelsQlParser::parse(query) {
+                Ok(def) => ToolResult::success(json!({
+                    "valid": true,
+                    "language": "cqelsql",
+                    "streams": def.streams.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                    "patternGroups": def.pattern_groups.len(),
+                })),
+                Err(e) => ToolResult::success(json!({
+                    "valid": false,
+                    "language": "cqelsql",
+                    "error": e.to_string(),
+                })),
+            },
+            "cypher" | "cypherql" => match CypherQlParser::parse(query) {
+                Ok(def) => ToolResult::success(json!({
+                    "valid": true,
+                    "language": "cypher",
+                    "streams": def.streams.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                })),
+                Err(e) => ToolResult::success(json!({
+                    "valid": false,
+                    "language": "cypher",
+                    "error": e.to_string(),
+                })),
+            },
+            other => ToolResult::error(format!(
+                "unsupported validate_stream_query language '{other}'; supported: cqelsql, cypher"
+            )),
+        }
+    }
+}
+
+// ─── watch_invariant ────────────────────────────────────────────────
+
+/// Constructs the Java alpha.10-compatible `watch_invariant` MCP tool.
+pub fn watch_invariant_tool(hub: StreamQueryHub) -> WatchInvariantTool {
+    let solver: Arc<dyn AspSolver> = Arc::new(ClingoSubprocessSolver::new());
+    watch_invariant_tool_with_solver(hub, solver)
+}
+
+/// Constructs `watch_invariant` with a caller-supplied ASP solver.
+pub fn watch_invariant_tool_with_solver(
+    hub: StreamQueryHub,
+    solver: Arc<dyn AspSolver>,
+) -> WatchInvariantTool {
+    WatchInvariantTool { hub, solver }
+}
+
+pub struct WatchInvariantTool {
+    hub: StreamQueryHub,
+    solver: Arc<dyn AspSolver>,
+}
+
+impl McpTool for WatchInvariantTool {
+    fn name(&self) -> &str {
+        "watch_invariant"
+    }
+
+    fn description(&self) -> &str {
+        "Register a continuous SHACL invariant over an MCP stream. Each \
+         observation pushed through `push_stream_events` is validated and \
+         any report is buffered for `poll_stream_results`."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("stream", json!({ "type": "string" }))
+            .with_property(
+                "shapes",
+                json!({
+                    "description": "SHACL shapes as an array of fact/triple objects or RDF-message N-Quads string."
+                }),
+            )
+            .with_property("queryId", json!({ "type": "string" }))
+            .with_property(
+                "bufferSize",
+                json!({
+                    "type": "integer",
+                    "default": DEFAULT_BUFFER_SIZE
+                }),
+            )
+            .with_property(
+                "reportConforming",
+                json!({
+                    "type": "boolean",
+                    "default": false
+                }),
+            )
+            .with_property(
+                "notify",
+                json!({
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Accepted for Java compatibility; push notifications are not yet wired in Rust."
+                }),
+            )
+            .require("stream")
+            .require("shapes")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(stream) = required_nonempty_str(invocation, "stream") else {
+            return ToolResult::error("missing `stream` argument");
+        };
+        let Some(shapes_value) = invocation.get("shapes") else {
+            return ToolResult::error("missing `shapes` argument");
+        };
+        let shapes = match parse_shapes_argument(shapes_value) {
+            Ok(statements) => statements,
+            Err(e) => return ToolResult::error(e),
+        };
+        let shape_graph = match ShaclShapeParser::parse(&shapes) {
+            Ok(graph) => graph,
+            Err(e) => return ToolResult::error(format!("shape parse error: {e}")),
+        };
+        let query_id = invocation
+            .get_str("queryId")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| generated_query_id("wi"));
+        if self.hub.registered_query_ids().contains(&query_id) {
+            return ToolResult::error(format!("Query already registered: {query_id}"));
+        }
+        let buffer_size = buffer_size_from(invocation);
+        let report_conforming = invocation
+            .get("reportConforming")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        let notify = invocation
+            .get("notify")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        if let Err(e) = self.hub.create_stream(&stream) {
+            return ToolResult::error(format!("create stream failed: {e}"));
+        }
+        self.hub.register_observer(
+            query_id.clone(),
+            ObserverRegistration {
+                stream: stream.clone(),
+                buffer_size,
+                kind: ObserverKind::WatchInvariant {
+                    shape_graph,
+                    report_conforming,
+                    solver: self.solver.clone(),
+                },
+            },
+        );
+        ToolResult::success(json!({
+            "ok": true,
+            "query_id": query_id,
+            "queryId": query_id,
+            "stream": stream,
+            "status": "registered",
+            "bufferSize": buffer_size,
+            "reportConforming": report_conforming,
+            "notify": notify,
+        }))
+    }
+}
+
+// ─── register_rules ─────────────────────────────────────────────────
+
+/// Constructs the Java alpha.10-compatible `register_rules` MCP tool.
+pub fn register_rules_tool(hub: StreamQueryHub) -> RegisterRulesTool {
+    let solver: Arc<dyn AspSolver> = Arc::new(ClingoSubprocessSolver::new());
+    register_rules_tool_with_solver(hub, solver)
+}
+
+/// Constructs `register_rules` with a caller-supplied ASP solver.
+pub fn register_rules_tool_with_solver(
+    hub: StreamQueryHub,
+    solver: Arc<dyn AspSolver>,
+) -> RegisterRulesTool {
+    RegisterRulesTool { hub, solver }
+}
+
+pub struct RegisterRulesTool {
+    hub: StreamQueryHub,
+    solver: Arc<dyn AspSolver>,
+}
+
+impl McpTool for RegisterRulesTool {
+    fn name(&self) -> &str {
+        "register_rules"
+    }
+
+    fn description(&self) -> &str {
+        "Register a continuous ASP rule program over an MCP stream. RDF \
+         observations pushed through `push_stream_events` become `rdf/3` \
+         facts, and atoms matching `resultPredicate` are buffered."
+    }
+
+    fn input_schema(&self) -> ToolInputSchema {
+        ToolInputSchema::object()
+            .with_property("stream", json!({ "type": "string" }))
+            .with_property("rules", json!({ "type": "string" }))
+            .with_property("resultPredicate", json!({ "type": "string" }))
+            .with_property("queryId", json!({ "type": "string" }))
+            .with_property(
+                "argNames",
+                json!({
+                    "type": "array",
+                    "items": { "type": "string" }
+                }),
+            )
+            .with_property(
+                "emit",
+                json!({
+                    "type": "string",
+                    "enum": ["delta", "full"],
+                    "default": "delta"
+                }),
+            )
+            .with_property("maxFacts", json!({ "type": "integer", "default": 5000 }))
+            .with_property(
+                "bufferSize",
+                json!({ "type": "integer", "default": DEFAULT_BUFFER_SIZE }),
+            )
+            .with_property(
+                "notify",
+                json!({
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Accepted for Java compatibility; push notifications are not yet wired in Rust."
+                }),
+            )
+            .require("stream")
+            .require("rules")
+            .require("resultPredicate")
+    }
+
+    fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        let Some(stream) = required_nonempty_str(invocation, "stream") else {
+            return ToolResult::error("missing `stream` argument");
+        };
+        let Some(rules) = required_nonempty_str(invocation, "rules") else {
+            return ToolResult::error("missing `rules` argument");
+        };
+        let Some(result_predicate) = required_nonempty_str(invocation, "resultPredicate") else {
+            return ToolResult::error("missing `resultPredicate` argument");
+        };
+        let query_id = invocation
+            .get_str("queryId")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| generated_query_id("rl"));
+        if self.hub.registered_query_ids().contains(&query_id) {
+            return ToolResult::error(format!("Query already registered: {query_id}"));
+        }
+        let arg_names = match parse_arg_names(invocation.get("argNames")) {
+            Ok(names) => names,
+            Err(e) => return ToolResult::error(e),
+        };
+        let emit = invocation
+            .get_str("emit")
+            .unwrap_or("delta")
+            .trim()
+            .to_ascii_lowercase();
+        let emit_delta = match emit.as_str() {
+            "delta" => true,
+            "full" => false,
+            other => return ToolResult::error(format!("unsupported emit value '{other}'")),
+        };
+        let max_facts = invocation
+            .get("maxFacts")
+            .and_then(JsonValue::as_i64)
+            .map(|value| value.clamp(1, 50_000) as usize)
+            .unwrap_or(5000);
+        let buffer_size = buffer_size_from(invocation);
+        let notify = invocation
+            .get("notify")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        if let Err(e) = self.hub.create_stream(&stream) {
+            return ToolResult::error(format!("create stream failed: {e}"));
+        }
+        self.hub.register_observer(
+            query_id.clone(),
+            ObserverRegistration {
+                stream: stream.clone(),
+                buffer_size,
+                kind: ObserverKind::Rules {
+                    rules,
+                    result_predicate: result_predicate.clone(),
+                    arg_names,
+                    emit_delta,
+                    max_facts,
+                    facts: Vec::new(),
+                    emitted: HashSet::new(),
+                    emitted_order: VecDeque::new(),
+                    solver: self.solver.clone(),
+                },
+            },
+        );
+        ToolResult::success(json!({
+            "ok": true,
+            "query_id": query_id,
+            "queryId": query_id,
+            "stream": stream,
+            "status": "registered",
+            "resultPredicate": result_predicate,
+            "emit": emit,
+            "maxFacts": max_facts,
+            "bufferSize": buffer_size,
+            "notify": notify,
+        }))
     }
 }
 
@@ -398,6 +1351,7 @@ impl McpTool for ListStreamQueriesTool {
         ToolResult::success(json!({
             "count": ids.len(),
             "query_ids": ids,
+            "queryIds": ids,
         }))
     }
 }
@@ -559,6 +1513,13 @@ impl McpTool for PollStreamResultsTool {
                 }),
             )
             .with_property(
+                "queryId",
+                json!({
+                    "type": "string",
+                    "description": "Java-compatible query ID alias"
+                }),
+            )
+            .with_property(
                 "limit",
                 json!({
                     "type": "integer",
@@ -570,7 +1531,10 @@ impl McpTool for PollStreamResultsTool {
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
-        let Some(query_id) = invocation.get_str("query_id") else {
+        let Some(query_id) = invocation
+            .get_str("query_id")
+            .or_else(|| invocation.get_str("queryId"))
+        else {
             return ToolResult::error("missing `query_id` argument");
         };
         let limit = invocation
@@ -578,10 +1542,11 @@ impl McpTool for PollStreamResultsTool {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_POLL_LIMIT);
-        let drained = self.hub.drain_results(query_id, limit);
+        let drained = self.hub.drain_result_values(query_id, limit);
         let remaining = self.hub.buffered_count(query_id);
         ToolResult::success(json!({
             "query_id": query_id,
+            "queryId": query_id,
             "count": drained.len(),
             "remaining": remaining,
             "results": drained,
@@ -589,12 +1554,490 @@ impl McpTool for PollStreamResultsTool {
     }
 }
 
+fn required_nonempty_str(invocation: &ToolInvocation, key: &str) -> Option<String> {
+    invocation
+        .get_str(key)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn buffer_size_from(invocation: &ToolInvocation) -> usize {
+    invocation
+        .get("bufferSize")
+        .and_then(JsonValue::as_i64)
+        .map(|value| value.clamp(1, MAX_BUFFER_SIZE as i64) as usize)
+        .unwrap_or(DEFAULT_BUFFER_SIZE)
+}
+
+fn current_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn generated_query_id(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{prefix}-{nanos}")
+}
+
+fn stream_reasoning_profile_from_env() -> Option<ReasoningProfile> {
+    let value = std::env::var("CQELS_MCP_REASONING").ok()?;
+    match parse_stream_reasoning_profile(&value) {
+        Ok(profile) => profile,
+        Err(message) => {
+            eprintln!("cqels-mcp: {message}; stream reasoning disabled");
+            None
+        }
+    }
+}
+
+fn parse_stream_reasoning_profile(value: &str) -> Result<Option<ReasoningProfile>, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "off" | "none" => Ok(None),
+        "rdfs" => Ok(Some(ReasoningProfile::Rdfs)),
+        "rdfs-full" | "rdfs_full" => Ok(Some(ReasoningProfile::RdfsFull)),
+        other => Err(format!(
+            "unknown CQELS_MCP_REASONING value '{other}' (expected rdfs, rdfs-full, or off)"
+        )),
+    }
+}
+
+fn parse_event_time(value: Option<&JsonValue>) -> Result<i64, String> {
+    let Some(value) = value else {
+        return Ok(current_timestamp_ms());
+    };
+    if let Some(ms) = value.as_i64() {
+        return Ok(ms);
+    }
+    if let Some(ms) = value.as_u64() {
+        return Ok(ms.min(i64::MAX as u64) as i64);
+    }
+    if let Some(ms) = value.as_f64() {
+        if ms.is_finite() {
+            return Ok(ms.round() as i64);
+        }
+    }
+    if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        if let Ok(ms) = trimmed.parse::<i64>() {
+            return Ok(ms);
+        }
+        if let Some(ms) = parse_rfc3339_utc_millis(trimmed) {
+            return Ok(ms);
+        }
+    }
+    Err("eventTime must be Unix milliseconds or UTC RFC3339".to_string())
+}
+
+fn parse_rfc3339_utc_millis(value: &str) -> Option<i64> {
+    let value = value.strip_suffix('Z')?;
+    let (date, time) = value.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<u32>().ok()?;
+    let day = date_parts.next()?.parse::<u32>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<u32>().ok()?;
+    let minute = time_parts.next()?.parse::<u32>().ok()?;
+    let second_part = time_parts.next()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+    let (second_text, fraction_text) = second_part
+        .split_once('.')
+        .map(|(second, fraction)| (second, Some(fraction)))
+        .unwrap_or((second_part, None));
+    let second = second_text.parse::<u32>().ok()?;
+    if !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let mut millis = 0u32;
+    if let Some(fraction) = fraction_text {
+        if fraction.is_empty() || !fraction.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        let digits = fraction.chars().take(3).collect::<String>();
+        millis = format!("{digits:0<3}").parse::<u32>().ok()?;
+    }
+    let days = days_from_civil(year, month, day);
+    Some(
+        days * 86_400_000
+            + hour as i64 * 3_600_000
+            + minute as i64 * 60_000
+            + second as i64 * 1000
+            + millis as i64,
+    )
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - i32::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) as i64
+}
+
+fn parse_shapes_argument(value: &JsonValue) -> Result<Vec<Statement>, String> {
+    if let Some(nquads) = value.as_str() {
+        return parse_nquads_messages(nquads)
+            .map(|messages| messages.into_iter().flatten().collect());
+    }
+    if value.is_array() {
+        return parse_fact_array(value, "shapes");
+    }
+    if let Some(facts) = value.get("facts") {
+        return parse_fact_array(facts, "shapes.facts");
+    }
+    if let Some(nquads) = value.get("nquads").and_then(JsonValue::as_str) {
+        return parse_nquads_messages(nquads)
+            .map(|messages| messages.into_iter().flatten().collect());
+    }
+    Err(
+        "`shapes` must be an array, an RDF-message N-Quads string, or an object with facts/nquads"
+            .to_string(),
+    )
+}
+
+fn parse_fact_array(value: &JsonValue, field: &str) -> Result<Vec<Statement>, String> {
+    let Some(items) = value.as_array() else {
+        return Err(format!("{field} must be an array"));
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| parse_fact_statement(item, &format!("{field}[{idx}]")))
+        .collect()
+}
+
+fn parse_fact_statement(value: &JsonValue, field: &str) -> Result<Statement, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{field} must be an object"))?;
+    let get = |primary: &str, alias: &str| {
+        object
+            .get(primary)
+            .or_else(|| object.get(alias))
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("{field}.{primary} must be a non-empty string"))
+    };
+    let subject =
+        subject_term(&get("subject", "s")?).map_err(|e| format!("{field}.subject: {e}"))?;
+    let predicate = IriTerm::new(
+        expand_iri(&get("predicate", "p")?).map_err(|e| format!("{field}.predicate: {e}"))?,
+    );
+    let object_value = get("object", "o")?;
+    let object_type = object
+        .get("objectType")
+        .or_else(|| object.get("object_type"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or("uri")
+        .trim()
+        .to_ascii_lowercase();
+    let object_term = match object_type.as_str() {
+        "uri" | "iri" => Term::Iri(IriTerm::new(
+            expand_iri(&object_value).map_err(|e| format!("{field}.object: {e}"))?,
+        )),
+        "blank" | "bnode" | "blanknode" => Term::BlankNode(cqels_model::BlankNodeTerm::new(
+            blank_node_id(&object_value),
+        )),
+        "literal" => {
+            let mut literal = LiteralTerm::new(object_value);
+            if let Some(datatype) = object.get("datatype").and_then(JsonValue::as_str) {
+                literal = literal.with_datatype(
+                    expand_iri(datatype).map_err(|e| format!("{field}.datatype: {e}"))?,
+                );
+            }
+            if let Some(language) = object.get("language").and_then(JsonValue::as_str) {
+                literal = literal.with_language(language);
+            }
+            Term::Literal(literal)
+        }
+        other => {
+            return Err(format!(
+                "{field}.objectType must be one of uri, iri, literal, blank; got '{other}'"
+            ));
+        }
+    };
+    Ok(Statement::new(subject, predicate, object_term))
+}
+
+fn subject_term(value: &str) -> Result<Term, String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("_:") {
+        return Ok(Term::BlankNode(cqels_model::BlankNodeTerm::new(
+            blank_node_id(trimmed),
+        )));
+    }
+    Ok(Term::Iri(IriTerm::new(expand_iri(trimmed)?)))
+}
+
+fn blank_node_id(value: &str) -> String {
+    value.trim().trim_start_matches("_:").to_string()
+}
+
+fn expand_iri(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed == "a" {
+        return Ok("http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string());
+    }
+    if trimmed.starts_with('<') && trimmed.ends_with('>') && trimmed.len() >= 2 {
+        return Ok(trimmed[1..trimmed.len() - 1].to_string());
+    }
+    if is_absolute_iri(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    let Some((prefix, local)) = trimmed.split_once(':') else {
+        return Err(format!(
+            "'{trimmed}' must be an absolute IRI, bracketed IRI, or known prefixed name"
+        ));
+    };
+    let base = match prefix {
+        "rdf" => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "rdfs" => "http://www.w3.org/2000/01/rdf-schema#",
+        "owl" => "http://www.w3.org/2002/07/owl#",
+        "xsd" => "http://www.w3.org/2001/XMLSchema#",
+        "sh" => "http://www.w3.org/ns/shacl#",
+        "ex" => "http://example.org/",
+        "cqels" => "cqels://ontology/",
+        "sosa" => "http://www.w3.org/ns/sosa/",
+        "saref" => "https://saref.etsi.org/core/",
+        "qudt" => "http://qudt.org/schema/qudt/",
+        "unit" => "http://qudt.org/vocab/unit/",
+        _ if is_valid_iri_scheme(prefix) => return Ok(trimmed.to_string()),
+        _ => {
+            return Err(format!("unknown prefix '{prefix}' in '{trimmed}'"));
+        }
+    };
+    Ok(format!("{base}{local}"))
+}
+
+fn is_absolute_iri(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once(':') else {
+        return false;
+    };
+    !rest.is_empty() && is_valid_iri_scheme(scheme)
+}
+
+fn is_valid_iri_scheme(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(|ch| ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+}
+
+fn parse_nquads_messages(input: &str) -> Result<Vec<Vec<Statement>>, String> {
+    let mut messages = Vec::new();
+    let mut current = Vec::<String>::new();
+    let mut opened = false;
+    let mut last_was_delimiter = false;
+
+    for line in input.lines() {
+        let directive = line
+            .split_once('#')
+            .map(|(before, _)| before)
+            .unwrap_or(line)
+            .trim();
+        if directive.is_empty() {
+            continue;
+        }
+        if is_version_directive(directive) {
+            continue;
+        }
+        if directive == "MESSAGE" {
+            if opened || last_was_delimiter {
+                messages.push(parse_nquads_block(&current.join("\n"))?);
+            } else {
+                messages.push(Vec::new());
+            }
+            current.clear();
+            opened = true;
+            last_was_delimiter = true;
+            continue;
+        }
+        current.push(line.to_string());
+        opened = true;
+        last_was_delimiter = false;
+    }
+
+    if opened && !last_was_delimiter {
+        messages.push(parse_nquads_block(&current.join("\n"))?);
+    }
+    Ok(messages)
+}
+
+fn is_version_directive(line: &str) -> bool {
+    line.starts_with("VERSION ") || line.starts_with("@version ")
+}
+
+fn parse_nquads_block(input: &str) -> Result<Vec<Statement>, String> {
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statements = Vec::new();
+    for (idx, quad) in NQuadsParser::new().for_reader(input.as_bytes()).enumerate() {
+        let quad = quad.map_err(|e| format!("N-Quads parse error at #{idx}: {e}"))?;
+        statements.push(Statement::from(quad));
+    }
+    validate_statement_graphs(&statements)?;
+    Ok(statements)
+}
+
+fn validate_statement_graphs(statements: &[Statement]) -> Result<(), String> {
+    for statement in statements {
+        if let Some(graph) = &statement.graph {
+            if graph.as_str().starts_with("cqels://") {
+                return Err(format!(
+                    "named graph '{}' is reserved for CQELS system data",
+                    graph.as_str()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_arg_names(value: Option<&JsonValue>) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err("argNames must be an array".to_string());
+    };
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    for (idx, item) in items.iter().enumerate() {
+        let Some(name) = item.as_str().map(str::trim).filter(|name| !name.is_empty()) else {
+            return Err(format!("argNames[{idx}] must be a non-empty string"));
+        };
+        if !seen.insert(name.to_string()) {
+            return Err(format!("duplicate argNames entry '{name}'"));
+        }
+        names.push(name.to_string());
+    }
+    if names.len() > 32 {
+        return Err("argNames must contain at most 32 names".to_string());
+    }
+    Ok(names)
+}
+
+fn atom_terms_to_bindings(terms: &[String], arg_names: &[String]) -> JsonValue {
+    let mut bindings = serde_json::Map::new();
+    for (idx, term) in terms.iter().enumerate() {
+        let key = arg_names
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| format!("arg{}", idx + 1));
+        bindings.insert(key, json!(term));
+    }
+    JsonValue::Object(bindings)
+}
+
+fn violations_to_json(violations: &[ShaclViolation]) -> Vec<JsonValue> {
+    violations
+        .iter()
+        .map(|violation| {
+            json!({
+                "shape": violation.shape,
+                "focus": violation.focus,
+                "constraint": violation.constraint,
+                "detail": violation.detail,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::registry::ToolRegistry;
+    use cqels_asp::{AnswerSet, AspError, Atom};
     use cqels_engine::CqelsEngine;
     use tokio::runtime::Runtime;
+
+    struct StaticSolver {
+        answer_sets: Vec<AnswerSet>,
+    }
+
+    #[async_trait]
+    impl AspSolver for StaticSolver {
+        async fn solve(
+            &self,
+            _program: &str,
+            _max_models: usize,
+        ) -> Result<Vec<AnswerSet>, AspError> {
+            Ok(self.answer_sets.clone())
+        }
+    }
+
+    struct CyclingSolver {
+        values: Mutex<VecDeque<&'static str>>,
+    }
+
+    #[async_trait]
+    impl AspSolver for CyclingSolver {
+        async fn solve(
+            &self,
+            _program: &str,
+            _max_models: usize,
+        ) -> Result<Vec<AnswerSet>, AspError> {
+            let value = self
+                .values
+                .lock()
+                .pop_front()
+                .unwrap_or("fallback")
+                .to_string();
+            Ok(vec![AnswerSet::new(vec![Atom::new("alert", vec![value])])])
+        }
+    }
+
+    struct ProgramRecordingSolver {
+        programs: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl AspSolver for ProgramRecordingSolver {
+        async fn solve(
+            &self,
+            program: &str,
+            _max_models: usize,
+        ) -> Result<Vec<AnswerSet>, AspError> {
+            self.programs.lock().push(program.to_string());
+            Ok(vec![AnswerSet::new(Vec::new())])
+        }
+    }
 
     /// Build a fresh engine + multi-thread runtime + hub for tests.
     fn fresh_hub() -> (StreamQueryHub, Arc<Runtime>) {
@@ -614,7 +2057,7 @@ mod tests {
     /// that don't actually feed data through the stream.
     fn fresh_hub_with_sensors_stream() -> (StreamQueryHub, Arc<Runtime>) {
         let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
-        let mut engine = runtime
+        let engine = runtime
             .block_on(async { CqelsEngine::builder().build() })
             .expect("engine builds");
         // Create the `sensors` stream — we never push data into it,
@@ -631,11 +2074,16 @@ mod tests {
 
     fn install_all(hub: &StreamQueryHub) -> ToolRegistry {
         let mut reg = ToolRegistry::new();
+        reg.install(create_stream_tool(hub.clone()));
+        reg.install(push_stream_events_tool(hub.clone()));
+        reg.install(validate_stream_query_tool());
         reg.install(register_stream_query_tool(hub.clone()));
         reg.install(forget_stream_query_tool(hub.clone()));
         reg.install(list_stream_queries_tool(hub.clone()));
         reg.install(unregister_stream_query_tool(hub.clone()));
         reg.install(poll_stream_results_tool(hub.clone()));
+        reg.install(watch_invariant_tool(hub.clone()));
+        reg.install(register_rules_tool(hub.clone()));
         reg
     }
 
@@ -646,6 +2094,425 @@ mod tests {
             FROM STREAM sensors [RANGE 10s]
             WHERE { ?sensor <http://ex.org/temp> ?temp . }
         "#
+    }
+
+    #[test]
+    fn stream_reasoning_profile_parser_accepts_java_alpha10_values() {
+        assert_eq!(
+            parse_stream_reasoning_profile("rdfs").unwrap(),
+            Some(ReasoningProfile::Rdfs)
+        );
+        assert_eq!(
+            parse_stream_reasoning_profile("RDFS_FULL").unwrap(),
+            Some(ReasoningProfile::RdfsFull)
+        );
+        assert_eq!(parse_stream_reasoning_profile("off").unwrap(), None);
+        assert!(parse_stream_reasoning_profile("owl").is_err());
+    }
+
+    #[test]
+    fn rfc3339_event_time_parser_rejects_invalid_calendar_dates() {
+        assert_eq!(
+            parse_rfc3339_utc_millis("1970-01-01T00:00:00.001Z"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_rfc3339_utc_millis("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800_000)
+        );
+        assert_eq!(parse_rfc3339_utc_millis("2026-02-31T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339_utc_millis("2026-04-31T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339_utc_millis("2026-07-11T12:00:60Z"), None);
+        assert_eq!(parse_rfc3339_utc_millis("2026-07-11T12:00:00.1xZ"), None);
+    }
+
+    #[test]
+    fn opt_in_stream_reasoning_emits_rdfs_inferred_triples() {
+        let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
+        let engine = runtime
+            .block_on(async { CqelsEngine::builder().build() })
+            .expect("engine builds");
+        let hub = StreamQueryHub::new_with_stream_reasoning(
+            Arc::new(engine),
+            runtime.handle().clone(),
+            Some(ReasoningProfile::Rdfs),
+        );
+        let child = "http://example.org/Child";
+        let person = "http://example.org/Person";
+        let alice = "http://example.org/alice";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let rdfs_subclass = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+
+        let schema = Statement::new(
+            Term::Iri(IriTerm::new(child)),
+            IriTerm::new(rdfs_subclass),
+            Term::Iri(IriTerm::new(person)),
+        );
+        let instance = Statement::new(
+            Term::Iri(IriTerm::new(alice)),
+            IriTerm::new(rdf_type),
+            Term::Iri(IriTerm::new(child)),
+        );
+
+        let first = hub.apply_stream_reasoning("sensors", &[schema], 1);
+        assert!(first.is_empty());
+        let inferred = hub.apply_stream_reasoning("sensors", &[instance], 2);
+        assert!(inferred.iter().any(|statement| {
+            statement.subject == Term::Iri(IriTerm::new(alice))
+                && statement.predicate == IriTerm::new(rdf_type)
+                && statement.object == Term::Iri(IriTerm::new(person))
+        }));
+    }
+
+    #[test]
+    fn stream_reasoning_dispatches_inferred_observation_as_one_batch() {
+        let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
+        let engine = runtime
+            .block_on(async { CqelsEngine::builder().build() })
+            .expect("engine builds");
+        let hub = StreamQueryHub::new_with_stream_reasoning(
+            Arc::new(engine),
+            runtime.handle().clone(),
+            Some(ReasoningProfile::Rdfs),
+        );
+        let programs = Arc::new(Mutex::new(Vec::new()));
+        let solver: Arc<dyn AspSolver> = Arc::new(ProgramRecordingSolver {
+            programs: programs.clone(),
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(register_rules_tool_with_solver(hub.clone(), solver));
+
+        let registered = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("reasoned-rules"))
+                    .with_arg("rules", json!("alert(X) :- rdf(X,P,O)."))
+                    .with_arg("resultPredicate", json!("alert")),
+            )
+            .expect("dispatch");
+        assert!(!registered.is_error, "{:?}", registered.content);
+
+        let child = "http://example.org/Child";
+        let person = "http://example.org/Person";
+        let alice = "http://example.org/alice";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let rdfs_subclass = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+        let schema = Statement::new(
+            Term::Iri(IriTerm::new(child)),
+            IriTerm::new(rdfs_subclass),
+            Term::Iri(IriTerm::new(person)),
+        );
+        let instance = Statement::new(
+            Term::Iri(IriTerm::new(alice)),
+            IriTerm::new(rdf_type),
+            Term::Iri(IriTerm::new(child)),
+        );
+
+        assert_eq!(
+            hub.push_observation("sensors", vec![schema], 1)
+                .expect("schema push"),
+            1
+        );
+        assert_eq!(
+            hub.push_observation("sensors", vec![instance], 2)
+                .expect("instance push"),
+            2
+        );
+
+        let programs = programs.lock();
+        assert_eq!(programs.len(), 2);
+        assert!(programs[1].contains("http://example.org/Child"));
+        assert!(programs[1].contains("http://example.org/Person"));
+    }
+
+    #[test]
+    fn create_stream_is_idempotent_and_push_accepts_facts_and_rdf_messages() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+
+        let created = reg
+            .call(
+                "create_stream",
+                &ToolInvocation::new().with_arg("stream", json!("sensors")),
+            )
+            .expect("dispatch");
+        assert!(!created.is_error, "create failed: {:?}", created.content);
+        assert_eq!(created.content["created"], true);
+
+        let exists = reg
+            .call(
+                "create_stream",
+                &ToolInvocation::new().with_arg("stream", json!("sensors")),
+            )
+            .expect("dispatch");
+        assert!(
+            !exists.is_error,
+            "idempotent create failed: {:?}",
+            exists.content
+        );
+        assert_eq!(exists.content["created"], false);
+
+        let nquads = r#"VERSION "1.2-messages"
+<http://example.org/s2> <http://example.org/p> "v2" .
+MESSAGE
+<http://example.org/s3> <http://example.org/p> "v3" .
+"#;
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": "2026-07-11T12:00:00.123Z",
+                            "facts": [{
+                                "subject": "ex:s1",
+                                "predicate": "ex:p",
+                                "object": "v1",
+                                "objectType": "literal"
+                            }],
+                            "nquads": nquads
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "push failed: {:?}", pushed.content);
+        assert_eq!(pushed.content["eventCount"], 1);
+        assert_eq!(pushed.content["observationCount"], 3);
+        assert_eq!(pushed.content["inputStatementCount"], 3);
+        assert_eq!(pushed.content["statementCount"], 3);
+        assert!(hub
+            .registered_stream_names()
+            .iter()
+            .any(|name| name == "sensors"));
+    }
+
+    #[test]
+    fn validate_stream_query_reports_validity_without_registering() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+
+        let valid = reg
+            .call(
+                "validate_stream_query",
+                &ToolInvocation::new().with_arg("query", json!(sample_query())),
+            )
+            .expect("dispatch");
+        assert!(!valid.is_error);
+        assert_eq!(valid.content["valid"], true);
+        assert_eq!(hub.registered_query_ids().len(), 0);
+
+        let invalid = reg
+            .call(
+                "validate_stream_query",
+                &ToolInvocation::new().with_arg("query", json!("not a query")),
+            )
+            .expect("dispatch");
+        assert!(!invalid.is_error);
+        assert_eq!(invalid.content["valid"], false);
+        assert!(invalid.content["error"].is_string());
+    }
+
+    #[test]
+    fn watch_invariant_buffers_conforming_reports_when_requested() {
+        let (hub, _rt) = fresh_hub();
+        let solver: Arc<dyn AspSolver> = Arc::new(StaticSolver {
+            answer_sets: vec![AnswerSet::new(vec![])],
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(watch_invariant_tool_with_solver(hub.clone(), solver));
+        reg.install(push_stream_events_tool(hub.clone()));
+        reg.install(poll_stream_results_tool(hub.clone()));
+
+        let registered = reg
+            .call(
+                "watch_invariant",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("wi-test"))
+                    .with_arg("reportConforming", json!(true))
+                    .with_arg(
+                        "shapes",
+                        json!([
+                            {
+                                "subject": "ex:PersonShape",
+                                "predicate": "a",
+                                "object": "sh:NodeShape",
+                                "objectType": "uri"
+                            },
+                            {
+                                "subject": "ex:PersonShape",
+                                "predicate": "sh:targetNode",
+                                "object": "ex:alice",
+                                "objectType": "uri"
+                            }
+                        ]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(
+            !registered.is_error,
+            "watch failed: {:?}",
+            registered.content
+        );
+
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "facts": [{
+                                "subject": "ex:alice",
+                                "predicate": "ex:name",
+                                "object": "Alice",
+                                "objectType": "literal"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "push failed: {:?}", pushed.content);
+
+        let poll = reg
+            .call(
+                "poll_stream_results",
+                &ToolInvocation::new().with_arg("queryId", json!("wi-test")),
+            )
+            .expect("dispatch");
+        assert!(!poll.is_error, "poll failed: {:?}", poll.content);
+        assert_eq!(poll.content["count"], 1);
+        assert_eq!(poll.content["results"][0]["type"], "watch_invariant");
+        assert_eq!(poll.content["results"][0]["conforms"], true);
+    }
+
+    #[test]
+    fn register_rules_buffers_matching_answer_atoms() {
+        let (hub, _rt) = fresh_hub();
+        let solver: Arc<dyn AspSolver> = Arc::new(StaticSolver {
+            answer_sets: vec![AnswerSet::new(vec![Atom::new(
+                "alert",
+                vec!["alice".to_string()],
+            )])],
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(register_rules_tool_with_solver(hub.clone(), solver));
+        reg.install(push_stream_events_tool(hub.clone()));
+        reg.install(poll_stream_results_tool(hub.clone()));
+
+        let registered = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("rl-test"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                    .with_arg("resultPredicate", json!("alert"))
+                    .with_arg("argNames", json!(["who"])),
+            )
+            .expect("dispatch");
+        assert!(
+            !registered.is_error,
+            "register_rules failed: {:?}",
+            registered.content
+        );
+
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "facts": [{
+                                "subject": "ex:s1",
+                                "predicate": "ex:p",
+                                "object": "ex:o",
+                                "objectType": "uri"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "push failed: {:?}", pushed.content);
+
+        let poll = reg
+            .call(
+                "poll_stream_results",
+                &ToolInvocation::new().with_arg("query_id", json!("rl-test")),
+            )
+            .expect("dispatch");
+        assert!(!poll.is_error, "poll failed: {:?}", poll.content);
+        assert_eq!(poll.content["count"], 1);
+        assert_eq!(poll.content["results"][0]["type"], "register_rules");
+        assert_eq!(poll.content["results"][0]["count"], 1);
+        assert_eq!(
+            poll.content["results"][0]["results"][0]["bindings"]["who"],
+            "alice"
+        );
+    }
+
+    #[test]
+    fn register_rules_delta_dedup_is_bounded_by_fact_horizon() {
+        let (hub, _rt) = fresh_hub();
+        let solver: Arc<dyn AspSolver> = Arc::new(CyclingSolver {
+            values: Mutex::new(VecDeque::from(["a", "b", "c", "a"])),
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(register_rules_tool_with_solver(hub.clone(), solver));
+        reg.install(push_stream_events_tool(hub.clone()));
+        reg.install(poll_stream_results_tool(hub.clone()));
+
+        let registered = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("rules-bounded"))
+                    .with_arg("rules", json!("alert(X) :- rdf(X,p,o)."))
+                    .with_arg("resultPredicate", json!("alert"))
+                    .with_arg("maxFacts", json!(2)),
+            )
+            .expect("dispatch");
+        assert!(!registered.is_error, "{:?}", registered.content);
+
+        for subject in ["ex:s1", "ex:s2", "ex:s3", "ex:s4"] {
+            let pushed = reg
+                .call(
+                    "push_stream_events",
+                    &ToolInvocation::new()
+                        .with_arg("stream", json!("sensors"))
+                        .with_arg(
+                            "events",
+                            json!([{
+                                "facts": [{
+                                    "subject": subject,
+                                    "predicate": "ex:p",
+                                    "object": "ex:o",
+                                    "objectType": "uri"
+                                }]
+                            }]),
+                        ),
+                )
+                .expect("dispatch");
+            assert!(!pushed.is_error, "{:?}", pushed.content);
+        }
+
+        let polled = reg
+            .call(
+                "poll_stream_results",
+                &ToolInvocation::new()
+                    .with_arg("queryId", json!("rules-bounded"))
+                    .with_arg("limit", json!(10)),
+            )
+            .expect("dispatch");
+        assert_eq!(polled.content["count"], 4);
     }
 
     #[test]
@@ -1017,11 +2884,16 @@ mod tests {
         let (hub, _rt) = fresh_hub();
         let reg = install_all(&hub);
         for name in [
+            "create_stream",
+            "push_stream_events",
+            "validate_stream_query",
             "register_stream_query",
             "forget_stream_query",
             "list_stream_queries",
             "unregister_stream_query",
             "poll_stream_results",
+            "watch_invariant",
+            "register_rules",
         ] {
             let tool = reg.get(name).unwrap_or_else(|| panic!("{name} installed"));
             let schema = tool.input_schema();

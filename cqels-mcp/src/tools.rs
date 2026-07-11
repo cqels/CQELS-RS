@@ -122,6 +122,14 @@ impl McpTool for QueryTool {
                     "default": true
                 }),
             )
+            .with_property(
+                "waitMs",
+                json!({
+                    "type": "integer",
+                    "description": "Java alpha.9 compatibility option for live query waits; accepted and clamped to [0, 5000] in dry-run mode.",
+                    "default": 0
+                }),
+            )
             .require("query")
     }
 
@@ -133,6 +141,11 @@ impl McpTool for QueryTool {
             .get("dry_run")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        let wait_ms = invocation
+            .get("waitMs")
+            .and_then(|v| v.as_i64())
+            .map(|value| value.clamp(0, 5000))
+            .unwrap_or(0);
         if !dry_run {
             return ToolResult::error(
                 "live execution requires a running engine — wire \
@@ -144,6 +157,7 @@ impl McpTool for QueryTool {
             Ok(def) => ToolResult::success(json!({
                 "ok": true,
                 "dry_run": true,
+                "waitMs": wait_ms,
                 "streams": def.streams.iter().map(|s| &s.name).collect::<Vec<_>>(),
                 "pattern_groups": def.pattern_groups.len(),
                 "has_seq_constraint": def.seq_constraint.is_some(),

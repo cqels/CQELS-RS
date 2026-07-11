@@ -21,6 +21,18 @@ pub const DEFAULT_STREAM: &str = "shortterm";
 /// Knowledge graph statistics resource URI.
 pub const RESOURCE_KG_STATS: &str = "cqels://kg/stats";
 
+/// Known namespace prefix resource URI.
+pub const RESOURCE_KG_NAMESPACES: &str = "cqels://kg/namespaces";
+
+/// Engine status resource URI.
+pub const RESOURCE_ENGINE_STATUS: &str = "cqels://engine/status";
+
+/// CqelsQL authoring guide resource URI.
+pub const RESOURCE_DOC_CQELSQL: &str = "cqels://docs/cqelsql";
+
+/// CEP authoring guide resource URI.
+pub const RESOURCE_DOC_CEP: &str = "cqels://docs/cep";
+
 /// Active stream list resource URI.
 pub const RESOURCE_STREAMS: &str = "cqels://streams";
 
@@ -72,6 +84,15 @@ impl ResourceDescriptor {
             name: name.to_string(),
             description: Some(description.to_string()),
             mime_type: Some("application/json".to_string()),
+        }
+    }
+
+    fn markdown(uri: &str, name: &str, description: &str) -> Self {
+        Self {
+            uri: uri.to_string(),
+            name: name.to_string(),
+            description: Some(description.to_string()),
+            mime_type: Some("text/markdown".to_string()),
         }
     }
 }
@@ -132,24 +153,37 @@ impl fmt::Display for ResourceError {
 
 impl std::error::Error for ResourceError {}
 
-struct JsonResource {
+struct StaticResource {
     descriptor: ResourceDescriptor,
-    reader: Arc<dyn Fn() -> JsonValue + Send + Sync>,
+    reader: Arc<dyn Fn() -> Result<ReadResourceResult, ResourceError> + Send + Sync>,
 }
 
-impl JsonResource {
-    fn new(
+impl StaticResource {
+    fn json(
         descriptor: ResourceDescriptor,
         reader: impl Fn() -> JsonValue + Send + Sync + 'static,
     ) -> Self {
+        let uri = descriptor.uri.clone();
         Self {
             descriptor,
-            reader: Arc::new(reader),
+            reader: Arc::new(move || json_result(&uri, reader())),
+        }
+    }
+
+    fn text(descriptor: ResourceDescriptor, text: &'static str) -> Self {
+        let uri = descriptor.uri.clone();
+        let mime_type = descriptor
+            .mime_type
+            .clone()
+            .unwrap_or_else(|| "text/plain".to_string());
+        Self {
+            descriptor,
+            reader: Arc::new(move || text_result(&uri, &mime_type, text)),
         }
     }
 
     fn read(&self) -> Result<ReadResourceResult, ResourceError> {
-        json_result(&self.descriptor.uri, (self.reader)())
+        (self.reader)()
     }
 }
 
@@ -180,7 +214,7 @@ impl QueryResultsTemplate {
         let results = self
             .hub
             .as_ref()
-            .map(|hub| hub.drain_results(query_id, usize::MAX))
+            .map(|hub| hub.drain_result_values(query_id, usize::MAX))
             .unwrap_or_default();
 
         json_result(
@@ -195,7 +229,7 @@ impl QueryResultsTemplate {
 
 /// Registry for static resources plus dynamic resource templates.
 pub struct ResourceRegistry {
-    resources: BTreeMap<String, JsonResource>,
+    resources: BTreeMap<String, StaticResource>,
     resource_order: Vec<String>,
     templates: Vec<QueryResultsTemplate>,
 }
@@ -220,7 +254,17 @@ impl ResourceRegistry {
             self.resource_order.push(uri.clone());
         }
         self.resources
-            .insert(uri, JsonResource::new(descriptor, reader));
+            .insert(uri, StaticResource::json(descriptor, reader));
+        self
+    }
+
+    fn install_text(mut self, descriptor: ResourceDescriptor, text: &'static str) -> Self {
+        let uri = descriptor.uri.clone();
+        if !self.resources.contains_key(&uri) {
+            self.resource_order.push(uri.clone());
+        }
+        self.resources
+            .insert(uri, StaticResource::text(descriptor, text));
         self
     }
 
@@ -283,6 +327,8 @@ pub fn cqels_resource_registry_with_streams(hub: StreamQueryHub) -> ResourceRegi
 
 fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegistry {
     let stats_hub = hub.clone();
+    let namespaces_hub = hub.clone();
+    let status_hub = hub.clone();
     let streams_hub = hub.clone();
     let queries_hub = hub.clone();
 
@@ -300,6 +346,47 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
                     "namedGraphs": 0,
                     "registeredQueries": query_ids.len(),
                     "queryIds": query_ids,
+                })
+            },
+        )
+        .install_json(
+            ResourceDescriptor::json(
+                RESOURCE_KG_NAMESPACES,
+                "Knowledge Graph Namespaces",
+                "Known namespace prefixes available to MCP tools",
+            ),
+            move || {
+                let mut namespaces = known_namespaces();
+                if namespaces_hub.is_some() {
+                    namespaces.insert("stream".to_string(), "cqels://stream/".to_string());
+                }
+                json!({ "namespaces": namespaces })
+            },
+        )
+        .install_json(
+            ResourceDescriptor::json(
+                RESOURCE_ENGINE_STATUS,
+                "Engine Status",
+                "Runtime status, active streams, and registered query IDs",
+            ),
+            move || {
+                let query_ids = query_ids(status_hub.as_ref());
+                let streams = stream_names(status_hub.as_ref());
+                let stream_reasoning = status_hub
+                    .as_ref()
+                    .and_then(StreamQueryHub::stream_reasoning_profile);
+                json!({
+                    "running": status_hub.is_some(),
+                    "registeredQueries": query_ids.len(),
+                    "queryIds": query_ids,
+                    "streams": streams,
+                    "streamReasoning": stream_reasoning,
+                    "features": {
+                        "rdfMessages": true,
+                        "pushStreamEvents": true,
+                        "watchInvariant": true,
+                        "registerRules": true,
+                    }
                 })
             },
         )
@@ -371,6 +458,22 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
                 json!({ "profiles": profiles })
             },
         )
+        .install_text(
+            ResourceDescriptor::markdown(
+                RESOURCE_DOC_CQELSQL,
+                "CqelsQL Guide",
+                "Compact CqelsQL syntax guide for MCP agents",
+            ),
+            CQELSQL_DOC,
+        )
+        .install_text(
+            ResourceDescriptor::markdown(
+                RESOURCE_DOC_CEP,
+                "CEP Guide",
+                "Compact CEP syntax guide for MCP agents",
+            ),
+            CEP_DOC,
+        )
         .install_query_results_template(hub)
 }
 
@@ -394,6 +497,43 @@ fn capability_name(capability: ReasoningCapability) -> String {
     format!("{capability:?}")
 }
 
+fn known_namespaces() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "rdf".to_string(),
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string(),
+        ),
+        (
+            "rdfs".to_string(),
+            "http://www.w3.org/2000/01/rdf-schema#".to_string(),
+        ),
+        (
+            "owl".to_string(),
+            "http://www.w3.org/2002/07/owl#".to_string(),
+        ),
+        (
+            "xsd".to_string(),
+            "http://www.w3.org/2001/XMLSchema#".to_string(),
+        ),
+        ("sh".to_string(), "http://www.w3.org/ns/shacl#".to_string()),
+        ("ex".to_string(), "http://example.org/".to_string()),
+        ("cqels".to_string(), "cqels://ontology/".to_string()),
+        ("sosa".to_string(), "http://www.w3.org/ns/sosa/".to_string()),
+        (
+            "saref".to_string(),
+            "https://saref.etsi.org/core/".to_string(),
+        ),
+        (
+            "qudt".to_string(),
+            "http://qudt.org/schema/qudt/".to_string(),
+        ),
+        (
+            "unit".to_string(),
+            "http://qudt.org/vocab/unit/".to_string(),
+        ),
+    ])
+}
+
 fn json_result(uri: &str, value: JsonValue) -> Result<ReadResourceResult, ResourceError> {
     let text =
         serde_json::to_string(&value).map_err(|e| ResourceError::Serialize(e.to_string()))?;
@@ -405,6 +545,42 @@ fn json_result(uri: &str, value: JsonValue) -> Result<ReadResourceResult, Resour
         }],
     })
 }
+
+fn text_result(
+    uri: &str,
+    mime_type: &str,
+    text: &'static str,
+) -> Result<ReadResourceResult, ResourceError> {
+    Ok(ReadResourceResult {
+        contents: vec![ResourceContent {
+            uri: uri.to_string(),
+            mime_type: mime_type.to_string(),
+            text: text.to_string(),
+        }],
+    })
+}
+
+const CQELSQL_DOC: &str = r#"# CqelsQL
+
+Use `SELECT ... FROM STREAM name [RANGE 10s] WHERE { ... }` for live RDF streams.
+Register durable live queries with `register_stream_query`; validate first with
+`validate_stream_query`. Push data with `push_stream_events`.
+
+Example:
+
+```sparql
+SELECT ?sensor ?value
+FROM STREAM sensors [RANGE 10s]
+WHERE { ?sensor <http://example.org/value> ?value . }
+```
+"#;
+
+const CEP_DOC: &str = r#"# CQELS CEP
+
+CEP registration through `register_stream_query` is intentionally fail-loud in
+this Rust MCP transport until the CEP query path is wired to the live engine.
+Use CqelsQL stream windows for alpha.10 live ingestion and continuous observers.
+"#;
 
 /// Canonical MCP notification payload for `notifications/resources/updated`.
 pub fn resource_updated_notification(uri: &str) -> JsonValue {
@@ -439,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_lists_four_static_resources_and_query_results_template() {
+    fn registry_lists_static_resources_and_query_results_template() {
         let registry = cqels_resource_registry();
 
         let uris = registry
@@ -451,9 +627,13 @@ mod tests {
             uris,
             vec![
                 RESOURCE_KG_STATS.to_string(),
+                RESOURCE_KG_NAMESPACES.to_string(),
+                RESOURCE_ENGINE_STATUS.to_string(),
                 RESOURCE_STREAMS.to_string(),
                 RESOURCE_QUERIES.to_string(),
                 RESOURCE_REASONING.to_string(),
+                RESOURCE_DOC_CQELSQL.to_string(),
+                RESOURCE_DOC_CEP.to_string(),
             ]
         );
 
@@ -477,6 +657,16 @@ mod tests {
 
         let streams = read_json(&registry, RESOURCE_STREAMS);
         assert_eq!(streams["streams"], json!([DEFAULT_STREAM]));
+
+        let namespaces = read_json(&registry, RESOURCE_KG_NAMESPACES);
+        assert_eq!(
+            namespaces["namespaces"]["rdf"],
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+        );
+
+        let status = read_json(&registry, RESOURCE_ENGINE_STATUS);
+        assert_eq!(status["running"], false);
+        assert_eq!(status["registeredQueries"], 0);
 
         let queries = read_json(&registry, RESOURCE_QUERIES);
         assert!(queries["queries"].as_array().unwrap().is_empty());
@@ -535,9 +725,17 @@ mod tests {
     }
 
     #[test]
+    fn docs_resources_return_markdown() {
+        let registry = cqels_resource_registry();
+        let result = registry.read(RESOURCE_DOC_CQELSQL).expect("read docs");
+        assert_eq!(result.contents[0].mime_type, "text/markdown");
+        assert!(result.contents[0].text.contains("CqelsQL"));
+    }
+
+    #[test]
     fn hub_backed_resources_report_live_streams_and_queries() {
         let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
-        let mut engine = CqelsEngine::builder().build().expect("engine builds");
+        let engine = CqelsEngine::builder().build().expect("engine builds");
         let _sender = runtime
             .block_on(async { engine.create_stream("sensors").await })
             .expect("create stream");

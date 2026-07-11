@@ -44,6 +44,19 @@ pub const PROTOCOL_VERSION: &str = "2025-03-26";
 /// Server identity returned by `initialize`.
 pub const SERVER_NAME: &str = "cqels-mcp";
 
+/// Agent-facing instructions returned by `initialize`.
+pub const SERVER_INSTRUCTIONS: &str = r#"CQELS is a continuous RDF stream and complex-event-processing reasoner exposed as agent memory.
+
+Use store_memory for durable background facts and push_stream_events for live observations on named streams. For lossless stream workflows, create the stream, register standing queries or observers, then push events with explicit eventTime values.
+
+Use query for one-shot repository snapshots. Use register_stream_query for standing CQELS-QL or Cypher queries and drain matches with poll_stream_results or cqels://queries/{queryId}/results. Use forget_stream_query to stop standing query, SHACL, or ASP observers.
+
+Use watch_invariant for continuous SHACL validation over whole pushed observations. Use register_rules for continuous ASP rules over streamed rdf(S,P,O) atoms. Register either observer before pushing the events it should see.
+
+CQELS-QL stream windows belong on FROM STREAM clauses, not inside WHERE stream patterns. validate_stream_query can check a draft before registration. FILTER(SEQ(...)) requires cep=true. The cqels://docs/cqelsql and cqels://docs/cep resources summarize the supported syntax.
+
+Useful resources include cqels://engine/status, cqels://kg/stats, cqels://kg/namespaces, cqels://streams, cqels://queries, cqels://reasoning/capabilities, and cqels://queries/{queryId}/results."#;
+
 /// JSON-RPC error codes used by this transport.
 pub mod error_code {
     pub const PARSE_ERROR: i32 = -32700;
@@ -187,6 +200,7 @@ fn dispatch(
                 "protocolVersion": PROTOCOL_VERSION,
                 "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": capabilities,
+                "instructions": SERVER_INSTRUCTIONS,
             }))
         }
         "ping" => Ok(json!({})),
@@ -475,7 +489,8 @@ mod tests {
     use crate::{
         analyze_query_tool, cqels_prompt_registry, cqels_resource_registry, parse_query_tool,
         query_results_uri, query_tool, reason_tool, reasoning_profiles_tool,
-        shacl_capabilities_tool, RESOURCE_KG_STATS, RESOURCE_QUERY_RESULTS_TEMPLATE,
+        shacl_capabilities_tool, RESOURCE_DOC_CEP, RESOURCE_DOC_CQELSQL, RESOURCE_ENGINE_STATUS,
+        RESOURCE_KG_NAMESPACES, RESOURCE_KG_STATS, RESOURCE_QUERY_RESULTS_TEMPLATE,
         RESOURCE_REASONING,
     };
 
@@ -504,6 +519,7 @@ mod tests {
         assert_eq!(value["id"], 1);
         assert_eq!(value["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(value["result"]["serverInfo"]["name"], SERVER_NAME);
+        assert_eq!(value["result"]["instructions"], SERVER_INSTRUCTIONS);
     }
 
     #[test]
@@ -750,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn resources_list_and_templates_list_expose_alpha8_surface() {
+    fn resources_list_and_templates_list_expose_alpha10_surface() {
         let reg = make_registry();
         let resources = cqels_resource_registry();
 
@@ -762,13 +778,25 @@ mod tests {
         .expect("response");
         let value = parse_response(&list);
         let resources_out = value["result"]["resources"].as_array().unwrap();
-        assert_eq!(resources_out.len(), 4);
+        assert_eq!(resources_out.len(), 8);
         assert!(resources_out
             .iter()
             .any(|resource| resource["uri"] == RESOURCE_KG_STATS));
         assert!(resources_out
             .iter()
+            .any(|resource| resource["uri"] == RESOURCE_KG_NAMESPACES));
+        assert!(resources_out
+            .iter()
+            .any(|resource| resource["uri"] == RESOURCE_ENGINE_STATUS));
+        assert!(resources_out
+            .iter()
             .any(|resource| resource["uri"] == RESOURCE_REASONING));
+        assert!(resources_out
+            .iter()
+            .any(|resource| resource["uri"] == RESOURCE_DOC_CQELSQL));
+        assert!(resources_out
+            .iter()
+            .any(|resource| resource["uri"] == RESOURCE_DOC_CEP));
 
         let templates = handle_request_with_resources(
             &reg,
@@ -896,7 +924,7 @@ mod tests {
         let list: JsonValue = serde_json::from_str(lines[1]).unwrap();
         let read: JsonValue = serde_json::from_str(lines[2]).unwrap();
         assert!(init["result"]["capabilities"]["resources"].is_object());
-        assert_eq!(list["result"]["resources"].as_array().unwrap().len(), 4);
+        assert_eq!(list["result"]["resources"].as_array().unwrap().len(), 8);
         assert_eq!(read["result"]["contents"][0]["uri"], RESOURCE_KG_STATS);
     }
 }

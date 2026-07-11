@@ -42,6 +42,11 @@
 //! | `reason`           | ✅ implemented (one-shot RETE inference) |
 //! | `validate`         | ✅ implemented (SHACL bridge; see [`validate`]) |
 //! | `solve`            | ✅ implemented (ASP bridge; see [`solve`]) |
+//! | `create_stream`    | ✅ implemented (engine-bound) |
+//! | `push_stream_events` | ✅ implemented (RDF-message ingest) |
+//! | `validate_stream_query` | ✅ implemented |
+//! | `watch_invariant`  | ✅ implemented (continuous SHACL observer) |
+//! | `register_rules`   | ✅ implemented (continuous ASP observer) |
 
 pub mod http_transport;
 pub mod memory;
@@ -69,15 +74,19 @@ pub use resource::{
     cqels_resource_registry, cqels_resource_registry_with_streams, query_id_from_results_uri,
     query_results_updated_notification, query_results_uri, resource_updated_notification,
     ReadResourceResult, ResourceContent, ResourceDescriptor, ResourceError, ResourceRegistry,
-    ResourceTemplateDescriptor, DEFAULT_STREAM, RESOURCE_KG_STATS, RESOURCE_QUERIES,
+    ResourceTemplateDescriptor, DEFAULT_STREAM, RESOURCE_DOC_CEP, RESOURCE_DOC_CQELSQL,
+    RESOURCE_ENGINE_STATUS, RESOURCE_KG_NAMESPACES, RESOURCE_KG_STATS, RESOURCE_QUERIES,
     RESOURCE_QUERY_RESULTS_TEMPLATE, RESOURCE_REASONING, RESOURCE_STREAMS,
 };
 pub use solve::{solve_tool, solve_tool_with_solver, SolveTool};
 pub use stream_query::{
-    forget_stream_query_tool, list_stream_queries_tool, poll_stream_results_tool,
-    register_stream_query_tool, unregister_stream_query_tool, ForgetStreamQueryTool,
-    ListStreamQueriesTool, PollStreamResultsTool, RegisterStreamQueryTool, StreamQueryHub,
-    UnregisterStreamQueryTool,
+    create_stream_tool, forget_stream_query_tool, list_stream_queries_tool,
+    poll_stream_results_tool, push_stream_events_tool, register_rules_tool,
+    register_rules_tool_with_solver, register_stream_query_tool, unregister_stream_query_tool,
+    validate_stream_query_tool, watch_invariant_tool, watch_invariant_tool_with_solver,
+    CreateStreamTool, ForgetStreamQueryTool, ListStreamQueriesTool, PollStreamResultsTool,
+    PushStreamEventsTool, RegisterRulesTool, RegisterStreamQueryTool, StreamQueryHub,
+    UnregisterStreamQueryTool, ValidateStreamQueryTool, WatchInvariantTool,
 };
 pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{
@@ -92,6 +101,7 @@ pub use tools::{
 pub use transport::{
     handle_request, handle_request_with_prompts, handle_request_with_prompts_and_resources,
     handle_request_with_resources, run_stdio, run_stdio_with_prompts,
-    run_stdio_with_prompts_and_resources, run_stdio_with_resources, PROTOCOL_VERSION, SERVER_NAME,
+    run_stdio_with_prompts_and_resources, run_stdio_with_resources, PROTOCOL_VERSION,
+    SERVER_INSTRUCTIONS, SERVER_NAME,
 };
 pub use validate::{validate_tool, validate_tool_with_solver, ValidateTool};
