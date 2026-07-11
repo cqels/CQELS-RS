@@ -17,8 +17,11 @@ Java alpha.10's stream-ingest and continuous-reasoning MCP surface:
 `CQELS_MCP_REASONING`, initialize instructions, live namespace/status/docs
 resources, and Java-compatible `CQELS_MCP_RDF_STORE_PATH` aliasing.
 The stream-ingest path also enforces Java alpha.10's event-time and
-DoS-hardening caps. `cargo test -p cqels-mcp` now passes **206** unit
-tests plus the stdio integration test.
+DoS-hardening caps. The Rust parity runner now passes **12/12** checked-in
+Java/Rust fixtures locally after closing the `FROM <iri>` static-graph
+evaluation gap and correcting the numeric FILTER fixture to use typed integer
+literals. `cargo test -p cqels-mcp` now passes **206** unit tests plus the
+stdio integration test.
 
 ---
 
@@ -26,7 +29,7 @@ tests plus the stdio integration test.
 
 | Metric | Value |
 |---|---|
-| **Total tests** | **1,858 passing** (default features) + 43 optional-feature tests = **~1,901** |
+| **Total tests** | **1,881 passing** (default features) + 43 optional-feature tests = **~1,924** |
 | **Failures** | **0** |
 | **Ignored** | 4 (live-server or opt-in doc tests gated by env vars / explicit examples) |
 | **Test groups** | 51 across 15 workspace crates |
@@ -44,7 +47,7 @@ tests plus the stdio integration test.
 | Clippy (workspace) | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
 | Clippy (kuksa feature) | `cargo clippy -p cqels-cdsp --features kuksa --all-targets -- -D warnings` | ✅ clean |
 | Clippy (thrift feature) | `cargo clippy -p cqels-storage-iotdb --features thrift --all-targets -- -D warnings` | ✅ clean |
-| Tests | `cargo test --workspace` | ✅ 1858 passed, 4 ignored |
+| Tests | `cargo test --workspace` | ✅ 1881 passed, 4 ignored |
 | Tests (kuksa feature) | `cargo test -p cqels-cdsp --features kuksa` | ✅ 27 passed, 1 ignored (`KUKSA_HOST`) |
 | Tests (thrift feature) | `cargo test -p cqels-storage-iotdb --features thrift` | ✅ 16 passed, 2 ignored (`IOTDB_HOST`) |
 | Docs | `RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps` | ✅ clean |
@@ -55,12 +58,12 @@ tests plus the stdio integration test.
 
 | Crate | Tests | Role | Java module(s) ported |
 |---|---:|---|---|
-| `cqels-core` | **743** | Stream operators, parser, compiler, query pipeline | `cqels-core` |
+| `cqels-core` | **748** | Stream operators, parser, compiler, query pipeline | `cqels-core` |
 | `cqels-reasoning` | **160** | RETE network, RDFS / OWL profiles, rule sets | `cqels-reasoning` |
-| `cqels-engine` | **138** | `ReactiveStreamEngine`, CEP runtime, persistence wiring | `cqels-engine` |
+| `cqels-engine` | **140** | `ReactiveStreamEngine`, CEP runtime, persistence wiring | `cqels-engine` |
 | `cqels-model` | **107** | RDF model, BindingSet, statements, terms | `cqels-model` |
 | `cqels-geo` | **67** | GeoSPARQL spatial reasoning | `cqels-geo` |
-| `cqels-mcp` | **191** | MCP tool/prompt/resource surface + JSON-RPC stdio / HTTP transports | `cqels-mcp` |
+| `cqels-mcp` | **206** | MCP tool/prompt/resource surface + JSON-RPC stdio / HTTP transports | `cqels-mcp` |
 | `cqels-shacl` | **60** | SHACL validation engine, repair candidates | `cqels-shacl` |
 | `cqels-asp` | **50** | ASP solver trait, Clingo subprocess solver | `cqels-asp` |
 | `cqels-cdsp` | **15** | COVESA VSS signal envelope + mapper + source | `cqels-cdsp` |
@@ -69,10 +72,10 @@ tests plus the stdio integration test.
 | `cqels-storage-sled` | **8** | Sled embedded KV backend (pure-Rust alt.) | (Rust-only fill-in) |
 | `cqels-storage-lmdb` | **8** | LMDB embedded backend via `heed` | (Rust-only fill-in) |
 | `cqels-storage-rocksdb` | **8** | RocksDB backend (real C++ library) | `cqels-storage-rocksdb` |
-| `cqels-storage-spi` | **14** | Trait-only crate (impls live in backend crates) | `cqels-storage-spi` |
-| **TOTAL (lib unit)** | **1,593** | | |
+| `cqels-storage-spi` | **15** | Trait-only crate (impls live in backend crates) | `cqels-storage-spi` |
+| **TOTAL (lib unit)** | **1,616** | | |
 | Integration + doc tests across the workspace | **265** | | |
-| **GRAND TOTAL** | **1,858** | | |
+| **GRAND TOTAL** | **1,881** | | |
 
 ---
 
@@ -169,7 +172,7 @@ These appear in the Java codebase but are deliberately not ported, per
 
 | Build invocation | Build OK | Tests passing |
 |---|:---:|:---:|
-| `cargo build --workspace` | ✅ | 1,858 passed, 4 ignored |
+| `cargo build --workspace` | ✅ | 1,881 passed, 4 ignored |
 | `cargo build -p cqels-cdsp --features kuksa` | ✅ | 27 / 27 |
 | `cargo build -p cqels-storage-iotdb --features thrift` | ✅ | 16 / 16 |
 
@@ -186,7 +189,7 @@ Five consecutive isolated runs after the fix and the latest full-workspace
 run on the alpha.10 MCP parity stack produced:
 
 ```
-Latest full workspace: passed=1858 failed=0 ignored=4
+Latest full workspace: passed=1881 failed=0 ignored=4
 ```
 
 No failures were observed in the latest full-workspace run.

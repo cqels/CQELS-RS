@@ -4,23 +4,15 @@ SPARQL 1.1 UNION of two alternative property paths inside a
 STREAM block. SPARQL-correct expected: one row per matching
 triple, with ?label bound to whichever predicate fired.
 
-**Known parity gap on both engines** — discovered via
-`cargo xtask parity diff`:
+**Current status (2026-07-11):**
 
-- **cqels-rs:** parser rejects the inner `{ ... }` groups
-  (`Parse error: expected subject` at the opening `{`). UNION
-  inside a STREAM block isn't supported by the CqelsQL grammar.
-- **cqels-java:** parser logs `extraneous input '{'` /
-  `extraneous input 'UNION'` warnings and silently drops the
-  UNION. Emits 4 rows where each event maps to either
-  `{subject, label}` (if matched the name predicate) or just
-  `{subject}` (if matched the alias predicate — `?label` is
-  unbound because the second arm was discarded). Same silent
-  wrong-answer pattern as cqels/claude#83.
+- **cqels-rs:** passes. STREAM-scoped UNION is parsed and evaluated
+  against the window batch, yielding the SPARQL-correct 4 bindings.
+- **cqels-java alpha.10 local runner:** hard-errors with the Java parser's
+  "unsupported construct inside a STREAM / WINDOW / GRAPH block" diagnostic.
 
-Fixture stays in the known-failing-on-both set. Reconciling
-requires grammar work on cqels-rs and a real UNION implementation
-on cqels-java (or a hard-error on parse).
+This fixture is now a Rust regression gate and a documented Java/Rust surface
+difference, not a known Rust parser gap.
 """
 ground_truth = "hand-spec"
 drain_timeout_ms = 500

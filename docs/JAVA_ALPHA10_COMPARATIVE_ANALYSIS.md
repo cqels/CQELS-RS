@@ -22,9 +22,12 @@ that the behavior is identical.
 The remaining gap is semantic parity. Rust now has the default MCP server wired
 to fail closed for the main governed tool/resource surfaces, and it now
 preserves Java-style graph observations on the CQELS-QL/MCP stream-ingest path.
-That is still not full Java alpha.10 parity: persistence, notification, plugin,
-broader fixture contracts, and some exact input-contract details are not fully
-implemented or proved yet.
+The latest local fixture sweep also closes the previously tracked Rust-side
+core-query fixture failures in this corpus: Rust now passes all 12 parity
+fixtures against the checked-in oracles. That is still not full Java alpha.10
+parity: persistence, notification, plugin, broader cross-language fixture
+contracts, and some exact input-contract details are not fully implemented or
+proved yet.
 
 ## Evidence Summary
 
@@ -73,6 +76,12 @@ Rust current state:
   persistent RDF quad store.
 - Rust extension points are native registries and traits; there is no
   Java-style deploy-time plugin SPI or provider discovery layer.
+- Fresh fixture sweep on this branch:
+  - `cargo xtask parity --rust-only`: Rust passed 12/12 fixtures.
+  - `cargo xtask parity --java-only`: Java passed 6/12 fixtures against the
+    current checked-in oracles; the remaining Java failures/errors are either
+    documented semantic/oracle differences or Java parser hard-errors for
+    STREAM-scoped OPTIONAL/UNION.
 
 ## Capability Matrix
 
@@ -93,8 +102,8 @@ Rust current state:
 | Plugin SPI | New `cqels-plugin-spi`; `ServiceLoader` discovers plugins and embedding providers; plugin tools are namespaced, atomic, and governed. | Native `ToolRegistry`, `MemoryStore`, solver injection, and resource registries exist, but no deploy-time plugin discovery or governed plugin registrar. | Intentional non-parity today; blocker if the goal is full Java alpha.10 parity. |
 | Notifications | Java uses `McpNotifier` for query/resource result notifications when requested. | Rust accepts `notify` and has notification helper payloads, but tool schemas state unsolicited push notifications are not wired. | Partial. |
 | Ingest event-time validation | Whole-number epoch millis or ISO instant, bounded to `[0, 7258118400000]`, overflow-safe. | Rust now rejects fractional, negative, and far-future event times, validates numeric strings and UTC instants through the same upper bound, and uses checked timestamp arithmetic. | Close for the MCP ingest path. |
-| Fixture parity | Java/Rust fixture harness exists; the CI Java-runner gate enforces a named known-passing subset and runs the full corpus informationally. | Rust has fixture-by-fixture validation for selected workloads, plus gap-tracking fixtures for parser, static graph, CEP, aggregate ordering, and emission-semantics differences. | Good evidence for covered fixtures only, not universal equality. |
-| Broader core-query parity | Java alpha.10 includes fixes or behavior for some fixtures outside the alpha.10 MCP delta, including static lookup joins and Java-side ORDER BY/LIMIT handling. Some fixtures also document intentional or unresolved semantic differences, such as raw RSTREAM re-emission versus Rust's single-emission output. | Current fixture metadata tracks Rust gaps: `FILTER(SEQ())` parsed but not enforced through the standard CQELS-QL path, `OPTIONAL` and `UNION` inside `STREAM` rejected by the parser, `ORDER BY DESC(?var)` rejected, `FROM <iri>` static graph parsed but not applied at evaluation, aggregate row order can be nondeterministic, and multi-pattern emission semantics need comparison-mode handling. | Full Java alpha.10 parity must include these, not just MCP alpha.10. |
+| Fixture parity | Java/Rust fixture harness exists; the CI Java-runner gate enforces a named known-passing subset and runs the full corpus informationally. A fresh local Java run passed 6/12 against the current oracles. | Rust now passes the full checked-in 12-fixture corpus locally. The corpus covers NOW, TRIPLES windows, FILTER, STREAM-scoped OPTIONAL/UNION, ORDER BY/LIMIT, static `FROM <iri>` lookup, aggregate, CEP SEQ documentation, and known emission-semantics differences. | Strong evidence for covered fixtures only, not universal equality. |
+| Broader core-query parity | Java alpha.10 includes fixes or behavior for static lookup joins and Java-side ORDER BY/LIMIT handling. Some fixtures also document intentional or unresolved semantic differences, such as raw RSTREAM re-emission versus Rust's single-emission output. Java currently hard-errors for STREAM-scoped OPTIONAL/UNION in the local Java runner. | Rust now accepts the fixture-covered STREAM-scoped OPTIONAL/UNION forms, `ORDER BY DESC(?var)`, numeric FILTERs over typed integer fixture events, and SPARQL `FROM <iri>` static graph evaluation. Known remaining comparison limits are `FILTER(SEQ())` standard-path semantics, Java/Rust RSTREAM-vs-single-emission differences, and broader untested grammar/runtime surfaces. | Improved; full Java alpha.10 parity still needs more cross-language fixtures beyond this corpus. |
 
 ## Meaning of Fixture-by-Fixture, Not Universal Equality
 
@@ -103,12 +112,13 @@ CQELS feature, every MCP tool, and every security edge case behaves identically.
 
 That distinction matters here for two reasons.
 
-First, the current known fixture gate is subset-based. The corpus includes
-workloads such as `optional-extra-property`, `union-two-properties`,
-`cep-sequence-two-events`, `stream-static-lookup-join`, `count-aggregate`, and
-`order-by-limit` that document either Rust limitations, Java/Rust semantic
-differences, or comparison-mode limitations. Those are valuable regression
-artifacts, but they are not a universal equivalence proof.
+First, the current known fixture gate is subset-based. Rust now passes every
+checked-in fixture locally, but the corpus is still finite. Workloads such as
+`cep-sequence-two-events`, `count-aggregate`, `self-join-rides`, and
+`triples-multi-pattern-join` continue to document Java/Rust semantic or
+comparison-mode differences, especially around SEQ enforcement and raw
+RSTREAM-style re-emission. Those are valuable regression artifacts, but they
+are not a universal equivalence proof.
 
 Second, the alpha.9/alpha.10 deltas include surfaces that the query fixtures do
 not exercise broadly enough: governed denials and result withholding,
@@ -121,15 +131,15 @@ It cannot yet be declared universally identical to Java alpha.10.
 
 ## Blockers to Claiming Full Alpha.10 Parity
 
-1. Add cross-language fixtures for graph observations, governed denials,
-   resource withholding, and
-   result-drop behavior, and ensure future extension/plugin tools are wrapped
-   in the same fail-closed posture.
-2. Reconcile the broader core-query fixture gaps that still separate the Rust
-   port from Java alpha.10 behavior or from Java/Rust deterministic comparison:
-   standard-path SEQ execution, STREAM-scoped OPTIONAL/UNION parsing, ORDER BY
-   DESC parsing, SPARQL `FROM <iri>` static graph evaluation, and deterministic
-   aggregate row ordering.
+1. Add cross-language fixtures for alpha.9/alpha.10 MCP semantics: graph
+   observations, event-time rejection, governed denials, resource withholding,
+   result-drop behavior, and persistence restart behavior. Ensure future
+   extension/plugin tools are wrapped in the same fail-closed posture.
+2. Reconcile the remaining broader core-query comparison gaps that are not
+   closed by the 12-fixture Rust sweep: standard-path SEQ execution,
+   Java/Rust RSTREAM-vs-single-emission comparison mode, deterministic
+   aggregate ordering across repeated runs, and broader parser/runtime
+   coverage outside the current fixture corpus.
 3. Decide and implement the persistence story for `CQELS_MCP_RDF_STORE_PATH`:
    true persistent RDF quad store parity, or an explicit documented non-parity
    accepted by the project.
@@ -140,22 +150,17 @@ It cannot yet be declared universally identical to Java alpha.10.
    deploy-time Rust plugin SPI/discovery layer with namespacing, collision
    checks, atomic registration, and governance wrapping; otherwise this remains
    a deliberate non-parity item.
-6. Expand cross-language fixtures to cover alpha.9/alpha.10 MCP semantics,
-   including graph observations, event-time rejection, result withholding, and
-   persistence restart behavior.
-7. Finish the exact MCP input-contract inventory, including whether Rust should
+6. Finish the exact MCP input-contract inventory, including whether Rust should
    reject Java-invalid convenience aliases such as `objectType: "iri"` on
    `push_stream_events`.
 
 ## Recommended Next Implementation Order
 
-1. Core-query fixture reconciliation. This keeps the alpha.10 claim from being
-   MCP-only.
-2. Persistence semantics. This needs a design choice before code.
-3. Governed cross-language fixtures. The default Rust server is now wired
-   fail-closed, but fixture evidence should lock down denial/resource/result
-   behavior against Java.
-4. Exact MCP input-contract inventory. The tracked ingest hardening is closed,
+1. Alpha.9/alpha.10 MCP cross-language fixtures. The Rust query corpus is now
+   green locally; the next evidence gap is MCP graph/governance/result behavior
+   rather than more Rust-only fixture cleanup.
+2. Exact MCP input-contract inventory. The tracked ingest hardening is closed,
    but strict Java schema compatibility still needs a one-by-one pass.
-5. Notifications and plugin SPI. These are important for full release parity
+3. Persistence semantics. This needs a design choice before code.
+4. Notifications and plugin SPI. These are important for full release parity
    but less likely to corrupt query results than the first three.
