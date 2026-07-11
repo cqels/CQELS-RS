@@ -50,6 +50,31 @@ const RESOURCE_QUERY_RESULTS_PREFIX: &str = "cqels://queries/";
 const RESOURCE_QUERY_RESULTS_SUFFIX: &str = "/results";
 const GOVERNED_METADATA_DENIAL: &str = "An access policy is active; resource metadata is withheld.";
 
+/// Static runtime facts surfaced by the Java alpha.10
+/// `cqels://engine/status` resource.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceRuntimeInfo {
+    pub server_version: String,
+    pub transport: String,
+    pub persistence_enabled: bool,
+    pub storage_backend: Option<String>,
+    pub rdf_store_persistent: bool,
+    pub max_registered_queries: Option<usize>,
+}
+
+impl Default for ResourceRuntimeInfo {
+    fn default() -> Self {
+        Self {
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            transport: "unknown".to_string(),
+            persistence_enabled: false,
+            storage_backend: None,
+            rdf_store_persistent: false,
+            max_registered_queries: None,
+        }
+    }
+}
+
 /// Constructs the concrete result-buffer resource URI for `query_id`.
 pub fn query_results_uri(query_id: &str) -> String {
     format!("{RESOURCE_QUERY_RESULTS_PREFIX}{query_id}{RESOURCE_QUERY_RESULTS_SUFFIX}")
@@ -336,12 +361,12 @@ impl Default for ResourceRegistry {
 
 /// Builds the stateless CQELS resource registry used by the shipped stdio binary.
 pub fn cqels_resource_registry() -> ResourceRegistry {
-    cqels_resource_registry_with_hub(None, None)
+    cqels_resource_registry_with_hub(None, None, ResourceRuntimeInfo::default())
 }
 
 /// Builds a CQELS resource registry backed by live stream-query state.
 pub fn cqels_resource_registry_with_streams(hub: StreamQueryHub) -> ResourceRegistry {
-    cqels_resource_registry_with_hub(Some(hub), None)
+    cqels_resource_registry_with_hub(Some(hub), None, ResourceRuntimeInfo::default())
 }
 
 /// Builds a live stream-query resource registry with Java alpha.10 governance.
@@ -349,12 +374,26 @@ pub fn cqels_resource_registry_with_streams_and_access_policy(
     hub: StreamQueryHub,
     access_policy: Arc<AccessPolicyRegistry>,
 ) -> ResourceRegistry {
-    cqels_resource_registry_with_hub(Some(hub), Some(access_policy))
+    cqels_resource_registry_with_hub(
+        Some(hub),
+        Some(access_policy),
+        ResourceRuntimeInfo::default(),
+    )
+}
+
+/// Builds a live stream-query resource registry with explicit runtime facts.
+pub fn cqels_resource_registry_with_streams_access_policy_and_runtime(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+    runtime: ResourceRuntimeInfo,
+) -> ResourceRegistry {
+    cqels_resource_registry_with_hub(Some(hub), Some(access_policy), runtime)
 }
 
 fn cqels_resource_registry_with_hub(
     hub: Option<StreamQueryHub>,
     access_policy: Option<Arc<AccessPolicyRegistry>>,
+    runtime: ResourceRuntimeInfo,
 ) -> ResourceRegistry {
     let stats_hub = hub.clone();
     let namespaces_hub = hub.clone();
@@ -368,6 +407,7 @@ fn cqels_resource_registry_with_hub(
     let queries_policy = access_policy.clone();
     let reasoning_policy = access_policy.clone();
     let results_policy = access_policy.clone();
+    let status_runtime = runtime.clone();
 
     ResourceRegistry::new()
         .install_json(
@@ -415,37 +455,55 @@ fn cqels_resource_registry_with_hub(
             move || {
                 let stream_reasoning = status_hub
                     .as_ref()
-                    .and_then(StreamQueryHub::stream_reasoning_profile);
+                    .and_then(StreamQueryHub::stream_reasoning_profile)
+                    .unwrap_or_else(|| "off".to_string());
+                let mut payload = serde_json::Map::new();
+                payload.insert("running".to_string(), json!(status_hub.is_some()));
+                payload.insert("version".to_string(), json!(status_runtime.server_version));
+                payload.insert("transport".to_string(), json!(status_runtime.transport));
                 if governance_active(status_policy.as_ref()) {
-                    return json!({
-                        "running": status_hub.is_some(),
-                        "registeredQueries": "withheld",
-                        "queryIds": "withheld",
-                        "streams": "withheld",
-                        "streamReasoning": "withheld",
-                        "features": {
-                            "rdfMessages": true,
-                            "pushStreamEvents": true,
-                            "watchInvariant": true,
-                            "registerRules": true,
-                        }
-                    });
+                    payload.insert("registeredQueryCount".to_string(), json!("withheld"));
+                    payload.insert("registeredQueries".to_string(), json!("withheld"));
+                    payload.insert("queryIds".to_string(), json!("withheld"));
+                    payload.insert("streams".to_string(), json!("withheld"));
+                } else {
+                    let query_ids = query_ids(status_hub.as_ref());
+                    let streams = stream_names(status_hub.as_ref());
+                    payload.insert("registeredQueryCount".to_string(), json!(query_ids.len()));
+                    payload.insert("registeredQueries".to_string(), json!(query_ids.len()));
+                    if let Some(max) = status_runtime.max_registered_queries {
+                        payload.insert("maxRegisteredQueries".to_string(), json!(max));
+                    }
+                    payload.insert("queryIds".to_string(), json!(query_ids));
+                    payload.insert("streams".to_string(), json!(streams));
                 }
-                let query_ids = query_ids(status_hub.as_ref());
-                let streams = stream_names(status_hub.as_ref());
-                json!({
-                    "running": status_hub.is_some(),
-                    "registeredQueries": query_ids.len(),
-                    "queryIds": query_ids,
-                    "streams": streams,
-                    "streamReasoning": stream_reasoning,
-                    "features": {
+
+                let mut persistence = serde_json::Map::new();
+                persistence.insert(
+                    "enabled".to_string(),
+                    json!(status_runtime.persistence_enabled),
+                );
+                if status_runtime.persistence_enabled {
+                    if let Some(backend) = &status_runtime.storage_backend {
+                        persistence.insert("backend".to_string(), json!(backend));
+                    }
+                }
+                payload.insert("persistence".to_string(), JsonValue::Object(persistence));
+                payload.insert(
+                    "rdfStore".to_string(),
+                    json!({ "persistent": status_runtime.rdf_store_persistent }),
+                );
+                payload.insert("streamReasoning".to_string(), json!(stream_reasoning));
+                payload.insert(
+                    "features".to_string(),
+                    json!({
                         "rdfMessages": true,
                         "pushStreamEvents": true,
                         "watchInvariant": true,
                         "registerRules": true,
-                    }
-                })
+                    }),
+                );
+                JsonValue::Object(payload)
             },
         )
         .install_json(
@@ -761,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn static_resources_return_java_alpha8_keys() {
+    fn static_resources_return_java_alpha10_keys() {
         let registry = cqels_resource_registry();
 
         let stats = read_json(&registry, RESOURCE_KG_STATS);
@@ -782,6 +840,12 @@ mod tests {
         let status = read_json(&registry, RESOURCE_ENGINE_STATUS);
         assert_eq!(status["running"], false);
         assert_eq!(status["registeredQueries"], 0);
+        assert_eq!(status["registeredQueryCount"], 0);
+        assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["transport"], "unknown");
+        assert_eq!(status["persistence"]["enabled"], false);
+        assert_eq!(status["rdfStore"]["persistent"], false);
+        assert_eq!(status["streamReasoning"], "off");
 
         let queries = read_json(&registry, RESOURCE_QUERIES);
         assert!(queries["queries"].as_array().unwrap().is_empty());
@@ -793,6 +857,41 @@ mod tests {
             .unwrap()
             .iter()
             .any(|profile| profile["name"] == "OWL2-RL"));
+    }
+
+    #[test]
+    fn engine_status_reports_explicit_java_runtime_facts() {
+        let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
+        let engine = CqelsEngine::builder().build().expect("engine builds");
+        let hub = StreamQueryHub::new_with_stream_reasoning(
+            Arc::new(engine),
+            runtime.handle().clone(),
+            Some(ReasoningProfile::RdfsFull),
+        );
+        let access_policy = AccessPolicyRegistry::shared();
+        let registry = cqels_resource_registry_with_streams_access_policy_and_runtime(
+            hub,
+            access_policy,
+            ResourceRuntimeInfo {
+                server_version: "2.0.0-alpha.10-rust".to_string(),
+                transport: "HTTP".to_string(),
+                persistence_enabled: true,
+                storage_backend: Some("sled".to_string()),
+                rdf_store_persistent: false,
+                max_registered_queries: Some(256),
+            },
+        );
+
+        let status = read_json(&registry, RESOURCE_ENGINE_STATUS);
+        assert_eq!(status["running"], true);
+        assert_eq!(status["version"], "2.0.0-alpha.10-rust");
+        assert_eq!(status["transport"], "HTTP");
+        assert_eq!(status["registeredQueryCount"], 0);
+        assert_eq!(status["maxRegisteredQueries"], 256);
+        assert_eq!(status["persistence"]["enabled"], true);
+        assert_eq!(status["persistence"]["backend"], "sled");
+        assert_eq!(status["rdfStore"]["persistent"], false);
+        assert_eq!(status["streamReasoning"], "rdfs-full");
     }
 
     #[test]
@@ -873,10 +972,15 @@ mod tests {
 
         let status = read_json(&registry, RESOURCE_ENGINE_STATUS);
         assert_eq!(status["running"], true);
+        assert_eq!(status["registeredQueryCount"], "withheld");
         assert_eq!(status["registeredQueries"], "withheld");
         assert_eq!(status["queryIds"], "withheld");
         assert_eq!(status["streams"], "withheld");
-        assert_eq!(status["streamReasoning"], "withheld");
+        assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["transport"], "unknown");
+        assert_eq!(status["persistence"]["enabled"], false);
+        assert_eq!(status["rdfStore"]["persistent"], false);
+        assert_eq!(status["streamReasoning"], "off");
         assert_eq!(status["features"]["pushStreamEvents"], true);
 
         let docs = registry.read(RESOURCE_DOC_CQELSQL).expect("read docs");

@@ -72,12 +72,13 @@ pub use prompt::{
 pub use registry::{McpError, ToolRegistry};
 pub use resource::{
     cqels_resource_registry, cqels_resource_registry_with_streams,
+    cqels_resource_registry_with_streams_access_policy_and_runtime,
     cqels_resource_registry_with_streams_and_access_policy, query_id_from_results_uri,
     query_results_updated_notification, query_results_uri, resource_updated_notification,
     ReadResourceResult, ResourceContent, ResourceDescriptor, ResourceError, ResourceRegistry,
-    ResourceTemplateDescriptor, DEFAULT_STREAM, RESOURCE_DOC_CEP, RESOURCE_DOC_CQELSQL,
-    RESOURCE_ENGINE_STATUS, RESOURCE_KG_NAMESPACES, RESOURCE_KG_STATS, RESOURCE_QUERIES,
-    RESOURCE_QUERY_RESULTS_TEMPLATE, RESOURCE_REASONING, RESOURCE_STREAMS,
+    ResourceRuntimeInfo, ResourceTemplateDescriptor, DEFAULT_STREAM, RESOURCE_DOC_CEP,
+    RESOURCE_DOC_CQELSQL, RESOURCE_ENGINE_STATUS, RESOURCE_KG_NAMESPACES, RESOURCE_KG_STATS,
+    RESOURCE_QUERIES, RESOURCE_QUERY_RESULTS_TEMPLATE, RESOURCE_REASONING, RESOURCE_STREAMS,
 };
 pub use solve::{solve_tool, solve_tool_with_solver, SolveTool};
 pub use stream_query::{

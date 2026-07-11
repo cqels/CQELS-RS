@@ -47,25 +47,28 @@ use std::sync::Arc;
 use cqels_engine::CqelsEngine;
 use cqels_mcp::{
     analyze_query_tool, assemble_context_tool_with_access_policy, cqels_prompt_registry,
-    cqels_resource_registry_with_streams_and_access_policy, create_stream_tool_with_access_policy,
-    explain_decision_tool, forget_memory_tool, forget_stream_query_tool, list_procedures_tool,
-    list_stream_queries_tool_with_access_policy, parse_query_tool,
-    poll_stream_results_tool_with_access_policy, push_stream_events_tool_with_access_policy,
-    query_tool_with_access_policy, reason_tool, reasoning_profiles_tool, recall_decisions_tool,
-    recall_episodes_tool, recall_memory_tool_with_reasoning_and_access_policy, record_event_tool,
+    cqels_resource_registry_with_streams_access_policy_and_runtime,
+    create_stream_tool_with_access_policy, explain_decision_tool, forget_memory_tool,
+    forget_stream_query_tool, list_procedures_tool, list_stream_queries_tool_with_access_policy,
+    parse_query_tool, poll_stream_results_tool_with_access_policy,
+    push_stream_events_tool_with_access_policy, query_tool_with_access_policy, reason_tool,
+    reasoning_profiles_tool, recall_decisions_tool, recall_episodes_tool,
+    recall_memory_tool_with_reasoning_and_access_policy, record_event_tool,
     register_reasoning_tool, register_rules_tool_with_access_policy,
     register_stream_query_tool_with_access_policy, run_http_with_prompts_and_resources,
     run_procedure_tool, run_stdio_with_prompts_and_resources, save_procedure_tool,
     server_transport_from_env, set_access_policy_tool, shacl_capabilities_tool, solve_tool,
     store_memory_tool, unregister_stream_query_tool, validate_stream_query_tool, validate_tool,
     watch_invariant_tool_with_access_policy, AccessPolicyRegistry, InMemoryMemoryStore,
-    MemoryStore, ReasoningRegistration, ServerTransport, SledMemoryStore, StreamQueryHub,
-    ToolRegistry,
+    MemoryStore, ReasoningRegistration, ResourceRuntimeInfo, ServerTransport, SledMemoryStore,
+    StreamQueryHub, ToolRegistry,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let memory: Arc<dyn MemoryStore> = match persistent_memory_dir() {
-        Some(path) => match SledMemoryStore::open(&path) {
+    let memory_dir = persistent_memory_dir();
+    let memory_is_persistent = memory_dir.is_some();
+    let memory: Arc<dyn MemoryStore> = match memory_dir.as_ref() {
+        Some(path) => match SledMemoryStore::open(path) {
             Ok(store) => Arc::new(store),
             Err(e) => {
                 eprintln!(
@@ -156,10 +159,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         access_policy.clone(),
     ));
     let prompts = cqels_prompt_registry();
-    let resources =
-        cqels_resource_registry_with_streams_and_access_policy(stream_hub, access_policy);
+    let transport = server_transport_from_env()?;
+    let runtime_info = ResourceRuntimeInfo {
+        transport: transport_name(&transport).to_string(),
+        persistence_enabled: memory_is_persistent,
+        storage_backend: memory_is_persistent.then(|| "sled".to_string()),
+        // Rust currently treats CQELS_MCP_RDF_STORE_PATH as a compatibility
+        // alias for MCP memory, not as Java's persistent RDF4J NativeStore.
+        rdf_store_persistent: false,
+        ..ResourceRuntimeInfo::default()
+    };
+    let resources = cqels_resource_registry_with_streams_access_policy_and_runtime(
+        stream_hub,
+        access_policy,
+        runtime_info,
+    );
 
-    match server_transport_from_env()? {
+    match transport {
         ServerTransport::Stdio => {
             let stdin = io::stdin();
             let stdout = io::stdout();
@@ -179,6 +195,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn transport_name(transport: &ServerTransport) -> &'static str {
+    match transport {
+        ServerTransport::Stdio => "STDIO",
+        ServerTransport::Http(_) => "HTTP",
+        _ => "UNKNOWN",
+    }
 }
 
 fn persistent_memory_dir() -> Option<PathBuf> {

@@ -72,7 +72,10 @@ Rust current state:
   stream tools, continuous observer registration, result polling, and live
   resources.
 - `cqels-mcp/src/resource.rs` now withholds governed metadata/result resources
-  under active policy and preserves result buffers instead of draining them.
+  under active policy, preserves result buffers instead of draining them, and
+  surfaces Java alpha.10 `engine/status` liveness fields (`version`,
+  `transport`, `persistence`, `rdfStore.persistent`, `streamReasoning`) even
+  when live query metadata is withheld.
 - `cqels-mcp/src/bin/cqels_mcp_server.rs` treats `CQELS_MCP_RDF_STORE_PATH` as
   a sled-backed MCP memory alias under `<path>/cqels-mcp-memory`, not as a
   persistent RDF quad store.
@@ -99,7 +102,7 @@ Rust current state:
 | `watch_invariant` | Continuous SHACL per observation, governed fail-closed, registration caps, shape size cap, optional notifications, drops results under governance. | Present, denied under active governance in the default server, and drops observer results while governance is active; no Java-equivalent registration/shape caps; notifications accepted but not pushed. | Partial. |
 | `register_rules` | Continuous ASP accumulate/solve, governed fail-closed, rules/args/facts/buffer caps, optional notifications, result drop under governance. | Present with `maxFacts`, `emit`, buffers, solver injection, default-server governance denial, and result drop under active policy; notifications accepted but not pushed; caps are not fully aligned. | Partial. |
 | `CQELS_MCP_REASONING` | Opt-in `rdfs` or `rdfs-full` stream reasoning; original observations flow first, graph observations stay atomic, inferred single triples are appended, and a RETE fact cap hardens memory. | Opt-in parser and RDFS/RDFS-full flow are present; original observations flow first, graph observations stay atomic, and inferred triples are appended as single RDF observations. `apply_stream_reasoning` still does not wire a Java-equivalent RETE fact cap. | Partial. |
-| MCP resources | Metadata resources are withheld under governance, except liveness fields in `engine/status`; `engine/status` reports persistence and RDF-store persistence facts. | Governed resource registry withholds metadata/result resources and keeps `engine/status` liveness/features readable; status still lacks Java's persistence/rdfStore shape. | Partial. |
+| MCP resources | Metadata resources are withheld under governance, except liveness fields in `engine/status`; `engine/status` reports persistence and RDF-store persistence facts. | Governed resource registry withholds metadata/result resources, keeps Java-style `engine/status` liveness fields readable, reports `registeredQueryCount`, `persistence`, `rdfStore.persistent`, and `streamReasoning`, and preserves result buffers when governed. `rdfStore.persistent` correctly remains `false` because Rust does not yet implement Java's RDF4J NativeStore equivalent. | Close for status shape and governed liveness; broader resource notification/persistence semantics remain partial. |
 | `CQELS_MCP_RDF_STORE_PATH` | Switches the RDF repository to RDF4J `NativeStore`; stored facts and saved procedures survive restart. | Accepted as an alias root for sled MCP memory; stream events and RDF quads are not persisted as Java NativeStore equivalents. | Not equivalent. |
 | Plugin SPI | New `cqels-plugin-spi`; `ServiceLoader` discovers plugins and embedding providers; plugin tools are namespaced, atomic, and governed. | Native `ToolRegistry`, `MemoryStore`, solver injection, and resource registries exist, but no deploy-time plugin discovery or governed plugin registrar. | Intentional non-parity today; blocker if the goal is full Java alpha.10 parity. |
 | Notifications | Java uses `McpNotifier` for query/resource result notifications when requested. | Rust accepts `notify` and has notification helper payloads, but tool schemas state unsolicited push notifications are not wired. | Partial. |
