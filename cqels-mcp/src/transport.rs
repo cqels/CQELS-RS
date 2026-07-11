@@ -479,6 +479,14 @@ fn run_stdio_inner<R: BufRead, W: Write>(
             writeln!(writer, "{response}")?;
             writer.flush()?;
         }
+        if let Some(resources) = resources {
+            for notification in resources.drain_notifications() {
+                let body =
+                    serde_json::to_string(&notification).expect("serialize resource notification");
+                writeln!(writer, "{body}")?;
+                writer.flush()?;
+            }
+        }
     }
     Ok(())
 }
@@ -486,13 +494,48 @@ fn run_stdio_inner<R: BufRead, W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use cqels_asp::{AnswerSet, AspError, AspSolver, Atom};
+    use cqels_engine::CqelsEngine;
+    use tokio::runtime::Runtime;
+
     use crate::{
-        analyze_query_tool, cqels_prompt_registry, cqels_resource_registry, parse_query_tool,
+        analyze_query_tool, cqels_prompt_registry, cqels_resource_registry,
+        cqels_resource_registry_with_streams, parse_query_tool, push_stream_events_tool,
         query_results_uri, query_tool, reason_tool, reasoning_profiles_tool,
-        shacl_capabilities_tool, RESOURCE_DOC_CEP, RESOURCE_DOC_CQELSQL, RESOURCE_ENGINE_STATUS,
-        RESOURCE_KG_NAMESPACES, RESOURCE_KG_STATS, RESOURCE_QUERY_RESULTS_TEMPLATE,
-        RESOURCE_REASONING,
+        register_rules_tool_with_solver, shacl_capabilities_tool, StreamQueryHub, RESOURCE_DOC_CEP,
+        RESOURCE_DOC_CQELSQL, RESOURCE_ENGINE_STATUS, RESOURCE_KG_NAMESPACES, RESOURCE_KG_STATS,
+        RESOURCE_QUERY_RESULTS_TEMPLATE, RESOURCE_REASONING,
     };
+
+    struct StaticSolver;
+
+    #[async_trait]
+    impl AspSolver for StaticSolver {
+        async fn solve(
+            &self,
+            _program: &str,
+            _max_models: usize,
+        ) -> Result<Vec<AnswerSet>, AspError> {
+            Ok(vec![AnswerSet::new(vec![Atom::new(
+                "alert",
+                vec!["alice".to_string()],
+            )])])
+        }
+    }
+
+    fn fresh_hub() -> (StreamQueryHub, Arc<Runtime>) {
+        let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
+        let engine = runtime
+            .block_on(async { CqelsEngine::builder().build() })
+            .expect("engine builds");
+        runtime.block_on(engine.start()).expect("engine starts");
+        let handle = runtime.handle().clone();
+        let hub = StreamQueryHub::new(Arc::new(engine), handle);
+        (hub, runtime)
+    }
 
     fn make_registry() -> ToolRegistry {
         let mut reg = ToolRegistry::new();
@@ -926,5 +969,78 @@ mod tests {
         assert!(init["result"]["capabilities"]["resources"].is_object());
         assert_eq!(list["result"]["resources"].as_array().unwrap().len(), 8);
         assert_eq!(read["result"]["contents"][0]["uri"], RESOURCE_KG_STATS);
+    }
+
+    #[test]
+    fn stdio_loop_emits_resource_update_notifications_for_notify_queries() {
+        let (hub, _rt) = fresh_hub();
+        let mut reg = ToolRegistry::new();
+        reg.install(register_rules_tool_with_solver(
+            hub.clone(),
+            Arc::new(StaticSolver),
+        ));
+        reg.install(push_stream_events_tool(hub.clone()));
+        let resources = cqels_resource_registry_with_streams(hub);
+
+        let register = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "register_rules",
+                "arguments": {
+                    "stream": "sensors",
+                    "queryId": "notify-rule",
+                    "rules": "alert(alice) :- rdf(_,_,_).",
+                    "resultPredicate": "alert",
+                    "notify": true
+                }
+            }
+        })
+        .to_string();
+        let push = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "push_stream_events",
+                "arguments": {
+                    "stream": "sensors",
+                    "events": [{
+                        "facts": [{
+                            "subject": "ex:s1",
+                            "predicate": "ex:p",
+                            "object": "ex:o",
+                            "objectType": "uri"
+                        }]
+                    }]
+                }
+            }
+        })
+        .to_string();
+        let input = format!("{register}\n{push}\n");
+
+        let mut output = Vec::new();
+        run_stdio_with_resources(&reg, &resources, input.as_bytes(), &mut output)
+            .expect("run stdio");
+        let text = String::from_utf8(output).expect("utf8");
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "{text}");
+
+        let registered: JsonValue = serde_json::from_str(lines[0]).unwrap();
+        let pushed: JsonValue = serde_json::from_str(lines[1]).unwrap();
+        let notification: JsonValue = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(registered["id"], 1);
+        assert_eq!(registered["result"]["isError"], false);
+        assert_eq!(pushed["id"], 2);
+        assert_eq!(pushed["result"]["isError"], false);
+        assert_eq!(
+            notification,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/resources/updated",
+                "params": { "uri": "cqels://queries/notify-rule/results" }
+            })
+        );
     }
 }

@@ -76,6 +76,7 @@ struct HubInner {
     handle: Handle,
     results: Mutex<HashMap<String, VecDeque<BindingSet>>>,
     json_results: Mutex<HashMap<String, VecDeque<JsonValue>>>,
+    result_notifications: Mutex<VecDeque<String>>,
     registrations: Mutex<HashMap<String, StreamRegistration>>,
     observers: Mutex<HashMap<String, ObserverRegistration>>,
     observer_evaluation: Mutex<()>,
@@ -87,12 +88,14 @@ struct HubInner {
 struct StreamRegistration {
     engine_query_id: String,
     buffer_size: usize,
+    notify: bool,
 }
 
 #[derive(Clone)]
 struct ObserverRegistration {
     stream: String,
     buffer_size: usize,
+    notify: bool,
     access_policy: Option<Arc<AccessPolicyRegistry>>,
     kind: ObserverKind,
 }
@@ -159,6 +162,7 @@ impl Drop for PendingRegistrationGuard {
 
 const DEFAULT_BUFFER_SIZE: usize = 100;
 const MAX_BUFFER_SIZE: usize = 100_000;
+const MAX_PENDING_RESULT_NOTIFICATIONS: usize = 100_000;
 
 impl StreamQueryHub {
     /// Constructs a new hub bound to `engine` and `handle`.
@@ -187,6 +191,7 @@ impl StreamQueryHub {
                 handle,
                 results: Mutex::new(HashMap::new()),
                 json_results: Mutex::new(HashMap::new()),
+                result_notifications: Mutex::new(VecDeque::new()),
                 registrations: Mutex::new(HashMap::new()),
                 observers: Mutex::new(HashMap::new()),
                 observer_evaluation: Mutex::new(()),
@@ -298,6 +303,12 @@ impl StreamQueryHub {
         out
     }
 
+    /// Drains queued query-result update notifications. Each entry is a
+    /// query id whose `cqels://queries/{id}/results` resource changed.
+    pub fn drain_result_notification_query_ids(&self) -> Vec<String> {
+        self.inner.result_notifications.lock().drain(..).collect()
+    }
+
     /// Creates a stream if it is not already registered. Returns `true`
     /// when a new stream was created and `false` when it already existed.
     pub fn create_stream(&self, name: &str) -> Result<bool, CqelsError> {
@@ -402,18 +413,21 @@ impl StreamQueryHub {
     }
 
     fn record_result(&self, query_id: String, result: BindingSet) {
-        let buffer_size = self
+        let (buffer_size, notify) = self
             .inner
             .registrations
             .lock()
             .get(&query_id)
-            .map(|registration| registration.buffer_size)
-            .unwrap_or(DEFAULT_BUFFER_SIZE);
+            .map(|registration| (registration.buffer_size, registration.notify))
+            .unwrap_or((DEFAULT_BUFFER_SIZE, false));
         let mut guard = self.inner.results.lock();
-        let buffer = guard.entry(query_id).or_default();
+        let buffer = guard.entry(query_id.clone()).or_default();
         buffer.push_back(result);
         while buffer.len() > buffer_size {
             buffer.pop_front();
+        }
+        if notify {
+            self.queue_result_notification(&query_id);
         }
     }
 
@@ -422,18 +436,34 @@ impl StreamQueryHub {
         query_id: String,
         result: JsonValue,
         buffer_size: usize,
+        notify: bool,
     ) {
         let mut guard = self.inner.json_results.lock();
-        let buffer = guard.entry(query_id).or_default();
+        let buffer = guard.entry(query_id.clone()).or_default();
         buffer.push_back(result);
         while buffer.len() > buffer_size {
             buffer.pop_front();
+        }
+        if notify {
+            self.queue_result_notification(&query_id);
         }
     }
 
     fn forget_results(&self, query_id: &str) {
         self.inner.results.lock().remove(query_id);
         self.inner.json_results.lock().remove(query_id);
+        self.inner
+            .result_notifications
+            .lock()
+            .retain(|queued| queued != query_id);
+    }
+
+    fn queue_result_notification(&self, query_id: &str) {
+        let mut notifications = self.inner.result_notifications.lock();
+        notifications.push_back(query_id.to_string());
+        while notifications.len() > MAX_PENDING_RESULT_NOTIFICATIONS {
+            notifications.pop_front();
+        }
     }
 
     fn unregister_query(&self, query_id: &str) -> Result<(), CqelsError> {
@@ -492,7 +522,12 @@ impl StreamQueryHub {
                 continue;
             }
             if let Some(result) = result {
-                self.record_json_result_with_size(query_id, result, current.buffer_size);
+                self.record_json_result_with_size(
+                    query_id,
+                    result,
+                    current.buffer_size,
+                    current.notify,
+                );
             }
         }
     }
@@ -1103,7 +1138,7 @@ impl McpTool for WatchInvariantTool {
                 json!({
                     "type": "boolean",
                     "default": false,
-                    "description": "Accepted for Java compatibility; push notifications are not yet wired in Rust."
+                    "description": "When true, queue result-resource update signals. The bundled server emits them over stdio; HTTP clients should poll results."
                 }),
             )
             .require("stream")
@@ -1154,6 +1189,7 @@ impl McpTool for WatchInvariantTool {
             ObserverRegistration {
                 stream: stream.clone(),
                 buffer_size,
+                notify,
                 access_policy: self.access_policy.clone(),
                 kind: ObserverKind::WatchInvariant {
                     shape_graph,
@@ -1265,7 +1301,7 @@ impl McpTool for RegisterRulesTool {
                 json!({
                     "type": "boolean",
                     "default": false,
-                    "description": "Accepted for Java compatibility; push notifications are not yet wired in Rust."
+                    "description": "When true, queue result-resource update signals. The bundled server emits them over stdio; HTTP clients should poll results."
                 }),
             )
             .require("stream")
@@ -1327,6 +1363,7 @@ impl McpTool for RegisterRulesTool {
             ObserverRegistration {
                 stream: stream.clone(),
                 buffer_size,
+                notify,
                 access_policy: self.access_policy.clone(),
                 kind: ObserverKind::Rules {
                     rules,
@@ -1432,7 +1469,7 @@ impl McpTool for RegisterStreamQueryTool {
                 json!({
                     "type": "boolean",
                     "default": false,
-                    "description": "Whether clients intend to use resource update notifications. The transport exposes notification payload helpers but does not push unsolicited messages."
+                    "description": "When true, queue result-resource update signals. The bundled server emits them over stdio; HTTP clients should poll results."
                 }),
             )
             .with_property(
@@ -1529,6 +1566,7 @@ impl McpTool for RegisterStreamQueryTool {
                 StreamRegistration {
                     engine_query_id: engine_query_id.clone(),
                     buffer_size,
+                    notify,
                 },
             );
             *id_cell.lock() = Some(query_id.clone());
@@ -2465,6 +2503,17 @@ mod tests {
         .expect("dispatch")
     }
 
+    fn drain_notifications_until_nonempty(hub: &StreamQueryHub) -> Vec<String> {
+        for _ in 0..50 {
+            let notifications = hub.drain_result_notification_query_ids();
+            if !notifications.is_empty() {
+                return notifications;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        hub.drain_result_notification_query_ids()
+    }
+
     #[test]
     fn stream_reasoning_profile_parser_accepts_java_alpha10_values() {
         assert_eq!(
@@ -3295,6 +3344,160 @@ MESSAGE
             poll.content["results"][0]["results"][0]["bindings"]["who"],
             "alice"
         );
+    }
+
+    #[test]
+    fn notify_true_queues_result_resource_update_for_observers() {
+        let (hub, _rt) = fresh_hub();
+        let solver: Arc<dyn AspSolver> = Arc::new(StaticSolver {
+            answer_sets: vec![AnswerSet::new(vec![Atom::new(
+                "alert",
+                vec!["alice".to_string()],
+            )])],
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(register_rules_tool_with_solver(hub.clone(), solver));
+        reg.install(push_stream_events_tool(hub.clone()));
+
+        let registered = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("notify-rules"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                    .with_arg("resultPredicate", json!("alert"))
+                    .with_arg("notify", json!(true)),
+            )
+            .expect("dispatch");
+        assert!(!registered.is_error, "{:?}", registered.content);
+        assert!(hub.drain_result_notification_query_ids().is_empty());
+
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "facts": [{
+                                "subject": "ex:s1",
+                                "predicate": "ex:p",
+                                "object": "ex:o",
+                                "objectType": "uri"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "{:?}", pushed.content);
+        assert_eq!(
+            hub.drain_result_notification_query_ids(),
+            vec!["notify-rules".to_string()]
+        );
+    }
+
+    #[test]
+    fn notify_true_queues_result_resource_update_for_stream_queries() {
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
+        let reg = install_all(&hub);
+        let query = r#"
+            SELECT ?sensor ?temp
+            FROM STREAM sensors [TRIPLES 1]
+            WHERE {
+                STREAM sensors { ?sensor <http://ex.org/temp> ?temp . }
+            }
+        "#;
+
+        let registered = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new()
+                    .with_arg("query", json!(query))
+                    .with_arg("queryId", json!("notify-stream"))
+                    .with_arg("notify", json!(true)),
+            )
+            .expect("dispatch");
+        assert!(!registered.is_error, "{:?}", registered.content);
+        assert!(hub.drain_result_notification_query_ids().is_empty());
+
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 1000,
+                            "facts": [{
+                                "subject": "http://ex.org/s1",
+                                "predicate": "http://ex.org/temp",
+                                "object": "21",
+                                "objectType": "literal"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "{:?}", pushed.content);
+
+        let poll = poll_until_nonempty(&reg, "notify-stream");
+        assert!(!poll.is_error, "{:?}", poll.content);
+        assert_eq!(poll.content["count"], 1);
+        assert_eq!(
+            drain_notifications_until_nonempty(&hub),
+            vec!["notify-stream".to_string()]
+        );
+    }
+
+    #[test]
+    fn notify_false_does_not_queue_result_resource_update() {
+        let (hub, _rt) = fresh_hub();
+        let solver: Arc<dyn AspSolver> = Arc::new(StaticSolver {
+            answer_sets: vec![AnswerSet::new(vec![Atom::new(
+                "alert",
+                vec!["alice".to_string()],
+            )])],
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(register_rules_tool_with_solver(hub.clone(), solver));
+        reg.install(push_stream_events_tool(hub.clone()));
+
+        let registered = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("poll-only-rules"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                    .with_arg("resultPredicate", json!("alert")),
+            )
+            .expect("dispatch");
+        assert!(!registered.is_error, "{:?}", registered.content);
+
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "facts": [{
+                                "subject": "ex:s1",
+                                "predicate": "ex:p",
+                                "object": "ex:o",
+                                "objectType": "uri"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "{:?}", pushed.content);
+        assert!(hub.drain_result_notification_query_ids().is_empty());
+        assert_eq!(hub.buffered_count("poll-only-rules"), 1);
     }
 
     #[test]

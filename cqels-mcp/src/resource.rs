@@ -264,6 +264,18 @@ impl QueryResultsTemplate {
             }),
         )
     }
+
+    fn drain_notifications(&self) -> Vec<JsonValue> {
+        self.hub
+            .as_ref()
+            .map(|hub| {
+                hub.drain_result_notification_query_ids()
+                    .into_iter()
+                    .map(|query_id| query_results_updated_notification(&query_id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// Registry for static resources plus dynamic resource templates.
@@ -350,6 +362,20 @@ impl ResourceRegistry {
             }
         }
         Err(ResourceError::UnknownResource(uri.to_string()))
+    }
+
+    /// Drains queued resource update notifications from live templates.
+    ///
+    /// This is used by transports that can emit unsolicited MCP
+    /// notifications. Each result row queues one
+    /// `notifications/resources/updated` signal for the corresponding
+    /// query-results resource, matching Java alpha.10's no-coalescing
+    /// notifier contract.
+    pub fn drain_notifications(&self) -> Vec<JsonValue> {
+        self.templates
+            .iter()
+            .flat_map(QueryResultsTemplate::drain_notifications)
+            .collect()
     }
 }
 

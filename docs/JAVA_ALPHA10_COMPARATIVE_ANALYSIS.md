@@ -1,8 +1,8 @@
 # CQELS Java alpha.10 vs Rust Port Comparative Analysis
 
-Date: 2026-07-11
+Date: 2026-07-12
 
-Java reference: `cqels/claude` tag `v2.0.0-alpha.10`, peeled commit
+Java reference: `github.com/cqels/claude` tag `v2.0.0-alpha.10`, peeled commit
 `d246ade186bfb42fe5da43351bad973343d19411`.
 
 Rust reference: this worktree on `codex/mcp-alpha10-stack`.
@@ -25,9 +25,9 @@ preserves Java-style graph observations on the CQELS-QL/MCP stream-ingest path.
 The latest local fixture sweep also closes the previously tracked Rust-side
 core-query fixture failures in this corpus: Rust now passes all 12 parity
 fixtures against the checked-in oracles. That is still not full Java alpha.10
-parity: persistence, notification, plugin, broader cross-language fixture
-contracts, and some exact input-contract details are not fully implemented or
-proved yet.
+parity: persistence, broader notifications, plugin SPI/discovery, broader
+cross-language fixture contracts, and some exact input-contract details are not
+fully implemented or proved yet.
 
 ## Evidence Summary
 
@@ -81,7 +81,7 @@ Rust current state:
   persistent RDF quad store.
 - Rust extension points are native registries and traits; there is no
   Java-style deploy-time plugin SPI or provider discovery layer.
-- Fresh fixture sweep on this branch (2026-07-11):
+- Fresh fixture sweep on this branch (2026-07-12):
   - `cargo xtask parity --rust-only`: Rust passed 12/12 fixtures.
   - Java alpha.10 runner (`mvn -q -B -DskipTests
     -Dcqels.dependency.version=2.0.0-alpha.10 package`, then
@@ -129,13 +129,13 @@ alpha.10 emitted no matching rows in this run.
 | `[TRIPLES n]` observation semantics | Counts stream elements, so graph observations count as one and never split. | Rust count windows now count a graph observation as one element, and MCP multi-statement observations are delivered as graph elements. | Close for the tested CQELS-QL path. |
 | `register_stream_query` | Governed fail-closed; buffers results, supports Java language/CEP surface according to Java handler. Existing listeners drop results while governance is active. | Buffers and polls results, denies registration under active governance in the default server, and listener callbacks drop results under active policy; still only accepts `cqelsql`, while `cep:true` fails loud. | Partial. |
 | `poll_stream_results` / result resource | Java drains via `recall_memory(queryId)` and resource template, denied/withheld under governance. | `poll_stream_results` denies under active governance; `cqels://queries/{queryId}/results` returns a denial payload without draining. | Close for governed withholding; remaining parity depends on broader Java result-resource semantics. |
-| `watch_invariant` | Continuous SHACL per observation, governed fail-closed, registration caps, shape size cap, optional notifications, drops results under governance. | Present, denied under active governance in the default server, and drops observer results while governance is active; no Java-equivalent registration/shape caps; notifications accepted but not pushed. | Partial. |
-| `register_rules` | Continuous ASP accumulate/solve, governed fail-closed, rules/args/facts/buffer caps, optional notifications, result drop under governance. | Present with `maxFacts`, `emit`, buffers, solver injection, default-server governance denial, and result drop under active policy; notifications accepted but not pushed; caps are not fully aligned. | Partial. |
+| `watch_invariant` | Continuous SHACL per observation, governed fail-closed, registration caps, shape size cap, optional notifications, drops results under governance. | Present, denied under active governance in the default server, and drops observer results while governance is active; `notify:true` now queues stdio `notifications/resources/updated` signals for the query-results resource. No Java-equivalent registration/shape caps yet. | Partial. |
+| `register_rules` | Continuous ASP accumulate/solve, governed fail-closed, rules/args/facts/buffer caps, optional notifications, result drop under governance. | Present with `maxFacts`, `emit`, buffers, solver injection, default-server governance denial, and result drop under active policy; `notify:true` now queues stdio `notifications/resources/updated` signals for the query-results resource. Caps are not fully aligned. | Partial. |
 | `CQELS_MCP_REASONING` | Opt-in `rdfs` or `rdfs-full` stream reasoning; original observations flow first, graph observations stay atomic, inferred single triples are appended, and a RETE fact cap hardens memory. | Opt-in parser and RDFS/RDFS-full flow are present; original observations flow first, graph observations stay atomic, and inferred triples are appended as single RDF observations. `apply_stream_reasoning` still does not wire a Java-equivalent RETE fact cap. | Partial. |
-| MCP resources | Metadata resources are withheld under governance, except liveness fields in `engine/status`; `engine/status` reports persistence and RDF-store persistence facts. | Governed resource registry withholds metadata/result resources, keeps Java-style `engine/status` liveness fields readable, reports `registeredQueryCount`, `persistence`, `rdfStore.persistent`, and `streamReasoning`, and preserves result buffers when governed. `rdfStore.persistent` correctly remains `false` because Rust does not yet implement Java's RDF4J NativeStore equivalent. | Close for status shape and governed liveness; broader resource notification/persistence semantics remain partial. |
+| MCP resources | Metadata resources are withheld under governance, except liveness fields in `engine/status`; `engine/status` reports persistence and RDF-store persistence facts. | Governed resource registry withholds metadata/result resources, keeps Java-style `engine/status` liveness fields readable, reports `registeredQueryCount`, `persistence`, `rdfStore.persistent`, and `streamReasoning`, preserves result buffers when governed, and drains queued query-result update notifications for stdio transports. `rdfStore.persistent` correctly remains `false` because Rust does not yet implement Java's RDF4J NativeStore equivalent. | Close for status shape, governed liveness, and stdio query-result notification shape; broader persistence and non-stdio/non-query notification semantics remain partial. |
 | `CQELS_MCP_RDF_STORE_PATH` | Switches the RDF repository to RDF4J `NativeStore`; stored facts and saved procedures survive restart. | Accepted as an alias root for sled MCP memory; stream events and RDF quads are not persisted as Java NativeStore equivalents. | Not equivalent. |
 | Plugin SPI | New `cqels-plugin-spi`; `ServiceLoader` discovers plugins and embedding providers; plugin tools are namespaced, atomic, and governed. | Native `ToolRegistry`, `MemoryStore`, solver injection, and resource registries exist, but no deploy-time plugin discovery or governed plugin registrar. | Intentional non-parity today; blocker if the goal is full Java alpha.10 parity. |
-| Notifications | Java uses `McpNotifier` for query/resource result notifications when requested. | Rust accepts `notify` and has notification helper payloads, but tool schemas state unsolicited push notifications are not wired. | Partial. |
+| Notifications | Java uses `McpNotifier` for query/resource result notifications when requested. | Rust now queues one canonical `notifications/resources/updated` signal per notify-enabled result row and the stdio loop emits those signals after the triggering request. HTTP remains request/response only, and non-query resources such as materialized inference notifications are not broadly wired. | Partial, but no longer accepted-only for query-result stdio notifications. |
 | Ingest event-time validation | Whole-number epoch millis or ISO instant, bounded to `[0, 7258118400000]`, overflow-safe. | Rust now rejects fractional, negative, and far-future event times, validates numeric strings and UTC instants through the same upper bound, and uses checked timestamp arithmetic. | Close for the MCP ingest path. |
 | Fixture parity | Java/Rust fixture harness exists; the CI Java-runner gate enforces a named known-passing subset and runs the full corpus informationally. A fresh local Java alpha.10 run passed 5/12 against the current oracles. | Rust now passes the full checked-in 12-fixture corpus locally. The corpus covers NOW, TRIPLES windows, FILTER, STREAM-scoped OPTIONAL/UNION, ORDER BY/LIMIT, static `FROM <iri>` lookup, aggregate, CEP SEQ documentation, and known emission-semantics differences. | Strong evidence for covered fixtures only, not universal equality. |
 | Broader core-query parity | Java alpha.10 includes fixes or behavior for static lookup joins and Java-side ORDER BY/LIMIT handling. Some fixtures also document intentional or unresolved semantic differences, such as raw RSTREAM re-emission versus Rust's single-emission output. Java currently hard-errors for STREAM-scoped OPTIONAL/UNION in the local Java runner. | Rust now accepts the fixture-covered STREAM-scoped OPTIONAL/UNION forms, `ORDER BY DESC(?var)`, numeric FILTERs over typed integer fixture events, and SPARQL `FROM <iri>` static graph evaluation. Known remaining comparison limits are `FILTER(SEQ())` standard-path semantics, Java/Rust RSTREAM-vs-single-emission differences, and broader untested grammar/runtime surfaces. | Improved; full Java alpha.10 parity still needs more cross-language fixtures beyond this corpus. |
@@ -178,9 +178,9 @@ It cannot yet be declared universally identical to Java alpha.10.
 3. Decide and implement the persistence story for `CQELS_MCP_RDF_STORE_PATH`:
    true persistent RDF quad store parity, or an explicit documented non-parity
    accepted by the project.
-4. Choose the notification parity target. If Rust claims Java `notify:true`
-   parity, wire unsolicited result/resource notifications; otherwise keep it
-   documented as accepted-but-not-implemented compatibility.
+4. Extend notification parity beyond the newly wired stdio query-result
+   signals: decide whether HTTP/SSE-style push and non-query resource
+   notifications are required for the Rust release target.
 5. Choose the plugin parity target. Full Java alpha.10 parity requires a
    deploy-time Rust plugin SPI/discovery layer with namespacing, collision
    checks, atomic registration, and governance wrapping; otherwise this remains
