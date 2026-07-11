@@ -71,7 +71,8 @@ pub use prompt::{
 };
 pub use registry::{McpError, ToolRegistry};
 pub use resource::{
-    cqels_resource_registry, cqels_resource_registry_with_streams, query_id_from_results_uri,
+    cqels_resource_registry, cqels_resource_registry_with_streams,
+    cqels_resource_registry_with_streams_and_access_policy, query_id_from_results_uri,
     query_results_updated_notification, query_results_uri, resource_updated_notification,
     ReadResourceResult, ResourceContent, ResourceDescriptor, ResourceError, ResourceRegistry,
     ResourceTemplateDescriptor, DEFAULT_STREAM, RESOURCE_DOC_CEP, RESOURCE_DOC_CQELSQL,
@@ -80,10 +81,15 @@ pub use resource::{
 };
 pub use solve::{solve_tool, solve_tool_with_solver, SolveTool};
 pub use stream_query::{
-    create_stream_tool, forget_stream_query_tool, list_stream_queries_tool,
-    poll_stream_results_tool, push_stream_events_tool, register_rules_tool,
-    register_rules_tool_with_solver, register_stream_query_tool, unregister_stream_query_tool,
-    validate_stream_query_tool, watch_invariant_tool, watch_invariant_tool_with_solver,
+    create_stream_tool, create_stream_tool_with_access_policy, forget_stream_query_tool,
+    list_stream_queries_tool, list_stream_queries_tool_with_access_policy,
+    poll_stream_results_tool, poll_stream_results_tool_with_access_policy, push_stream_events_tool,
+    push_stream_events_tool_with_access_policy, register_rules_tool,
+    register_rules_tool_with_access_policy, register_rules_tool_with_solver,
+    register_rules_tool_with_solver_and_access_policy, register_stream_query_tool,
+    register_stream_query_tool_with_access_policy, unregister_stream_query_tool,
+    validate_stream_query_tool, watch_invariant_tool, watch_invariant_tool_with_access_policy,
+    watch_invariant_tool_with_solver, watch_invariant_tool_with_solver_and_access_policy,
     CreateStreamTool, ForgetStreamQueryTool, ListStreamQueriesTool, PollStreamResultsTool,
     PushStreamEventsTool, RegisterRulesTool, RegisterStreamQueryTool, StreamQueryHub,
     UnregisterStreamQueryTool, ValidateStreamQueryTool, WatchInvariantTool,
@@ -92,8 +98,8 @@ pub use tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
 pub use tools::{
     analyze_query_tool, assemble_context_tool, assemble_context_tool_with_access_policy,
     explain_decision_tool, forget_memory_tool, list_procedures_tool, parse_query_tool, query_tool,
-    reason_tool, reasoning_profiles_tool, recall_decisions_tool, recall_episodes_tool,
-    recall_memory_tool, recall_memory_tool_with_reasoning,
+    query_tool_with_access_policy, reason_tool, reasoning_profiles_tool, recall_decisions_tool,
+    recall_episodes_tool, recall_memory_tool, recall_memory_tool_with_reasoning,
     recall_memory_tool_with_reasoning_and_access_policy, record_event_tool,
     register_reasoning_tool, run_procedure_tool, save_procedure_tool, set_access_policy_tool,
     shacl_capabilities_tool, store_memory_tool, AccessPolicyRegistry, ReasoningRegistration,

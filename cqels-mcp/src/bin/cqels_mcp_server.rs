@@ -47,18 +47,20 @@ use std::sync::Arc;
 use cqels_engine::CqelsEngine;
 use cqels_mcp::{
     analyze_query_tool, assemble_context_tool_with_access_policy, cqels_prompt_registry,
-    cqels_resource_registry_with_streams, create_stream_tool, explain_decision_tool,
-    forget_memory_tool, forget_stream_query_tool, list_procedures_tool, list_stream_queries_tool,
-    parse_query_tool, poll_stream_results_tool, push_stream_events_tool, query_tool, reason_tool,
-    reasoning_profiles_tool, recall_decisions_tool, recall_episodes_tool,
-    recall_memory_tool_with_reasoning_and_access_policy, record_event_tool,
-    register_reasoning_tool, register_rules_tool, register_stream_query_tool,
-    run_http_with_prompts_and_resources, run_procedure_tool, run_stdio_with_prompts_and_resources,
-    save_procedure_tool, server_transport_from_env, set_access_policy_tool,
-    shacl_capabilities_tool, solve_tool, store_memory_tool, unregister_stream_query_tool,
-    validate_stream_query_tool, validate_tool, watch_invariant_tool, AccessPolicyRegistry,
-    InMemoryMemoryStore, MemoryStore, ReasoningRegistration, ServerTransport, SledMemoryStore,
-    StreamQueryHub, ToolRegistry,
+    cqels_resource_registry_with_streams_and_access_policy, create_stream_tool_with_access_policy,
+    explain_decision_tool, forget_memory_tool, forget_stream_query_tool, list_procedures_tool,
+    list_stream_queries_tool_with_access_policy, parse_query_tool,
+    poll_stream_results_tool_with_access_policy, push_stream_events_tool_with_access_policy,
+    query_tool_with_access_policy, reason_tool, reasoning_profiles_tool, recall_decisions_tool,
+    recall_episodes_tool, recall_memory_tool_with_reasoning_and_access_policy, record_event_tool,
+    register_reasoning_tool, register_rules_tool_with_access_policy,
+    register_stream_query_tool_with_access_policy, run_http_with_prompts_and_resources,
+    run_procedure_tool, run_stdio_with_prompts_and_resources, save_procedure_tool,
+    server_transport_from_env, set_access_policy_tool, shacl_capabilities_tool, solve_tool,
+    store_memory_tool, unregister_stream_query_tool, validate_stream_query_tool, validate_tool,
+    watch_invariant_tool_with_access_policy, AccessPolicyRegistry, InMemoryMemoryStore,
+    MemoryStore, ReasoningRegistration, ServerTransport, SledMemoryStore, StreamQueryHub,
+    ToolRegistry,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -90,18 +92,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     let access_policy = AccessPolicyRegistry::shared();
     let mut registry = ToolRegistry::new();
     registry.install(parse_query_tool());
-    registry.install(query_tool());
+    registry.install(query_tool_with_access_policy(access_policy.clone()));
     registry.install(analyze_query_tool());
     registry.install(validate_stream_query_tool());
-    registry.install(create_stream_tool(stream_hub.clone()));
-    registry.install(push_stream_events_tool(stream_hub.clone()));
-    registry.install(register_stream_query_tool(stream_hub.clone()));
+    registry.install(create_stream_tool_with_access_policy(
+        stream_hub.clone(),
+        access_policy.clone(),
+    ));
+    registry.install(push_stream_events_tool_with_access_policy(
+        stream_hub.clone(),
+        access_policy.clone(),
+    ));
+    registry.install(register_stream_query_tool_with_access_policy(
+        stream_hub.clone(),
+        access_policy.clone(),
+    ));
+    // Keep teardown available under active governance so clients can release
+    // existing registrations whose list/poll/read paths are withheld.
     registry.install(forget_stream_query_tool(stream_hub.clone()));
-    registry.install(list_stream_queries_tool(stream_hub.clone()));
+    registry.install(list_stream_queries_tool_with_access_policy(
+        stream_hub.clone(),
+        access_policy.clone(),
+    ));
     registry.install(unregister_stream_query_tool(stream_hub.clone()));
-    registry.install(poll_stream_results_tool(stream_hub.clone()));
-    registry.install(watch_invariant_tool(stream_hub.clone()));
-    registry.install(register_rules_tool(stream_hub.clone()));
+    registry.install(poll_stream_results_tool_with_access_policy(
+        stream_hub.clone(),
+        access_policy.clone(),
+    ));
+    registry.install(watch_invariant_tool_with_access_policy(
+        stream_hub.clone(),
+        access_policy.clone(),
+    ));
+    registry.install(register_rules_tool_with_access_policy(
+        stream_hub.clone(),
+        access_policy.clone(),
+    ));
     registry.install(reasoning_profiles_tool());
     registry.install(shacl_capabilities_tool());
     registry.install(reason_tool());
@@ -128,10 +153,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     ));
     registry.install(assemble_context_tool_with_access_policy(
         memory,
-        access_policy,
+        access_policy.clone(),
     ));
     let prompts = cqels_prompt_registry();
-    let resources = cqels_resource_registry_with_streams(stream_hub);
+    let resources =
+        cqels_resource_registry_with_streams_and_access_policy(stream_hub, access_policy);
 
     match server_transport_from_env()? {
         ServerTransport::Stdio => {

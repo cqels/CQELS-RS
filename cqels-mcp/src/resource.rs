@@ -14,6 +14,7 @@ use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
 
 use crate::stream_query::StreamQueryHub;
+use crate::tools::{governance_active, AccessPolicyRegistry};
 
 /// Default short-term memory stream name used by the Java MCP server.
 pub const DEFAULT_STREAM: &str = "shortterm";
@@ -47,6 +48,7 @@ pub const RESOURCE_QUERY_RESULTS_TEMPLATE: &str = "cqels://queries/{queryId}/res
 
 const RESOURCE_QUERY_RESULTS_PREFIX: &str = "cqels://queries/";
 const RESOURCE_QUERY_RESULTS_SUFFIX: &str = "/results";
+const GOVERNED_METADATA_DENIAL: &str = "An access policy is active; resource metadata is withheld.";
 
 /// Constructs the concrete result-buffer resource URI for `query_id`.
 pub fn query_results_uri(query_id: &str) -> String {
@@ -190,10 +192,11 @@ impl StaticResource {
 struct QueryResultsTemplate {
     descriptor: ResourceTemplateDescriptor,
     hub: Option<StreamQueryHub>,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 impl QueryResultsTemplate {
-    fn new(hub: Option<StreamQueryHub>) -> Self {
+    fn new(hub: Option<StreamQueryHub>, access_policy: Option<Arc<AccessPolicyRegistry>>) -> Self {
         Self {
             descriptor: ResourceTemplateDescriptor::json(
                 RESOURCE_QUERY_RESULTS_TEMPLATE,
@@ -201,6 +204,7 @@ impl QueryResultsTemplate {
                 "Buffered results for a registered stream query; reading drains the buffer",
             ),
             hub,
+            access_policy,
         }
     }
 
@@ -211,6 +215,16 @@ impl QueryResultsTemplate {
     fn read(&self, uri: &str) -> Result<ReadResourceResult, ResourceError> {
         let query_id = query_id_from_results_uri(uri)
             .ok_or_else(|| ResourceError::UnknownResource(uri.to_string()))?;
+        if governance_active(self.access_policy.as_ref()) {
+            return json_result(
+                uri,
+                json!({
+                    "queryId": query_id,
+                    "denied": GOVERNED_METADATA_DENIAL,
+                    "results": [],
+                }),
+            );
+        }
         let results = self
             .hub
             .as_ref()
@@ -268,8 +282,13 @@ impl ResourceRegistry {
         self
     }
 
-    fn install_query_results_template(mut self, hub: Option<StreamQueryHub>) -> Self {
-        self.templates.push(QueryResultsTemplate::new(hub));
+    fn install_query_results_template(
+        mut self,
+        hub: Option<StreamQueryHub>,
+        access_policy: Option<Arc<AccessPolicyRegistry>>,
+    ) -> Self {
+        self.templates
+            .push(QueryResultsTemplate::new(hub, access_policy));
         self
     }
 
@@ -317,20 +336,38 @@ impl Default for ResourceRegistry {
 
 /// Builds the stateless CQELS resource registry used by the shipped stdio binary.
 pub fn cqels_resource_registry() -> ResourceRegistry {
-    cqels_resource_registry_with_hub(None)
+    cqels_resource_registry_with_hub(None, None)
 }
 
 /// Builds a CQELS resource registry backed by live stream-query state.
 pub fn cqels_resource_registry_with_streams(hub: StreamQueryHub) -> ResourceRegistry {
-    cqels_resource_registry_with_hub(Some(hub))
+    cqels_resource_registry_with_hub(Some(hub), None)
 }
 
-fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegistry {
+/// Builds a live stream-query resource registry with Java alpha.10 governance.
+pub fn cqels_resource_registry_with_streams_and_access_policy(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> ResourceRegistry {
+    cqels_resource_registry_with_hub(Some(hub), Some(access_policy))
+}
+
+fn cqels_resource_registry_with_hub(
+    hub: Option<StreamQueryHub>,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
+) -> ResourceRegistry {
     let stats_hub = hub.clone();
     let namespaces_hub = hub.clone();
     let status_hub = hub.clone();
     let streams_hub = hub.clone();
     let queries_hub = hub.clone();
+    let stats_policy = access_policy.clone();
+    let namespaces_policy = access_policy.clone();
+    let status_policy = access_policy.clone();
+    let streams_policy = access_policy.clone();
+    let queries_policy = access_policy.clone();
+    let reasoning_policy = access_policy.clone();
+    let results_policy = access_policy.clone();
 
     ResourceRegistry::new()
         .install_json(
@@ -340,6 +377,9 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
                 "Triple count, named graphs, active streams and queries",
             ),
             move || {
+                if let Some(denied) = governed_metadata(stats_policy.as_ref()) {
+                    return denied;
+                }
                 let query_ids = query_ids(stats_hub.as_ref());
                 json!({
                     "tripleCount": 0,
@@ -356,6 +396,9 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
                 "Known namespace prefixes available to MCP tools",
             ),
             move || {
+                if let Some(denied) = governed_metadata(namespaces_policy.as_ref()) {
+                    return denied;
+                }
                 let mut namespaces = known_namespaces();
                 if namespaces_hub.is_some() {
                     namespaces.insert("stream".to_string(), "cqels://stream/".to_string());
@@ -370,11 +413,26 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
                 "Runtime status, active streams, and registered query IDs",
             ),
             move || {
-                let query_ids = query_ids(status_hub.as_ref());
-                let streams = stream_names(status_hub.as_ref());
                 let stream_reasoning = status_hub
                     .as_ref()
                     .and_then(StreamQueryHub::stream_reasoning_profile);
+                if governance_active(status_policy.as_ref()) {
+                    return json!({
+                        "running": status_hub.is_some(),
+                        "registeredQueries": "withheld",
+                        "queryIds": "withheld",
+                        "streams": "withheld",
+                        "streamReasoning": "withheld",
+                        "features": {
+                            "rdfMessages": true,
+                            "pushStreamEvents": true,
+                            "watchInvariant": true,
+                            "registerRules": true,
+                        }
+                    });
+                }
+                let query_ids = query_ids(status_hub.as_ref());
+                let streams = stream_names(status_hub.as_ref());
                 json!({
                     "running": status_hub.is_some(),
                     "registeredQueries": query_ids.len(),
@@ -397,6 +455,9 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
                 "List of active data streams",
             ),
             move || {
+                if let Some(denied) = governed_metadata(streams_policy.as_ref()) {
+                    return denied;
+                }
                 let mut streams = stream_names(streams_hub.as_ref());
                 if streams.is_empty() {
                     streams.push(DEFAULT_STREAM.to_string());
@@ -411,6 +472,9 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
                 "List of registered continuous queries with buffered result counts",
             ),
             move || {
+                if let Some(denied) = governed_metadata(queries_policy.as_ref()) {
+                    return denied;
+                }
                 let queries = match queries_hub.as_ref() {
                     Some(hub) => query_ids(Some(hub))
                         .into_iter()
@@ -432,7 +496,10 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
                 "Reasoning Capabilities",
                 "Available reasoning profiles and their inference capabilities",
             ),
-            || {
+            move || {
+                if let Some(denied) = governed_metadata(reasoning_policy.as_ref()) {
+                    return denied;
+                }
                 let profiles = [
                     ReasoningProfile::None,
                     ReasoningProfile::Rdfs,
@@ -474,7 +541,11 @@ fn cqels_resource_registry_with_hub(hub: Option<StreamQueryHub>) -> ResourceRegi
             ),
             CEP_DOC,
         )
-        .install_query_results_template(hub)
+        .install_query_results_template(hub, results_policy)
+}
+
+fn governed_metadata(access_policy: Option<&Arc<AccessPolicyRegistry>>) -> Option<JsonValue> {
+    governance_active(access_policy).then(|| json!({ "denied": GOVERNED_METADATA_DENIAL }))
 }
 
 fn query_ids(hub: Option<&StreamQueryHub>) -> Vec<String> {
@@ -601,10 +672,33 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
+    use cqels_asp::{AnswerSet, AspError, AspSolver, Atom};
     use cqels_engine::CqelsEngine;
     use tokio::runtime::Runtime;
 
-    use crate::{register_stream_query_tool, ToolInvocation, ToolRegistry};
+    use crate::memory::{InMemoryMemoryStore, MemoryStore};
+    use crate::tools::{set_access_policy_tool, AccessPolicyRegistry};
+    use crate::{
+        push_stream_events_tool, register_rules_tool_with_solver, register_stream_query_tool,
+        ToolInvocation, ToolRegistry,
+    };
+
+    struct StaticSolver;
+
+    #[async_trait]
+    impl AspSolver for StaticSolver {
+        async fn solve(
+            &self,
+            _program: &str,
+            _max_models: usize,
+        ) -> Result<Vec<AnswerSet>, AspError> {
+            Ok(vec![AnswerSet::new(vec![Atom::new(
+                "alert",
+                vec!["alice".to_string()],
+            )])])
+        }
+    }
 
     fn read_json(registry: &ResourceRegistry, uri: &str) -> JsonValue {
         let result = registry.read(uri).expect("read resource");
@@ -612,6 +706,27 @@ mod tests {
         assert_eq!(result.contents[0].uri, uri);
         assert_eq!(result.contents[0].mime_type, "application/json");
         serde_json::from_str(&result.contents[0].text).expect("valid JSON resource text")
+    }
+
+    fn active_policy() -> Arc<AccessPolicyRegistry> {
+        let policy = AccessPolicyRegistry::shared();
+        activate_policy(policy.clone());
+        policy
+    }
+
+    fn activate_policy(access_policy: Arc<AccessPolicyRegistry>) {
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let mut reg = ToolRegistry::new();
+        reg.install(set_access_policy_tool(store, access_policy));
+        let res = reg
+            .call(
+                "set_access_policy",
+                &ToolInvocation::new()
+                    .with_arg("role", json!("analyst"))
+                    .with_arg("labels", json!(["public"])),
+            )
+            .expect("dispatch");
+        assert!(!res.is_error, "{:?}", res.content);
     }
 
     #[test]
@@ -730,6 +845,103 @@ mod tests {
         let result = registry.read(RESOURCE_DOC_CQELSQL).expect("read docs");
         assert_eq!(result.contents[0].mime_type, "text/markdown");
         assert!(result.contents[0].text.contains("CqelsQL"));
+    }
+
+    #[test]
+    fn governed_resources_withhold_metadata_but_keep_status_and_docs_readable() {
+        let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
+        let engine = CqelsEngine::builder().build().expect("engine builds");
+        let _sender = runtime
+            .block_on(async { engine.create_stream("sensors").await })
+            .expect("create stream");
+        let hub = StreamQueryHub::new(Arc::new(engine), runtime.handle().clone());
+        let registry = cqels_resource_registry_with_streams_and_access_policy(hub, active_policy());
+
+        for uri in [
+            RESOURCE_KG_STATS,
+            RESOURCE_KG_NAMESPACES,
+            RESOURCE_STREAMS,
+            RESOURCE_QUERIES,
+            RESOURCE_REASONING,
+        ] {
+            let body = read_json(&registry, uri);
+            assert!(body["denied"]
+                .as_str()
+                .unwrap()
+                .contains("access policy is active"));
+        }
+
+        let status = read_json(&registry, RESOURCE_ENGINE_STATUS);
+        assert_eq!(status["running"], true);
+        assert_eq!(status["registeredQueries"], "withheld");
+        assert_eq!(status["queryIds"], "withheld");
+        assert_eq!(status["streams"], "withheld");
+        assert_eq!(status["streamReasoning"], "withheld");
+        assert_eq!(status["features"]["pushStreamEvents"], true);
+
+        let docs = registry.read(RESOURCE_DOC_CQELSQL).expect("read docs");
+        assert_eq!(docs.contents[0].mime_type, "text/markdown");
+        assert!(docs.contents[0].text.contains("CqelsQL"));
+    }
+
+    #[test]
+    fn governed_query_results_resource_does_not_drain_buffer() {
+        let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
+        let engine = CqelsEngine::builder().build().expect("engine builds");
+        let hub = StreamQueryHub::new(Arc::new(engine), runtime.handle().clone());
+        let access_policy = AccessPolicyRegistry::shared();
+        let registry = cqels_resource_registry_with_streams_and_access_policy(
+            hub.clone(),
+            access_policy.clone(),
+        );
+        let mut tools = ToolRegistry::new();
+        tools.install(register_rules_tool_with_solver(
+            hub.clone(),
+            Arc::new(StaticSolver),
+        ));
+        tools.install(push_stream_events_tool(hub.clone()));
+
+        let registered = tools
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("rl-resource"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                    .with_arg("resultPredicate", json!("alert")),
+            )
+            .expect("dispatch");
+        assert!(!registered.is_error, "{:?}", registered.content);
+
+        let pushed = tools
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "facts": [{
+                                "subject": "ex:s1",
+                                "predicate": "ex:p",
+                                "object": "ex:o",
+                                "objectType": "uri"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "{:?}", pushed.content);
+        assert_eq!(hub.buffered_count("rl-resource"), 1);
+
+        activate_policy(access_policy);
+        let body = read_json(&registry, &query_results_uri("rl-resource"));
+        assert!(body["denied"]
+            .as_str()
+            .unwrap()
+            .contains("access policy is active"));
+        assert!(body["results"].as_array().unwrap().is_empty());
+        assert_eq!(hub.buffered_count("rl-resource"), 1);
     }
 
     #[test]

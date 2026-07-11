@@ -89,10 +89,22 @@ impl McpTool for ParseQueryTool {
 /// without executing it. (Live execution requires wiring an engine; see
 /// the crate-level docs.)
 pub fn query_tool() -> QueryTool {
-    QueryTool
+    QueryTool {
+        access_policy: None,
+    }
 }
 
-pub struct QueryTool;
+/// Returns a [`QueryTool`] wired into Java alpha.9/alpha.10's fail-closed
+/// governance perimeter.
+pub fn query_tool_with_access_policy(access_policy: Arc<AccessPolicyRegistry>) -> QueryTool {
+    QueryTool {
+        access_policy: Some(access_policy),
+    }
+}
+
+pub struct QueryTool {
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
+}
 
 impl McpTool for QueryTool {
     fn name(&self) -> &str {
@@ -134,6 +146,9 @@ impl McpTool for QueryTool {
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        if governance_active(self.access_policy.as_ref()) {
+            return governance_denial(self.name());
+        }
         let Some(query) = invocation.get_str("query") else {
             return ToolResult::error("missing `query` argument");
         };
@@ -601,7 +616,7 @@ fn term_to_string(t: &Term) -> String {
 
 // ─── memory tools ────────────────────────────────────────────────────
 
-const DEFAULT_NAMESPACE: &str = "default";
+pub(crate) const DEFAULT_NAMESPACE: &str = "default";
 const LONGTERM_MEMORY: &str = "longterm";
 const SHORTTERM_MEMORY: &str = "shortterm";
 const LONGTERM_GRAPH: &str = "cqels://memory/longterm";
@@ -655,7 +670,7 @@ impl AccessPolicyRegistry {
             .insert(role, labels);
     }
 
-    fn is_active(&self, namespace: &str) -> bool {
+    pub fn is_active(&self, namespace: &str) -> bool {
         self.inner
             .read()
             .get(namespace)
@@ -669,6 +684,14 @@ impl AccessPolicyRegistry {
             .and_then(|roles| roles.get(role))
             .cloned()
     }
+}
+
+pub(crate) fn governance_active(access_policy: Option<&Arc<AccessPolicyRegistry>>) -> bool {
+    access_policy.is_some_and(|policy| policy.is_active(DEFAULT_NAMESPACE))
+}
+
+pub(crate) fn governance_denial(tool: &str) -> ToolResult {
+    ToolResult::error(format!("{tool} is denied by active access policy"))
 }
 
 impl Default for AccessPolicyRegistry {
@@ -3534,6 +3557,26 @@ mod tests {
                 .with_arg("dry_run", serde_json::json!(false)),
         );
         assert!(res.is_error);
+    }
+
+    #[test]
+    fn query_tool_fails_closed_when_access_policy_is_active() {
+        let access_policy = AccessPolicyRegistry::shared();
+        access_policy.set_role(
+            DEFAULT_NAMESPACE,
+            "analyst".to_string(),
+            std::collections::HashSet::from(["public".to_string()]),
+        );
+        let tool = query_tool_with_access_policy(access_policy);
+
+        let res =
+            tool.call(&ToolInvocation::new().with_arg("query", serde_json::json!(sample_query())));
+
+        assert!(res.is_error);
+        assert!(res.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("query is denied by active access policy"));
     }
 
     // ─── analyze_query tests ─────────────────────────────────────────

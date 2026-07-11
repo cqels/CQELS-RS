@@ -61,6 +61,7 @@ use serde_json::{json, Value as JsonValue};
 use tokio::runtime::Handle;
 
 use crate::tool::{McpTool, ToolInputSchema, ToolInvocation, ToolResult};
+use crate::tools::{governance_active, governance_denial, AccessPolicyRegistry};
 
 /// Shared state for engine-bound MCP tools.
 ///
@@ -92,6 +93,7 @@ struct StreamRegistration {
 struct ObserverRegistration {
     stream: String,
     buffer_size: usize,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
     kind: ObserverKind,
 }
 
@@ -473,7 +475,11 @@ impl StreamQueryHub {
             let Some(current) = observers.get_mut(&query_id) else {
                 continue;
             };
+            let governed = governance_active(registration.access_policy.as_ref());
             *current = registration;
+            if governed {
+                continue;
+            }
             if let Some(result) = result {
                 self.record_json_result_with_size(query_id, result, current.buffer_size);
             }
@@ -604,11 +610,26 @@ impl StreamQueryHub {
 
 /// Constructs the Java alpha.9-compatible `create_stream` MCP tool.
 pub fn create_stream_tool(hub: StreamQueryHub) -> CreateStreamTool {
-    CreateStreamTool { hub }
+    CreateStreamTool {
+        hub,
+        access_policy: None,
+    }
+}
+
+/// Constructs `create_stream` with Java alpha.9/alpha.10 governance.
+pub fn create_stream_tool_with_access_policy(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> CreateStreamTool {
+    CreateStreamTool {
+        hub,
+        access_policy: Some(access_policy),
+    }
 }
 
 pub struct CreateStreamTool {
     hub: StreamQueryHub,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 impl McpTool for CreateStreamTool {
@@ -634,6 +655,9 @@ impl McpTool for CreateStreamTool {
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        if governance_active(self.access_policy.as_ref()) {
+            return governance_denial(self.name());
+        }
         let Some(stream) = required_nonempty_str(invocation, "stream") else {
             return ToolResult::error("missing `stream` argument");
         };
@@ -653,11 +677,26 @@ impl McpTool for CreateStreamTool {
 
 /// Constructs the Java alpha.9-compatible `push_stream_events` MCP tool.
 pub fn push_stream_events_tool(hub: StreamQueryHub) -> PushStreamEventsTool {
-    PushStreamEventsTool { hub }
+    PushStreamEventsTool {
+        hub,
+        access_policy: None,
+    }
+}
+
+/// Constructs `push_stream_events` with Java alpha.9/alpha.10 governance.
+pub fn push_stream_events_tool_with_access_policy(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> PushStreamEventsTool {
+    PushStreamEventsTool {
+        hub,
+        access_policy: Some(access_policy),
+    }
 }
 
 pub struct PushStreamEventsTool {
     hub: StreamQueryHub,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 const MAX_PUSH_EVENTS: usize = 1000;
@@ -705,6 +744,9 @@ impl McpTool for PushStreamEventsTool {
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        if governance_active(self.access_policy.as_ref()) {
+            return governance_denial(self.name());
+        }
         let Some(stream) = required_nonempty_str(invocation, "stream") else {
             return ToolResult::error("missing `stream` argument");
         };
@@ -879,17 +921,44 @@ pub fn watch_invariant_tool(hub: StreamQueryHub) -> WatchInvariantTool {
     watch_invariant_tool_with_solver(hub, solver)
 }
 
+/// Constructs `watch_invariant` with Java alpha.10 governance.
+pub fn watch_invariant_tool_with_access_policy(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> WatchInvariantTool {
+    let solver: Arc<dyn AspSolver> = Arc::new(ClingoSubprocessSolver::new());
+    watch_invariant_tool_with_solver_and_access_policy(hub, solver, access_policy)
+}
+
 /// Constructs `watch_invariant` with a caller-supplied ASP solver.
 pub fn watch_invariant_tool_with_solver(
     hub: StreamQueryHub,
     solver: Arc<dyn AspSolver>,
 ) -> WatchInvariantTool {
-    WatchInvariantTool { hub, solver }
+    WatchInvariantTool {
+        hub,
+        solver,
+        access_policy: None,
+    }
+}
+
+/// Constructs `watch_invariant` with a caller-supplied solver and governance.
+pub fn watch_invariant_tool_with_solver_and_access_policy(
+    hub: StreamQueryHub,
+    solver: Arc<dyn AspSolver>,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> WatchInvariantTool {
+    WatchInvariantTool {
+        hub,
+        solver,
+        access_policy: Some(access_policy),
+    }
 }
 
 pub struct WatchInvariantTool {
     hub: StreamQueryHub,
     solver: Arc<dyn AspSolver>,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 impl McpTool for WatchInvariantTool {
@@ -940,6 +1009,9 @@ impl McpTool for WatchInvariantTool {
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        if governance_active(self.access_policy.as_ref()) {
+            return governance_denial(self.name());
+        }
         let Some(stream) = required_nonempty_str(invocation, "stream") else {
             return ToolResult::error("missing `stream` argument");
         };
@@ -980,6 +1052,7 @@ impl McpTool for WatchInvariantTool {
             ObserverRegistration {
                 stream: stream.clone(),
                 buffer_size,
+                access_policy: self.access_policy.clone(),
                 kind: ObserverKind::WatchInvariant {
                     shape_graph,
                     report_conforming,
@@ -1008,17 +1081,44 @@ pub fn register_rules_tool(hub: StreamQueryHub) -> RegisterRulesTool {
     register_rules_tool_with_solver(hub, solver)
 }
 
+/// Constructs `register_rules` with Java alpha.10 governance.
+pub fn register_rules_tool_with_access_policy(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> RegisterRulesTool {
+    let solver: Arc<dyn AspSolver> = Arc::new(ClingoSubprocessSolver::new());
+    register_rules_tool_with_solver_and_access_policy(hub, solver, access_policy)
+}
+
 /// Constructs `register_rules` with a caller-supplied ASP solver.
 pub fn register_rules_tool_with_solver(
     hub: StreamQueryHub,
     solver: Arc<dyn AspSolver>,
 ) -> RegisterRulesTool {
-    RegisterRulesTool { hub, solver }
+    RegisterRulesTool {
+        hub,
+        solver,
+        access_policy: None,
+    }
+}
+
+/// Constructs `register_rules` with a caller-supplied solver and governance.
+pub fn register_rules_tool_with_solver_and_access_policy(
+    hub: StreamQueryHub,
+    solver: Arc<dyn AspSolver>,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> RegisterRulesTool {
+    RegisterRulesTool {
+        hub,
+        solver,
+        access_policy: Some(access_policy),
+    }
 }
 
 pub struct RegisterRulesTool {
     hub: StreamQueryHub,
     solver: Arc<dyn AspSolver>,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 impl McpTool for RegisterRulesTool {
@@ -1072,6 +1172,9 @@ impl McpTool for RegisterRulesTool {
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        if governance_active(self.access_policy.as_ref()) {
+            return governance_denial(self.name());
+        }
         let Some(stream) = required_nonempty_str(invocation, "stream") else {
             return ToolResult::error("missing `stream` argument");
         };
@@ -1122,6 +1225,7 @@ impl McpTool for RegisterRulesTool {
             ObserverRegistration {
                 stream: stream.clone(),
                 buffer_size,
+                access_policy: self.access_policy.clone(),
                 kind: ObserverKind::Rules {
                     rules,
                     result_predicate: result_predicate.clone(),
@@ -1154,11 +1258,26 @@ impl McpTool for RegisterRulesTool {
 
 /// Constructs the `register_stream_query` MCP tool.
 pub fn register_stream_query_tool(hub: StreamQueryHub) -> RegisterStreamQueryTool {
-    RegisterStreamQueryTool { hub }
+    RegisterStreamQueryTool {
+        hub,
+        access_policy: None,
+    }
+}
+
+/// Constructs `register_stream_query` with Java alpha.9/alpha.10 governance.
+pub fn register_stream_query_tool_with_access_policy(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> RegisterStreamQueryTool {
+    RegisterStreamQueryTool {
+        hub,
+        access_policy: Some(access_policy),
+    }
 }
 
 pub struct RegisterStreamQueryTool {
     hub: StreamQueryHub,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 impl McpTool for RegisterStreamQueryTool {
@@ -1226,6 +1345,9 @@ impl McpTool for RegisterStreamQueryTool {
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        if governance_active(self.access_policy.as_ref()) {
+            return governance_denial(self.name());
+        }
         let Some(query) = invocation.get_str("query").map(str::to_string) else {
             return ToolResult::error("missing `query` argument");
         };
@@ -1275,6 +1397,7 @@ impl McpTool for RegisterStreamQueryTool {
             .unwrap_or(false);
         let engine = self.hub.inner.engine.clone();
         let hub_for_listener = self.hub.clone();
+        let access_policy_for_listener = self.access_policy.clone();
 
         // `register_cqelsql_query` is async; block via the bound handle.
         // The query_id is assigned inside the call, so we capture it
@@ -1289,6 +1412,9 @@ impl McpTool for RegisterStreamQueryTool {
             let id_cell_listener = id_cell.clone();
             let hub_for_results = hub_for_listener.clone();
             let listener = listener_from_fn(move |result: BindingSet| {
+                if governance_active(access_policy_for_listener.as_ref()) {
+                    return;
+                }
                 let id_guard = id_cell_listener.lock();
                 if let Some(id) = id_guard.as_ref() {
                     hub_for_results.record_result(id.clone(), result);
@@ -1326,11 +1452,26 @@ impl McpTool for RegisterStreamQueryTool {
 
 /// Constructs the `list_stream_queries` MCP tool.
 pub fn list_stream_queries_tool(hub: StreamQueryHub) -> ListStreamQueriesTool {
-    ListStreamQueriesTool { hub }
+    ListStreamQueriesTool {
+        hub,
+        access_policy: None,
+    }
+}
+
+/// Constructs `list_stream_queries` with Java alpha.9/alpha.10 governance.
+pub fn list_stream_queries_tool_with_access_policy(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> ListStreamQueriesTool {
+    ListStreamQueriesTool {
+        hub,
+        access_policy: Some(access_policy),
+    }
 }
 
 pub struct ListStreamQueriesTool {
     hub: StreamQueryHub,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 impl McpTool for ListStreamQueriesTool {
@@ -1347,6 +1488,9 @@ impl McpTool for ListStreamQueriesTool {
     }
 
     fn call(&self, _invocation: &ToolInvocation) -> ToolResult {
+        if governance_active(self.access_policy.as_ref()) {
+            return governance_denial(self.name());
+        }
         let ids = self.hub.registered_query_ids();
         ToolResult::success(json!({
             "count": ids.len(),
@@ -1483,11 +1627,26 @@ impl McpTool for UnregisterStreamQueryTool {
 
 /// Constructs the `poll_stream_results` MCP tool.
 pub fn poll_stream_results_tool(hub: StreamQueryHub) -> PollStreamResultsTool {
-    PollStreamResultsTool { hub }
+    PollStreamResultsTool {
+        hub,
+        access_policy: None,
+    }
+}
+
+/// Constructs `poll_stream_results` with Java alpha.9/alpha.10 governance.
+pub fn poll_stream_results_tool_with_access_policy(
+    hub: StreamQueryHub,
+    access_policy: Arc<AccessPolicyRegistry>,
+) -> PollStreamResultsTool {
+    PollStreamResultsTool {
+        hub,
+        access_policy: Some(access_policy),
+    }
 }
 
 pub struct PollStreamResultsTool {
     hub: StreamQueryHub,
+    access_policy: Option<Arc<AccessPolicyRegistry>>,
 }
 
 const DEFAULT_POLL_LIMIT: usize = 64;
@@ -1531,6 +1690,9 @@ impl McpTool for PollStreamResultsTool {
     }
 
     fn call(&self, invocation: &ToolInvocation) -> ToolResult {
+        if governance_active(self.access_policy.as_ref()) {
+            return governance_denial(self.name());
+        }
         let Some(query_id) = invocation
             .get_str("query_id")
             .or_else(|| invocation.get_str("queryId"))
@@ -1982,7 +2144,9 @@ fn violations_to_json(violations: &[ShaclViolation]) -> Vec<JsonValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::{InMemoryMemoryStore, MemoryStore};
     use crate::registry::ToolRegistry;
+    use crate::tools::set_access_policy_tool;
     use cqels_asp::{AnswerSet, AspError, Atom};
     use cqels_engine::CqelsEngine;
     use tokio::runtime::Runtime;
@@ -2085,6 +2249,27 @@ mod tests {
         reg.install(watch_invariant_tool(hub.clone()));
         reg.install(register_rules_tool(hub.clone()));
         reg
+    }
+
+    fn active_policy() -> Arc<AccessPolicyRegistry> {
+        let policy = AccessPolicyRegistry::shared();
+        activate_policy(policy.clone());
+        policy
+    }
+
+    fn activate_policy(access_policy: Arc<AccessPolicyRegistry>) {
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let mut reg = ToolRegistry::new();
+        reg.install(set_access_policy_tool(store, access_policy));
+        let res = reg
+            .call(
+                "set_access_policy",
+                &ToolInvocation::new()
+                    .with_arg("role", json!("analyst"))
+                    .with_arg("labels", json!(["public"])),
+            )
+            .expect("dispatch");
+        assert!(!res.is_error, "{:?}", res.content);
     }
 
     fn sample_query() -> &'static str {
@@ -2456,6 +2641,174 @@ MESSAGE
             poll.content["results"][0]["results"][0]["bindings"]["who"],
             "alice"
         );
+    }
+
+    #[test]
+    fn governed_stream_tools_fail_closed() {
+        let (hub, _rt) = fresh_hub();
+        let access_policy = active_policy();
+        let mut reg = ToolRegistry::new();
+        reg.install(create_stream_tool_with_access_policy(
+            hub.clone(),
+            access_policy.clone(),
+        ));
+        reg.install(push_stream_events_tool_with_access_policy(
+            hub.clone(),
+            access_policy.clone(),
+        ));
+        reg.install(register_stream_query_tool_with_access_policy(
+            hub.clone(),
+            access_policy.clone(),
+        ));
+        reg.install(list_stream_queries_tool_with_access_policy(
+            hub.clone(),
+            access_policy.clone(),
+        ));
+        reg.install(poll_stream_results_tool_with_access_policy(
+            hub.clone(),
+            access_policy.clone(),
+        ));
+        reg.install(watch_invariant_tool_with_solver_and_access_policy(
+            hub.clone(),
+            Arc::new(StaticSolver {
+                answer_sets: Vec::new(),
+            }),
+            access_policy.clone(),
+        ));
+        reg.install(register_rules_tool_with_solver_and_access_policy(
+            hub,
+            Arc::new(StaticSolver {
+                answer_sets: Vec::new(),
+            }),
+            access_policy,
+        ));
+
+        for (name, invocation) in [
+            (
+                "create_stream",
+                ToolInvocation::new().with_arg("stream", json!("sensors")),
+            ),
+            (
+                "push_stream_events",
+                ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("events", json!([])),
+            ),
+            (
+                "register_stream_query",
+                ToolInvocation::new().with_arg("query", json!(sample_query())),
+            ),
+            ("list_stream_queries", ToolInvocation::new()),
+            (
+                "poll_stream_results",
+                ToolInvocation::new().with_arg("queryId", json!("q1")),
+            ),
+            ("watch_invariant", ToolInvocation::new()),
+            ("register_rules", ToolInvocation::new()),
+        ] {
+            let res = reg.call(name, &invocation).expect("dispatch");
+            assert!(res.is_error, "{name} should fail closed: {:?}", res.content);
+            assert!(res.content["message"]
+                .as_str()
+                .unwrap()
+                .contains("denied by active access policy"));
+        }
+    }
+
+    #[test]
+    fn governed_observer_drops_results_after_policy_activation() {
+        let (hub, _rt) = fresh_hub();
+        let access_policy = AccessPolicyRegistry::shared();
+        let solver: Arc<dyn AspSolver> = Arc::new(StaticSolver {
+            answer_sets: vec![AnswerSet::new(vec![Atom::new(
+                "alert",
+                vec!["alice".to_string()],
+            )])],
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(register_rules_tool_with_solver_and_access_policy(
+            hub.clone(),
+            solver,
+            access_policy.clone(),
+        ));
+        reg.install(push_stream_events_tool(hub.clone()));
+
+        let registered = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("rl-governed"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                    .with_arg("resultPredicate", json!("alert")),
+            )
+            .expect("dispatch");
+        assert!(!registered.is_error, "{:?}", registered.content);
+
+        activate_policy(access_policy);
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "facts": [{
+                                "subject": "ex:s1",
+                                "predicate": "ex:p",
+                                "object": "ex:o",
+                                "objectType": "uri"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "{:?}", pushed.content);
+        assert_eq!(hub.buffered_count("rl-governed"), 0);
+    }
+
+    #[test]
+    fn governed_cleanup_tools_remain_available_for_teardown() {
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
+        let access_policy = AccessPolicyRegistry::shared();
+        let mut reg = ToolRegistry::new();
+        reg.install(register_stream_query_tool_with_access_policy(
+            hub.clone(),
+            access_policy.clone(),
+        ));
+        reg.install(forget_stream_query_tool(hub.clone()));
+        reg.install(unregister_stream_query_tool(hub.clone()));
+
+        for query_id in ["cleanup-forget", "cleanup-unregister"] {
+            let registered = reg
+                .call(
+                    "register_stream_query",
+                    &ToolInvocation::new()
+                        .with_arg("query", json!(sample_query()))
+                        .with_arg("queryId", json!(query_id)),
+                )
+                .expect("dispatch");
+            assert!(!registered.is_error, "{:?}", registered.content);
+        }
+
+        activate_policy(access_policy);
+        let forgotten = reg
+            .call(
+                "forget_stream_query",
+                &ToolInvocation::new().with_arg("queryId", json!("cleanup-forget")),
+            )
+            .expect("dispatch");
+        assert!(!forgotten.is_error, "{:?}", forgotten.content);
+
+        let unregistered = reg
+            .call(
+                "unregister_stream_query",
+                &ToolInvocation::new().with_arg("query_id", json!("cleanup-unregister")),
+            )
+            .expect("dispatch");
+        assert!(!unregistered.is_error, "{:?}", unregistered.content);
+        assert!(hub.registered_query_ids().is_empty());
     }
 
     #[test]
