@@ -1032,6 +1032,7 @@ mod tests {
         let notification: JsonValue = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(registered["id"], 1);
         assert_eq!(registered["result"]["isError"], false);
+        assert_eq!(registered["result"]["content"]["queryId"], "rl-notify-rule");
         assert_eq!(pushed["id"], 2);
         assert_eq!(pushed["result"]["isError"], false);
         assert_eq!(
@@ -1039,7 +1040,7 @@ mod tests {
             json!({
                 "jsonrpc": "2.0",
                 "method": "notifications/resources/updated",
-                "params": { "uri": "cqels://queries/notify-rule/results" }
+                "params": { "uri": "cqels://queries/rl-notify-rule/results" }
             })
         );
     }

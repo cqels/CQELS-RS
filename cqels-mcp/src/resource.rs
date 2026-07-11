@@ -1036,7 +1036,7 @@ mod tests {
                 "register_rules",
                 &ToolInvocation::new()
                     .with_arg("stream", json!("sensors"))
-                    .with_arg("queryId", json!("rl-resource"))
+                    .with_arg("queryId", json!("resource"))
                     .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
                     .with_arg("resultPredicate", json!("alert")),
             )

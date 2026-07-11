@@ -163,6 +163,16 @@ impl Drop for PendingRegistrationGuard {
 const DEFAULT_BUFFER_SIZE: usize = 100;
 const MAX_BUFFER_SIZE: usize = 100_000;
 const MAX_PENDING_RESULT_NOTIFICATIONS: usize = 100_000;
+const MAX_SHAPES_CHARS: usize = 500_000;
+const MAX_WATCH_REGISTRATIONS: usize = 16;
+const WATCH_PREFIX: &str = "wi";
+const MAX_RULES_CHARS: usize = 100_000;
+const MAX_RULE_REGISTRATIONS: usize = 8;
+const RULE_PREFIX: &str = "rl";
+const MAX_ARG_NAMES: usize = 32;
+const DEFAULT_MAX_FACTS: usize = 5_000;
+const MAX_MAX_FACTS: usize = 50_000;
+const DELTA_MEMORY_CAP: usize = 100_000;
 
 impl StreamQueryHub {
     /// Constructs a new hub bound to `engine` and `handle`.
@@ -488,8 +498,36 @@ impl StreamQueryHub {
         Ok(())
     }
 
-    fn register_observer(&self, query_id: String, registration: ObserverRegistration) {
-        self.inner.observers.lock().insert(query_id, registration);
+    fn register_observer(
+        &self,
+        query_id: String,
+        registration: ObserverRegistration,
+        prefix: &str,
+        max_registrations: usize,
+        cap_message: &str,
+    ) -> Result<(), String> {
+        let registrations = self.inner.registrations.lock();
+        let mut observers = self.inner.observers.lock();
+        if registrations.contains_key(&query_id) || observers.contains_key(&query_id) {
+            return Err(format!("Query already registered: {query_id}"));
+        }
+        let prefix_with_dash = format!("{prefix}-");
+        // Java alpha.10 counts the shared registry namespace for these
+        // prefixes, so a normal stream query with a `wi-`/`rl-` id also
+        // consumes the corresponding soft cap. Keep that visible overlap here.
+        let live = registrations
+            .keys()
+            .filter(|id| id.starts_with(&prefix_with_dash))
+            .count()
+            + observers
+                .keys()
+                .filter(|id| id.starts_with(&prefix_with_dash))
+                .count();
+        if live >= max_registrations {
+            return Err(cap_message.to_string());
+        }
+        observers.insert(query_id, registration);
+        Ok(())
     }
 
     fn process_observation(&self, stream: &str, statements: &[Statement], timestamp: i64) {
@@ -616,7 +654,7 @@ impl StreamQueryHub {
                                         continue;
                                     }
                                     emitted_order.push_back(atom_key);
-                                    while emitted_order.len() > *max_facts {
+                                    while emitted_order.len() > DELTA_MEMORY_CAP {
                                         if let Some(oldest) = emitted_order.pop_front() {
                                             emitted.remove(&oldest);
                                         }
@@ -1115,15 +1153,23 @@ impl McpTool for WatchInvariantTool {
             .with_property(
                 "shapes",
                 json!({
-                    "description": "SHACL shapes as an array of fact/triple objects or RDF-message N-Quads string."
+                    "description": "SHACL shapes as an array of fact/triple objects or RDF-message N-Quads string. Payload is capped at 500000 characters."
                 }),
             )
-            .with_property("queryId", json!({ "type": "string" }))
+            .with_property(
+                "queryId",
+                json!({
+                    "type": "string",
+                    "description": "Optional custom id suffix; the returned queryId is always prefixed 'wi-'."
+                }),
+            )
             .with_property(
                 "bufferSize",
                 json!({
                     "type": "integer",
-                    "default": DEFAULT_BUFFER_SIZE
+                    "default": DEFAULT_BUFFER_SIZE,
+                    "minimum": 1,
+                    "maximum": MAX_BUFFER_SIZE
                 }),
             )
             .with_property(
@@ -1155,6 +1201,12 @@ impl McpTool for WatchInvariantTool {
         let Some(shapes_value) = invocation.get("shapes") else {
             return ToolResult::error("missing `shapes` argument");
         };
+        let shapes_chars = shapes_payload_chars(shapes_value);
+        if shapes_chars > MAX_SHAPES_CHARS {
+            return ToolResult::error(format!(
+                "shapes too large: {shapes_chars} chars (max {MAX_SHAPES_CHARS})"
+            ));
+        }
         let shapes = match parse_shapes_argument(shapes_value) {
             Ok(statements) => statements,
             Err(e) => return ToolResult::error(e),
@@ -1163,15 +1215,7 @@ impl McpTool for WatchInvariantTool {
             Ok(graph) => graph,
             Err(e) => return ToolResult::error(format!("shape parse error: {e}")),
         };
-        let query_id = invocation
-            .get_str("queryId")
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| generated_query_id("wi"));
-        if self.hub.registered_query_ids().contains(&query_id) {
-            return ToolResult::error(format!("Query already registered: {query_id}"));
-        }
+        let query_id = observer_query_id(WATCH_PREFIX, invocation);
         let buffer_size = buffer_size_from(invocation);
         let report_conforming = invocation
             .get("reportConforming")
@@ -1181,10 +1225,7 @@ impl McpTool for WatchInvariantTool {
             .get("notify")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false);
-        if let Err(e) = self.hub.create_stream(&stream) {
-            return ToolResult::error(format!("create stream failed: {e}"));
-        }
-        self.hub.register_observer(
+        if let Err(e) = self.hub.register_observer(
             query_id.clone(),
             ObserverRegistration {
                 stream: stream.clone(),
@@ -1197,7 +1238,18 @@ impl McpTool for WatchInvariantTool {
                     solver: self.solver.clone(),
                 },
             },
-        );
+            WATCH_PREFIX,
+            MAX_WATCH_REGISTRATIONS,
+            &format!(
+                "watch_invariant limit reached (max {MAX_WATCH_REGISTRATIONS} live invariants)"
+            ),
+        ) {
+            return ToolResult::error(e);
+        }
+        if let Err(e) = self.hub.create_stream(&stream) {
+            let _ = self.hub.unregister_query(&query_id);
+            return ToolResult::error(format!("create stream failed: {e}"));
+        }
         ToolResult::success(json!({
             "ok": true,
             "query_id": query_id,
@@ -1273,13 +1325,26 @@ impl McpTool for RegisterRulesTool {
     fn input_schema(&self) -> ToolInputSchema {
         ToolInputSchema::object()
             .with_property("stream", json!({ "type": "string" }))
-            .with_property("rules", json!({ "type": "string" }))
+            .with_property(
+                "rules",
+                json!({
+                    "type": "string",
+                    "description": "ASP Core 2 program, capped at 100000 characters."
+                }),
+            )
             .with_property("resultPredicate", json!({ "type": "string" }))
-            .with_property("queryId", json!({ "type": "string" }))
+            .with_property(
+                "queryId",
+                json!({
+                    "type": "string",
+                    "description": "Optional custom id suffix; the returned queryId is always prefixed 'rl-'."
+                }),
+            )
             .with_property(
                 "argNames",
                 json!({
                     "type": "array",
+                    "maxItems": MAX_ARG_NAMES,
                     "items": { "type": "string" }
                 }),
             )
@@ -1291,10 +1356,23 @@ impl McpTool for RegisterRulesTool {
                     "default": "delta"
                 }),
             )
-            .with_property("maxFacts", json!({ "type": "integer", "default": 5000 }))
+            .with_property(
+                "maxFacts",
+                json!({
+                    "type": "integer",
+                    "default": DEFAULT_MAX_FACTS,
+                    "minimum": 1,
+                    "maximum": MAX_MAX_FACTS
+                }),
+            )
             .with_property(
                 "bufferSize",
-                json!({ "type": "integer", "default": DEFAULT_BUFFER_SIZE }),
+                json!({
+                    "type": "integer",
+                    "default": DEFAULT_BUFFER_SIZE,
+                    "minimum": 1,
+                    "maximum": MAX_BUFFER_SIZE
+                }),
             )
             .with_property(
                 "notify",
@@ -1319,18 +1397,16 @@ impl McpTool for RegisterRulesTool {
         let Some(rules) = required_nonempty_str(invocation, "rules") else {
             return ToolResult::error("missing `rules` argument");
         };
+        if rules.len() > MAX_RULES_CHARS {
+            return ToolResult::error(format!(
+                "rules too large: {} chars (max {MAX_RULES_CHARS})",
+                rules.len()
+            ));
+        }
         let Some(result_predicate) = required_nonempty_str(invocation, "resultPredicate") else {
             return ToolResult::error("missing `resultPredicate` argument");
         };
-        let query_id = invocation
-            .get_str("queryId")
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| generated_query_id("rl"));
-        if self.hub.registered_query_ids().contains(&query_id) {
-            return ToolResult::error(format!("Query already registered: {query_id}"));
-        }
+        let query_id = observer_query_id(RULE_PREFIX, invocation);
         let arg_names = match parse_arg_names(invocation.get("argNames")) {
             Ok(names) => names,
             Err(e) => return ToolResult::error(e),
@@ -1348,17 +1424,14 @@ impl McpTool for RegisterRulesTool {
         let max_facts = invocation
             .get("maxFacts")
             .and_then(JsonValue::as_i64)
-            .map(|value| value.clamp(1, 50_000) as usize)
-            .unwrap_or(5000);
+            .map(|value| value.clamp(1, MAX_MAX_FACTS as i64) as usize)
+            .unwrap_or(DEFAULT_MAX_FACTS);
         let buffer_size = buffer_size_from(invocation);
         let notify = invocation
             .get("notify")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false);
-        if let Err(e) = self.hub.create_stream(&stream) {
-            return ToolResult::error(format!("create stream failed: {e}"));
-        }
-        self.hub.register_observer(
+        if let Err(e) = self.hub.register_observer(
             query_id.clone(),
             ObserverRegistration {
                 stream: stream.clone(),
@@ -1377,7 +1450,18 @@ impl McpTool for RegisterRulesTool {
                     solver: self.solver.clone(),
                 },
             },
-        );
+            RULE_PREFIX,
+            MAX_RULE_REGISTRATIONS,
+            &format!(
+                "register_rules limit reached (max {MAX_RULE_REGISTRATIONS} live rule programs)"
+            ),
+        ) {
+            return ToolResult::error(e);
+        }
+        if let Err(e) = self.hub.create_stream(&stream) {
+            let _ = self.hub.unregister_query(&query_id);
+            return ToolResult::error(format!("create stream failed: {e}"));
+        }
         ToolResult::success(json!({
             "ok": true,
             "query_id": query_id,
@@ -1887,6 +1971,29 @@ fn generated_query_id(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
+fn observer_query_id(prefix: &str, invocation: &ToolInvocation) -> String {
+    // Mirrors Java alpha.10: `queryId` is a caller-provided suffix, not a full
+    // id. Supplying `rl-foo` intentionally returns `rl-rl-foo`.
+    invocation
+        .get_str("queryId")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|suffix| format!("{prefix}-{suffix}"))
+        .unwrap_or_else(|| generated_query_id(prefix))
+}
+
+fn shapes_payload_chars(value: &JsonValue) -> usize {
+    if let Some(nquads) = value.as_str() {
+        return nquads.len();
+    }
+    if let Some(nquads) = value.get("nquads").and_then(JsonValue::as_str) {
+        return nquads.len();
+    }
+    serde_json::to_string(value)
+        .map(|text| text.len())
+        .unwrap_or(usize::MAX)
+}
+
 fn stream_reasoning_profile_from_env() -> Option<ReasoningProfile> {
     let value = std::env::var("CQELS_MCP_REASONING").ok()?;
     match parse_stream_reasoning_profile(&value) {
@@ -2308,8 +2415,10 @@ fn parse_arg_names(value: Option<&JsonValue>) -> Result<Vec<String>, String> {
         }
         names.push(name.to_string());
     }
-    if names.len() > 32 {
-        return Err("argNames must contain at most 32 names".to_string());
+    if names.len() > MAX_ARG_NAMES {
+        return Err(format!(
+            "argNames must contain at most {MAX_ARG_NAMES} names"
+        ));
     }
     Ok(names)
 }
@@ -2526,6 +2635,24 @@ mod tests {
         );
         assert_eq!(parse_stream_reasoning_profile("off").unwrap(), None);
         assert!(parse_stream_reasoning_profile("owl").is_err());
+    }
+
+    #[test]
+    fn observer_query_id_always_prepends_java_prefix() {
+        let rule_id = observer_query_id(
+            RULE_PREFIX,
+            &ToolInvocation::new().with_arg("queryId", json!("rl-existing")),
+        );
+        assert_eq!(rule_id, "rl-rl-existing");
+
+        let watch_id = observer_query_id(
+            WATCH_PREFIX,
+            &ToolInvocation::new().with_arg("queryId", json!("  custom  ")),
+        );
+        assert_eq!(watch_id, "wi-custom");
+
+        let generated = observer_query_id(WATCH_PREFIX, &ToolInvocation::new());
+        assert!(generated.starts_with("wi-"));
     }
 
     #[test]
@@ -3220,7 +3347,7 @@ MESSAGE
                 "watch_invariant",
                 &ToolInvocation::new()
                     .with_arg("stream", json!("sensors"))
-                    .with_arg("queryId", json!("wi-test"))
+                    .with_arg("queryId", json!("test"))
                     .with_arg("reportConforming", json!(true))
                     .with_arg(
                         "shapes",
@@ -3246,6 +3373,7 @@ MESSAGE
             "watch failed: {:?}",
             registered.content
         );
+        assert_eq!(registered.content["queryId"], "wi-test");
 
         let pushed = reg
             .call(
@@ -3280,6 +3408,76 @@ MESSAGE
     }
 
     #[test]
+    fn watch_invariant_rejects_java_alpha10_shape_size_and_registration_cap() {
+        let (hub, _rt) = fresh_hub();
+        let solver: Arc<dyn AspSolver> = Arc::new(StaticSolver {
+            answer_sets: vec![AnswerSet::new(vec![])],
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(watch_invariant_tool_with_solver(hub.clone(), solver));
+
+        let too_large = "x".repeat(MAX_SHAPES_CHARS + 1);
+        let rejected = reg
+            .call(
+                "watch_invariant",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("shapes", json!(too_large)),
+            )
+            .expect("dispatch");
+        assert!(rejected.is_error);
+        assert!(rejected.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("shapes too large"));
+
+        for idx in 0..MAX_WATCH_REGISTRATIONS {
+            let registered = reg
+                .call(
+                    "watch_invariant",
+                    &ToolInvocation::new()
+                        .with_arg("stream", json!("sensors"))
+                        .with_arg("queryId", json!(format!("cap-{idx}")))
+                        .with_arg(
+                            "shapes",
+                            json!([{
+                                "subject": "ex:Shape",
+                                "predicate": "a",
+                                "object": "sh:NodeShape",
+                                "objectType": "uri"
+                            }]),
+                        ),
+                )
+                .expect("dispatch");
+            assert!(!registered.is_error, "{:?}", registered.content);
+            assert_eq!(registered.content["queryId"], format!("wi-cap-{idx}"));
+        }
+
+        let over_cap = reg
+            .call(
+                "watch_invariant",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("cap-overflow"))
+                    .with_arg(
+                        "shapes",
+                        json!([{
+                            "subject": "ex:Shape",
+                            "predicate": "a",
+                            "object": "sh:NodeShape",
+                            "objectType": "uri"
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(over_cap.is_error);
+        assert!(over_cap.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("watch_invariant limit reached"));
+    }
+
+    #[test]
     fn register_rules_buffers_matching_answer_atoms() {
         let (hub, _rt) = fresh_hub();
         let solver: Arc<dyn AspSolver> = Arc::new(StaticSolver {
@@ -3298,7 +3496,7 @@ MESSAGE
                 "register_rules",
                 &ToolInvocation::new()
                     .with_arg("stream", json!("sensors"))
-                    .with_arg("queryId", json!("rl-test"))
+                    .with_arg("queryId", json!("test"))
                     .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
                     .with_arg("resultPredicate", json!("alert"))
                     .with_arg("argNames", json!(["who"])),
@@ -3309,6 +3507,7 @@ MESSAGE
             "register_rules failed: {:?}",
             registered.content
         );
+        assert_eq!(registered.content["queryId"], "rl-test");
 
         let pushed = reg
             .call(
@@ -3344,6 +3543,97 @@ MESSAGE
             poll.content["results"][0]["results"][0]["bindings"]["who"],
             "alice"
         );
+    }
+
+    #[test]
+    fn register_rules_rejects_java_alpha10_rules_args_and_registration_cap() {
+        let (hub, _rt) = fresh_hub();
+        let solver: Arc<dyn AspSolver> = Arc::new(StaticSolver {
+            answer_sets: vec![AnswerSet::new(vec![])],
+        });
+        let mut reg = ToolRegistry::new();
+        reg.install(register_rules_tool_with_solver(hub.clone(), solver));
+
+        let too_large = "a".repeat(MAX_RULES_CHARS + 1);
+        let rejected = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("rules", json!(too_large))
+                    .with_arg("resultPredicate", json!("alert")),
+            )
+            .expect("dispatch");
+        assert!(rejected.is_error);
+        assert!(rejected.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("rules too large"));
+
+        let too_many_args: Vec<String> =
+            (0..=MAX_ARG_NAMES).map(|idx| format!("arg{idx}")).collect();
+        let rejected = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                    .with_arg("resultPredicate", json!("alert"))
+                    .with_arg("argNames", json!(too_many_args)),
+            )
+            .expect("dispatch");
+        assert!(rejected.is_error);
+        assert!(rejected.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("at most 32"));
+
+        let rejected = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                    .with_arg("resultPredicate", json!("alert"))
+                    .with_arg("argNames", json!(["who", "who"])),
+            )
+            .expect("dispatch");
+        assert!(rejected.is_error);
+        assert!(rejected.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate"));
+
+        for idx in 0..MAX_RULE_REGISTRATIONS {
+            let registered = reg
+                .call(
+                    "register_rules",
+                    &ToolInvocation::new()
+                        .with_arg("stream", json!("sensors"))
+                        .with_arg("queryId", json!(format!("cap-{idx}")))
+                        .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                        .with_arg("resultPredicate", json!("alert")),
+                )
+                .expect("dispatch");
+            assert!(!registered.is_error, "{:?}", registered.content);
+            assert_eq!(registered.content["queryId"], format!("rl-cap-{idx}"));
+        }
+
+        let over_cap = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("queryId", json!("cap-overflow"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
+                    .with_arg("resultPredicate", json!("alert")),
+            )
+            .expect("dispatch");
+        assert!(over_cap.is_error);
+        assert!(over_cap.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("register_rules limit reached"));
     }
 
     #[test]
@@ -3394,7 +3684,7 @@ MESSAGE
         assert!(!pushed.is_error, "{:?}", pushed.content);
         assert_eq!(
             hub.drain_result_notification_query_ids(),
-            vec!["notify-rules".to_string()]
+            vec!["rl-notify-rules".to_string()]
         );
     }
 
@@ -3497,7 +3787,7 @@ MESSAGE
             .expect("dispatch");
         assert!(!pushed.is_error, "{:?}", pushed.content);
         assert!(hub.drain_result_notification_query_ids().is_empty());
-        assert_eq!(hub.buffered_count("poll-only-rules"), 1);
+        assert_eq!(hub.buffered_count("rl-poll-only-rules"), 1);
     }
 
     #[test]
@@ -3595,7 +3885,7 @@ MESSAGE
                 "register_rules",
                 &ToolInvocation::new()
                     .with_arg("stream", json!("sensors"))
-                    .with_arg("queryId", json!("rl-governed"))
+                    .with_arg("queryId", json!("governed"))
                     .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)."))
                     .with_arg("resultPredicate", json!("alert")),
             )
@@ -3718,7 +4008,7 @@ MESSAGE
             .call(
                 "poll_stream_results",
                 &ToolInvocation::new()
-                    .with_arg("queryId", json!("rules-bounded"))
+                    .with_arg("queryId", json!("rl-rules-bounded"))
                     .with_arg("limit", json!(10)),
             )
             .expect("dispatch");
@@ -4116,5 +4406,42 @@ MESSAGE
             .input_schema();
         assert!(forget_schema.properties.contains_key("queryId"));
         assert_eq!(forget_schema.required, vec!["queryId".to_string()]);
+
+        let watch_schema = reg
+            .get("watch_invariant")
+            .expect("watch_invariant installed")
+            .input_schema();
+        assert_eq!(
+            watch_schema.properties["bufferSize"]["maximum"],
+            MAX_BUFFER_SIZE
+        );
+        assert_eq!(watch_schema.properties["bufferSize"]["minimum"], 1);
+        assert!(watch_schema.properties["queryId"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("prefixed 'wi-'"));
+
+        let rules_schema = reg
+            .get("register_rules")
+            .expect("register_rules installed")
+            .input_schema();
+        assert_eq!(
+            rules_schema.properties["bufferSize"]["maximum"],
+            MAX_BUFFER_SIZE
+        );
+        assert_eq!(rules_schema.properties["bufferSize"]["minimum"], 1);
+        assert_eq!(
+            rules_schema.properties["argNames"]["maxItems"],
+            MAX_ARG_NAMES
+        );
+        assert_eq!(
+            rules_schema.properties["maxFacts"]["maximum"],
+            MAX_MAX_FACTS
+        );
+        assert_eq!(rules_schema.properties["maxFacts"]["minimum"], 1);
+        assert!(rules_schema.properties["queryId"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("prefixed 'rl-'"));
     }
 }
