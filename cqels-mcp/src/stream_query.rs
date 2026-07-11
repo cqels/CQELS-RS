@@ -757,7 +757,24 @@ impl McpTool for PushStreamEventsTool {
                         "type": "object",
                         "properties": {
                             "eventTime": { "description": "Unix milliseconds, numeric string, or UTC RFC3339 timestamp." },
-                            "facts": { "type": "array" },
+                            "facts": {
+                                "type": "array",
+                                "description": "The observation as {subject, predicate, object, objectType} triples (objectType 'uri' or 'literal', default 'literal'). Use this OR 'nquads'.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "subject": { "type": "string" },
+                                        "predicate": { "type": "string" },
+                                        "object": { "type": "string" },
+                                        "objectType": {
+                                            "type": "string",
+                                            "enum": ["uri", "literal"],
+                                            "default": "literal"
+                                        }
+                                    },
+                                    "required": ["subject", "predicate", "object"]
+                                }
+                            },
                             "nquads": { "type": "string" }
                         }
                     }
@@ -2060,19 +2077,10 @@ fn parse_fact_statement(value: &JsonValue, field: &str) -> Result<Statement, Str
         expand_iri(&get("predicate", "p")?).map_err(|e| format!("{field}.predicate: {e}"))?,
     );
     let object_value = get("object", "o")?;
-    let object_type = object
-        .get("objectType")
-        .or_else(|| object.get("object_type"))
-        .and_then(JsonValue::as_str)
-        .unwrap_or("uri")
-        .trim()
-        .to_ascii_lowercase();
+    let object_type = java_fact_object_type(object.get("objectType"), field)?;
     let object_term = match object_type.as_str() {
-        "uri" | "iri" => Term::Iri(IriTerm::new(
+        "uri" => Term::Iri(IriTerm::new(
             expand_iri(&object_value).map_err(|e| format!("{field}.object: {e}"))?,
-        )),
-        "blank" | "bnode" | "blanknode" => Term::BlankNode(cqels_model::BlankNodeTerm::new(
-            blank_node_id(&object_value),
         )),
         "literal" => {
             let mut literal = LiteralTerm::new(object_value);
@@ -2086,13 +2094,28 @@ fn parse_fact_statement(value: &JsonValue, field: &str) -> Result<Statement, Str
             }
             Term::Literal(literal)
         }
-        other => {
-            return Err(format!(
-                "{field}.objectType must be one of uri, iri, literal, blank; got '{other}'"
-            ));
-        }
+        _ => unreachable!("java_fact_object_type only returns uri or literal"),
     };
     Ok(Statement::new(subject, predicate, object_term))
+}
+
+fn java_fact_object_type(value: Option<&JsonValue>, field: &str) -> Result<String, String> {
+    let Some(value) = value else {
+        return Ok("literal".to_string());
+    };
+    if value.is_null() {
+        return Ok("literal".to_string());
+    }
+    let object_type = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string());
+    if object_type == "uri" || object_type == "literal" {
+        return Ok(object_type);
+    }
+    Err(format!(
+        "{field}.objectType must be 'uri' or 'literal', got: {object_type}"
+    ))
 }
 
 fn subject_term(value: &str) -> Result<Term, String> {
@@ -2739,6 +2762,88 @@ MESSAGE
             .as_str()
             .unwrap()
             .contains("non-empty `facts`"));
+    }
+
+    #[test]
+    fn push_stream_events_fact_object_type_defaults_to_literal_like_java() {
+        for fact in [
+            json!({
+                "subject": "ex:s1",
+                "predicate": "ex:p",
+                "object": "ex:o"
+            }),
+            json!({
+                "subject": "ex:s1",
+                "predicate": "ex:p",
+                "object": "ex:o",
+                "objectType": null
+            }),
+            json!({
+                "subject": "ex:s1",
+                "predicate": "ex:p",
+                "object": "ex:o",
+                "object_type": "uri"
+            }),
+        ] {
+            let statement = parse_fact_statement(&fact, "facts[0]").expect("fact parses");
+            let literal = statement
+                .object
+                .as_literal()
+                .expect("Java defaults absent/null/alias objectType to literal");
+            assert_eq!(literal.value(), "ex:o");
+        }
+    }
+
+    #[test]
+    fn push_stream_events_rejects_java_invalid_object_type_aliases() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        for object_type in [
+            json!("iri"),
+            json!("blank"),
+            json!("bnode"),
+            json!("URI"),
+            json!(true),
+        ] {
+            let pushed = reg
+                .call(
+                    "push_stream_events",
+                    &ToolInvocation::new()
+                        .with_arg("stream", json!("sensors"))
+                        .with_arg(
+                            "events",
+                            json!([{
+                                "eventTime": 1,
+                                "facts": [{
+                                    "subject": "ex:s1",
+                                    "predicate": "ex:p",
+                                    "object": "ex:o",
+                                    "objectType": object_type
+                                }]
+                            }]),
+                        ),
+                )
+                .expect("dispatch");
+            assert!(pushed.is_error, "{:?} should fail", object_type);
+            assert!(
+                pushed.content["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("objectType must be 'uri' or 'literal'"),
+                "{object_type:?} should use Java error wording: {:?}",
+                pushed.content
+            );
+        }
+    }
+
+    #[test]
+    fn push_stream_events_schema_advertises_java_fact_object_type_contract() {
+        let (hub, _rt) = fresh_hub();
+        let schema = push_stream_events_tool(hub).input_schema();
+        let object_type_schema = &schema.properties["events"]["items"]["properties"]["facts"]
+            ["items"]["properties"]["objectType"];
+        assert_eq!(object_type_schema["enum"], json!(["uri", "literal"]));
+        assert_eq!(object_type_schema["default"], "literal");
     }
 
     #[test]

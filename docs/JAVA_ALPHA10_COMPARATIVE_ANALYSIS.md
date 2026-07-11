@@ -40,7 +40,8 @@ Java alpha.10:
   matching so `[TRIPLES n]` counts observations.
 - `StreamIngestToolHandler` enforces governance, event-time bounds, stream caps,
   message/statement/character caps, reserved-graph rejection, parse-before-push,
-  and single-vs-multi-statement push semantics.
+  strict `facts[*].objectType` values (`uri` or `literal`, default
+  `literal`), and single-vs-multi-statement push semantics.
 - `QueryToolHandler`, `ContinuousReasoningToolHandler`, and
   `KnowledgeGraphResourceProvider` wire governance into query, stream-query,
   continuous reasoning, result drains, and metadata resources.
@@ -63,8 +64,9 @@ Rust current state:
   `GraphStreamElement`, and inferred triples as appended single RDF elements.
 - `push_stream_events` now rejects empty event arrays, fractional or
   out-of-range event times, over-limit streams, per-message statement floods,
-  over-limit observation counts, per-event character floods, and total-call
-  character floods before any push.
+  over-limit observation counts, per-event character floods, total-call
+  character floods, and Java-invalid `facts[*].objectType` values before any
+  push.
 - `cqels-mcp/src/tools.rs` has an `AccessPolicyRegistry`, and the default
   server now wires it into memory recall, context assembly, `query`, governed
   stream tools, continuous observer registration, result polling, and live
@@ -89,7 +91,7 @@ Rust current state:
 |---|---|---|---|
 | MCP tool/resource names | Alpha.10 advertises stream ingest, stream query, continuous reasoning, memory, reasoning, procedure, episodic, decision, governance, resources, prompts, stdio/HTTP. | Rust exposes the main names plus several Rust extras; this analysis did not produce a formal one-by-one inventory diff. | Broad surface overlap; inventory diff still needed before final parity sign-off. |
 | `create_stream` | Idempotent, bounded by `MAX_STREAMS`, denied under active governance. | Idempotent, denied under active governance in the default server, and bounded by the Java alpha.10 stream cap. | Close for the MCP tool. |
-| `push_stream_events` | Parse/validate all events before push, cap events/messages/statements/chars/streams, reject fractional/out-of-range event times, reject `cqels://` graph contexts, deny under governance, push one statement as RDF and multi-statement observations as graph elements. | Parses before push, denies under active governance in the default server, rejects empty event arrays, enforces Java-style event-time range/whole-number validation, stream cap, per-message cap, total-observation cap, total-statement cap, N-Quads/per-event character cap, and total-call character cap; reserved contexts are rejected, empty RDF messages are skipped, nonblank `nquads` takes precedence over `facts`, and single-vs-multi observations use the Java RDF/graph split. Rust still accepts some extra `objectType` aliases such as `iri`/blank that Java rejects. | Close for tracked alpha.10 hardening; exact schema strictness inventory still needed. |
+| `push_stream_events` | Parse/validate all events before push, cap events/messages/statements/chars/streams, reject fractional/out-of-range event times, reject `cqels://` graph contexts, deny under governance, default missing/null `facts[*].objectType` to `literal`, accept only `uri` or `literal`, and push one statement as RDF and multi-statement observations as graph elements. | Parses before push, denies under active governance in the default server, rejects empty event arrays, enforces Java-style event-time range/whole-number validation, stream cap, per-message cap, total-observation cap, total-statement cap, N-Quads/per-event character cap, total-call character cap, and Java-style `objectType` default/enum strictness; reserved contexts are rejected, empty RDF messages are skipped, nonblank `nquads` takes precedence over `facts`, and single-vs-multi observations use the Java RDF/graph split. | Close for tracked alpha.10 hardening; broader schema inventory still needed. |
 | Atomic multi-statement observations | `GraphStreamElement` keeps one observation in one window slot; CQELS-QL expands statements for matching. Java documents this as supported on the CQELS-QL compiled stream/windowed path, not on every legacy/Cypher/CEP path. | Rust now has the same CQELS-QL/MCP support boundary: graph observations count as one element for windows, expand for CQELS-QL matching and the self-join fast path, round-trip through the stream codec, and are exposed via `DataStream::push_graph`. | Close for CQELS-QL/MCP graph-observation semantics; cross-language fixture evidence still needed. |
 | `[TRIPLES n]` observation semantics | Counts stream elements, so graph observations count as one and never split. | Rust count windows now count a graph observation as one element, and MCP multi-statement observations are delivered as graph elements. | Close for the tested CQELS-QL path. |
 | `register_stream_query` | Governed fail-closed; buffers results, supports Java language/CEP surface according to Java handler. Existing listeners drop results while governance is active. | Buffers and polls results, denies registration under active governance in the default server, and listener callbacks drop results under active policy; still only accepts `cqelsql`, while `cep:true` fails loud. | Partial. |
@@ -123,7 +125,7 @@ are not a universal equivalence proof.
 Second, the alpha.9/alpha.10 deltas include surfaces that the query fixtures do
 not exercise broadly enough: governed denials and result withholding,
 graph-element atomicity through MCP ingest, persistent RDF quad storage, plugin
-discovery, notifications, and exact MCP input-contract strictness.
+discovery, notifications, and broader MCP input-contract strictness.
 
 So the accurate statement is: Rust has validated parity for the specific
 fixtures and unit tests it carries, and it has much of the alpha.10 MCP surface.
@@ -150,17 +152,17 @@ It cannot yet be declared universally identical to Java alpha.10.
    deploy-time Rust plugin SPI/discovery layer with namespacing, collision
    checks, atomic registration, and governance wrapping; otherwise this remains
    a deliberate non-parity item.
-6. Finish the exact MCP input-contract inventory, including whether Rust should
-   reject Java-invalid convenience aliases such as `objectType: "iri"` on
-   `push_stream_events`.
+6. Finish the exact MCP input-contract inventory beyond the now-closed
+   `push_stream_events` `facts[*].objectType` contract.
 
 ## Recommended Next Implementation Order
 
 1. Alpha.9/alpha.10 MCP cross-language fixtures. The Rust query corpus is now
    green locally; the next evidence gap is MCP graph/governance/result behavior
    rather than more Rust-only fixture cleanup.
-2. Exact MCP input-contract inventory. The tracked ingest hardening is closed,
-   but strict Java schema compatibility still needs a one-by-one pass.
+2. Exact MCP input-contract inventory. The tracked ingest hardening and
+   `facts[*].objectType` strictness are closed, but Java schema compatibility
+   still needs a one-by-one pass.
 3. Persistence semantics. This needs a design choice before code.
 4. Notifications and plugin SPI. These are important for full release parity
    but less likely to corrupt query results than the first three.
