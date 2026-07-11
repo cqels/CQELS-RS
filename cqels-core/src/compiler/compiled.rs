@@ -408,10 +408,11 @@ impl ContinuousQuery for CompiledCqelsQuery {
             Box::pin(batch_stream.flat_map(move |(source, batch)| {
                 let mut stmts: Vec<(Statement, i64)> = Vec::new();
                 for elem in &batch {
-                    let ts = elem.timestamp();
-                    if let StreamElement::Rdf(rdf) = elem {
-                        stmts.push((rdf.statement.clone(), ts));
-                    }
+                    stmts.extend(
+                        elem.rdf_statements()
+                            .into_iter()
+                            .map(|(statement, ts)| (statement.clone(), ts)),
+                    );
                 }
 
                 // Restrict patterns to this batch's source group plus
@@ -1037,85 +1038,81 @@ fn build_self_join_stream(
         async move {
             loop {
                 let elem = input.next().await?;
-                let Some(rdf) = elem.as_rdf() else {
-                    continue;
-                };
-                let stmt = &rdf.statement;
-                if stmt.predicate.as_str() != resolved_predicate {
-                    continue;
-                }
-                let subject_str = match &stmt.subject {
-                    Term::Iri(iri) => iri.as_str().to_string(),
-                    other => other.to_string(),
-                };
-                let object_str = match &stmt.object {
-                    Term::Iri(iri) => iri.as_str().to_string(),
-                    Term::Literal(lit) => lit.value().to_string(),
-                    other => other.to_string(),
-                };
-
-                // The join key is the shared variable's position; the
-                // bound value is the *other* slot. Because both sides
-                // of the self-join scan the same input stream, the
-                // event must populate the join key from whichever
-                // position holds the shared variable. The pattern's
-                // shape is enforced earlier — both sides agree on the
-                // shared position, or the fast path is rejected.
-                //
-                // For a triple `?bound <p> ?shared` (object position),
-                // the key is the object and bound_value is the subject;
-                // for `?shared <p> ?bound` (subject position) it is the
-                // other way round.
-                let (key, bound_value) = match join_position {
-                    JoinKeyPosition::Object => (object_str.clone(), subject_str.clone()),
-                    JoinKeyPosition::Subject => (subject_str.clone(), object_str.clone()),
-                };
-
-                let event = StoredEvent {
-                    bound_value: bound_value.clone(),
-                    key: key.clone(),
-                    timestamp: rdf.timestamp,
-                };
-                let pairs = state.add(event, rdf.timestamp, |e| e.key.clone());
-                if pairs.is_empty() {
-                    continue;
-                }
-                // Build BindingSets for the pairs and emit them as a
-                // single chunk before reading the next element.
-                let mut emissions = Vec::with_capacity(pairs.len());
-                for pair in pairs {
-                    // Both sides share the same join position by
-                    // construction (enforced in `try_self_join_fast_path`
-                    // via `left_position == right_position`), so the
-                    // bound values map directly to left/right bound
-                    // variables.
-                    let mut bs = BindingSet::new(pair.timestamp);
-                    bs.insert(
-                        &left_bound_var,
-                        Value::String(pair.first.bound_value.clone()),
-                    );
-                    bs.insert(
-                        &right_bound_var,
-                        Value::String(pair.second.bound_value.clone()),
-                    );
-                    bs.insert(&shared_var, Value::String(pair.first.key.clone()));
-
-                    // Post-join FILTER evaluation. Skip pairs whose
-                    // filters do not all evaluate to true.
-                    if !filter_expressions
-                        .iter()
-                        .all(|f| evaluator.evaluate_as_bool(f, &bs))
-                    {
+                let mut emissions = Vec::new();
+                for (stmt, ts) in elem.rdf_statements() {
+                    if stmt.predicate.as_str() != resolved_predicate {
                         continue;
                     }
-
-                    // Restrict to SELECT projection if non-empty.
-                    let bs = if select_vars.is_empty() {
-                        bs
-                    } else {
-                        project(&bs, &select_vars)
+                    let subject_str = match &stmt.subject {
+                        Term::Iri(iri) => iri.as_str().to_string(),
+                        other => other.to_string(),
                     };
-                    emissions.push(bs);
+                    let object_str = match &stmt.object {
+                        Term::Iri(iri) => iri.as_str().to_string(),
+                        Term::Literal(lit) => lit.value().to_string(),
+                        other => other.to_string(),
+                    };
+
+                    // The join key is the shared variable's position; the
+                    // bound value is the *other* slot. Because both sides
+                    // of the self-join scan the same input stream, the
+                    // event must populate the join key from whichever
+                    // position holds the shared variable. The pattern's
+                    // shape is enforced earlier — both sides agree on the
+                    // shared position, or the fast path is rejected.
+                    //
+                    // For a triple `?bound <p> ?shared` (object position),
+                    // the key is the object and bound_value is the subject;
+                    // for `?shared <p> ?bound` (subject position) it is the
+                    // other way round.
+                    let (key, bound_value) = match join_position {
+                        JoinKeyPosition::Object => (object_str.clone(), subject_str.clone()),
+                        JoinKeyPosition::Subject => (subject_str.clone(), object_str.clone()),
+                    };
+
+                    let event = StoredEvent {
+                        bound_value: bound_value.clone(),
+                        key: key.clone(),
+                        timestamp: ts,
+                    };
+                    let pairs = state.add(event, ts, |e| e.key.clone());
+                    if pairs.is_empty() {
+                        continue;
+                    }
+                    for pair in pairs {
+                        // Both sides share the same join position by
+                        // construction (enforced in `try_self_join_fast_path`
+                        // via `left_position == right_position`), so the
+                        // bound values map directly to left/right bound
+                        // variables.
+                        let mut bs = BindingSet::new(pair.timestamp);
+                        bs.insert(
+                            &left_bound_var,
+                            Value::String(pair.first.bound_value.clone()),
+                        );
+                        bs.insert(
+                            &right_bound_var,
+                            Value::String(pair.second.bound_value.clone()),
+                        );
+                        bs.insert(&shared_var, Value::String(pair.first.key.clone()));
+
+                        // Post-join FILTER evaluation. Skip pairs whose
+                        // filters do not all evaluate to true.
+                        if !filter_expressions
+                            .iter()
+                            .all(|f| evaluator.evaluate_as_bool(f, &bs))
+                        {
+                            continue;
+                        }
+
+                        // Restrict to SELECT projection if non-empty.
+                        let bs = if select_vars.is_empty() {
+                            bs
+                        } else {
+                            project(&bs, &select_vars)
+                        };
+                        emissions.push(bs);
+                    }
                 }
                 if emissions.is_empty() {
                     continue;
@@ -1700,7 +1697,7 @@ mod tests {
 
     use super::*;
     use crate::parser::ast::*;
-    use crate::stream::RdfStreamElement;
+    use crate::stream::{GraphStreamElement, RdfStreamElement};
     use cqels_model::term::{IriTerm, LiteralTerm};
     use cqels_model::{Statement, Term};
     use futures::StreamExt;
@@ -1781,6 +1778,97 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results[0].contains("sensor"));
         assert!(results[0].contains("temp"));
+    }
+
+    #[tokio::test]
+    async fn graph_observation_expands_for_cqels_matching_but_counts_as_one_triples_window() {
+        let definition = CqelsQueryDefinition {
+            name: None,
+            description: None,
+            query_type: CqelsQueryType::Select,
+            prefixes: HashMap::new(),
+            streams: vec![CqelsStreamDefinition::root(
+                "sensors",
+                WindowSpec::triples(1),
+            )],
+            named_windows: vec![],
+            static_graphs: vec![],
+            named_graphs: vec![],
+            select_elements: vec![
+                SelectElement::Variable("?sensor".to_string()),
+                SelectElement::Variable("?temp".to_string()),
+                SelectElement::Variable("?status".to_string()),
+            ],
+            distinct: false,
+            pattern_groups: vec![CqelsPatternGroup::Stream {
+                source: "sensors".to_string(),
+                patterns: vec![
+                    TriplePattern {
+                        subject: "?sensor".to_string(),
+                        predicate: "<http://example.org/temp>".to_string(),
+                        object: "?temp".to_string(),
+                    },
+                    TriplePattern {
+                        subject: "?sensor".to_string(),
+                        predicate: "<http://example.org/status>".to_string(),
+                        object: "?status".to_string(),
+                    },
+                ],
+            }],
+            aggregates: vec![],
+            group_by_variables: vec![],
+            order_by_conditions: vec![],
+            limit: None,
+            operator_hints: OperatorHints::default(),
+            stream_semantics: StreamSemantics::default(),
+            construct_template: vec![],
+            seq_constraint: None,
+        };
+
+        let query = CompiledCqelsQuery {
+            query_string: "SELECT ?sensor ?temp ?status FROM STREAM sensors [TRIPLES 1] WHERE { STREAM sensors { ?sensor <http://example.org/temp> ?temp . ?sensor <http://example.org/status> ?status . } }".to_string(),
+            query_id: "graph-test".to_string(),
+            definition: Arc::new(definition),
+            filter_expressions: Arc::new(vec![]),
+            bind_expressions: Arc::new(vec![]),
+            order_by_expressions: Arc::new(vec![]),
+            having_expressions: Arc::new(vec![]),
+            aggregate_specs: Arc::new(vec![]),
+            evaluator: Arc::new(ExpressionEvaluator::new()),
+            select_vars: Arc::new(vec![
+                "sensor".to_string(),
+                "temp".to_string(),
+                "status".to_string(),
+            ]),
+            rdf_store: None,
+            self_join_hints: Arc::new(vec![]),
+        };
+
+        let sensor = Term::Iri(IriTerm::new("http://example.org/s1"));
+        let elements = vec![StreamElement::Graph(GraphStreamElement::new(
+            vec![
+                Statement::new(
+                    sensor.clone(),
+                    IriTerm::new("http://example.org/temp"),
+                    Term::Literal(LiteralTerm::new("42")),
+                ),
+                Statement::new(
+                    sensor,
+                    IriTerm::new("http://example.org/status"),
+                    Term::Literal(LiteralTerm::new("ok")),
+                ),
+            ],
+            1000,
+        ))];
+
+        let mut inputs = QueryInputs::new();
+        inputs.add_stream("sensors", Box::pin(futures::stream::iter(elements)));
+
+        let results: Vec<BindingSet> = query.execute(inputs).collect().await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("sensor"));
+        assert!(results[0].contains("temp"));
+        assert!(results[0].contains("status"));
     }
 
     /// Builds a SELECT query whose static side is an unsatisfiable mandatory
@@ -1985,6 +2073,42 @@ mod tests {
         for batch in &batches {
             assert_eq!(batch.len(), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn apply_window_spec_triples_counts_graph_observation_as_one_element() {
+        let sensor = Term::Iri(IriTerm::new("http://ex.org/s"));
+        let graph = StreamElement::Graph(GraphStreamElement::new(
+            vec![
+                Statement::new(
+                    sensor.clone(),
+                    IriTerm::new("http://ex.org/temp"),
+                    Term::Literal(LiteralTerm::new("21")),
+                ),
+                Statement::new(
+                    sensor,
+                    IriTerm::new("http://ex.org/status"),
+                    Term::Literal(LiteralTerm::new("ok")),
+                ),
+            ],
+            1,
+        ));
+        let single = StreamElement::Rdf(RdfStreamElement::new(
+            Statement::new(
+                Term::Iri(IriTerm::new("http://ex.org/s2")),
+                IriTerm::new("http://ex.org/temp"),
+                Term::Literal(LiteralTerm::new("22")),
+            ),
+            2,
+        ));
+        let input = Box::pin(futures::stream::iter(vec![graph, single]));
+        let spec = WindowSpec::triples(2);
+        let batches: Vec<Vec<StreamElement>> =
+            apply_window_spec(input, Some(&spec)).collect().await;
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[0][0].as_graph().unwrap().len(), 2);
     }
 
     /// End-to-end verification that a multi-stream query — exactly

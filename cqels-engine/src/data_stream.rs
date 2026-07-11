@@ -3,7 +3,7 @@
 //! [`DataStream`] wraps an `mpsc::Sender<StreamElement>` and provides
 //! typed convenience methods for pushing triples with different object types.
 
-use cqels_core::stream::{RdfStreamElement, StreamElement};
+use cqels_core::stream::{GraphStreamElement, RdfStreamElement, StreamElement};
 use cqels_model::term::{IriTerm, LiteralTerm};
 use cqels_model::{CqelsError, Statement, Term};
 use tokio::sync::mpsc;
@@ -47,6 +47,22 @@ impl DataStream {
         self.tx.send(element).await.map_err(|_| CqelsError::Stream {
             message: format!("stream '{}' channel closed", self.name),
         })
+    }
+
+    /// Pushes multiple RDF statements as one atomic graph observation.
+    ///
+    /// This is the Rust counterpart to Java alpha.10's
+    /// `DataStream.push(Collection<Statement>, long)`: count windows see one
+    /// stream element, while CQELS-QL matching expands the statements.
+    pub async fn push_graph(
+        &self,
+        statements: Vec<Statement>,
+        timestamp: i64,
+    ) -> Result<(), CqelsError> {
+        self.push(StreamElement::Graph(GraphStreamElement::new(
+            statements, timestamp,
+        )))
+        .await
     }
 
     /// Pushes an RDF triple with an IRI object.
@@ -171,6 +187,31 @@ mod tests {
         assert!(elem.is_rdf());
         let stmt = elem.as_statement().unwrap();
         assert_eq!(stmt.predicate.as_str(), "http://p");
+    }
+
+    #[tokio::test]
+    async fn test_data_stream_push_graph() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let ds = DataStream::new("test".to_string(), tx);
+
+        let statements = vec![
+            Statement::new(
+                Term::Iri(IriTerm::new("http://s")),
+                IriTerm::new("http://p1"),
+                Term::Literal(LiteralTerm::new("v1")),
+            ),
+            Statement::new(
+                Term::Iri(IriTerm::new("http://s")),
+                IriTerm::new("http://p2"),
+                Term::Literal(LiteralTerm::new("v2")),
+            ),
+        ];
+        ds.push_graph(statements, 42).await.unwrap();
+
+        let elem = rx.recv().await.unwrap();
+        assert_eq!(elem.timestamp(), 42);
+        assert_eq!(elem.as_graph().unwrap().len(), 2);
+        assert!(elem.as_statement().is_none());
     }
 
     #[tokio::test]

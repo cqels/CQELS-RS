@@ -46,7 +46,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cqels_asp::{AnswerSet, AspFactMapper, AspSolver, ClingoSubprocessSolver};
 use cqels_core::parser::{CqelsQlParser, CypherQlParser};
-use cqels_core::stream::{RdfStreamElement, StreamElement};
+use cqels_core::stream::{GraphStreamElement, RdfStreamElement, StreamElement};
 use cqels_engine::listener::listener_from_fn;
 use cqels_engine::CqelsEngine;
 use cqels_model::{BindingSet, CqelsError, IriTerm, LiteralTerm, Statement, Term};
@@ -342,24 +342,35 @@ impl StreamQueryHub {
         };
         let inferred = self.apply_stream_reasoning(stream, &statements, timestamp);
         let pushed_statement_count = statements.len() + inferred.len();
-        let elements = statements
-            .iter()
-            .chain(inferred.iter())
-            .cloned()
-            .map(|statement| StreamElement::Rdf(RdfStreamElement::new(statement, timestamp)))
-            .collect::<Vec<_>>();
+        let mut elements = Vec::new();
+        match statements.as_slice() {
+            [] => {}
+            [statement] => elements.push(StreamElement::Rdf(RdfStreamElement::new(
+                statement.clone(),
+                timestamp,
+            ))),
+            _ => elements.push(StreamElement::Graph(GraphStreamElement::new(
+                statements.clone(),
+                timestamp,
+            ))),
+        }
+        elements.extend(
+            inferred
+                .iter()
+                .cloned()
+                .map(|statement| StreamElement::Rdf(RdfStreamElement::new(statement, timestamp))),
+        );
         self.inner.handle.block_on(async {
             for element in elements {
                 data_stream.push(element).await?;
             }
             Ok::<(), CqelsError>(())
         })?;
-        if inferred.is_empty() {
+        if !statements.is_empty() {
             self.process_observation(stream, &statements, timestamp);
-        } else {
-            let mut observer_statements = statements.clone();
-            observer_statements.extend(inferred);
-            self.process_observation(stream, &observer_statements, timestamp);
+        }
+        for inferred_statement in inferred {
+            self.process_observation(stream, std::slice::from_ref(&inferred_statement), timestamp);
         }
         Ok(pushed_statement_count)
     }
@@ -2149,6 +2160,7 @@ mod tests {
     use crate::tools::set_access_policy_tool;
     use cqels_asp::{AnswerSet, AspError, Atom};
     use cqels_engine::CqelsEngine;
+    use std::time::Duration;
     use tokio::runtime::Runtime;
 
     struct StaticSolver {
@@ -2209,6 +2221,7 @@ mod tests {
         let engine = runtime
             .block_on(async { CqelsEngine::builder().build() })
             .expect("engine builds");
+        runtime.block_on(engine.start()).expect("engine starts");
         let handle = runtime.handle().clone();
         let hub = StreamQueryHub::new(Arc::new(engine), handle);
         (hub, runtime)
@@ -2224,6 +2237,7 @@ mod tests {
         let engine = runtime
             .block_on(async { CqelsEngine::builder().build() })
             .expect("engine builds");
+        runtime.block_on(engine.start()).expect("engine starts");
         // Create the `sensors` stream — we never push data into it,
         // we just need it registered so the query's drain task has
         // something to await rather than terminating on an empty
@@ -2279,6 +2293,26 @@ mod tests {
             FROM STREAM sensors [RANGE 10s]
             WHERE { ?sensor <http://ex.org/temp> ?temp . }
         "#
+    }
+
+    fn poll_until_nonempty(reg: &ToolRegistry, query_id: &str) -> ToolResult {
+        for _ in 0..50 {
+            let poll = reg
+                .call(
+                    "poll_stream_results",
+                    &ToolInvocation::new().with_arg("queryId", json!(query_id)),
+                )
+                .expect("dispatch");
+            if poll.is_error || poll.content["count"].as_u64().unwrap_or(0) > 0 {
+                return poll;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        reg.call(
+            "poll_stream_results",
+            &ToolInvocation::new().with_arg("queryId", json!(query_id)),
+        )
+        .expect("dispatch")
     }
 
     #[test]
@@ -2350,7 +2384,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_reasoning_dispatches_inferred_observation_as_one_batch() {
+    fn stream_reasoning_dispatches_original_then_inferred_observations() {
         let runtime = Arc::new(Runtime::new().expect("tokio runtime"));
         let engine = runtime
             .block_on(async { CqelsEngine::builder().build() })
@@ -2407,9 +2441,11 @@ mod tests {
         );
 
         let programs = programs.lock();
-        assert_eq!(programs.len(), 2);
+        let inferred_type_fact = r#"rdf(iri("http://example.org/alice"),iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),iri("http://example.org/Person"))."#;
+        assert_eq!(programs.len(), 3);
         assert!(programs[1].contains("http://example.org/Child"));
-        assert!(programs[1].contains("http://example.org/Person"));
+        assert!(!programs[1].contains(inferred_type_fact));
+        assert!(programs[2].contains(inferred_type_fact));
     }
 
     #[test]
@@ -2473,6 +2509,75 @@ MESSAGE
             .registered_stream_names()
             .iter()
             .any(|name| name == "sensors"));
+    }
+
+    #[test]
+    fn push_stream_events_preserves_multi_statement_observation_for_triples_window() {
+        let (hub, _rt) = fresh_hub_with_sensors_stream();
+        let reg = install_all(&hub);
+        let query = r#"
+            SELECT ?sensor ?temp ?status
+            FROM STREAM sensors [TRIPLES 1]
+            WHERE {
+                STREAM sensors {
+                    ?sensor <http://example.org/temp> ?temp .
+                    ?sensor <http://example.org/status> ?status .
+                }
+            }
+        "#;
+
+        let registered = reg
+            .call(
+                "register_stream_query",
+                &ToolInvocation::new()
+                    .with_arg("query", json!(query))
+                    .with_arg("queryId", json!("graph-window")),
+            )
+            .expect("dispatch");
+        assert!(
+            !registered.is_error,
+            "register failed: {:?}",
+            registered.content
+        );
+
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 1000,
+                            "facts": [
+                                {
+                                    "subject": "http://example.org/s1",
+                                    "predicate": "http://example.org/temp",
+                                    "object": "42",
+                                    "objectType": "literal"
+                                },
+                                {
+                                    "subject": "http://example.org/s1",
+                                    "predicate": "http://example.org/status",
+                                    "object": "ok",
+                                    "objectType": "literal"
+                                }
+                            ]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "push failed: {:?}", pushed.content);
+        assert_eq!(pushed.content["observationCount"], 1);
+        assert_eq!(pushed.content["statementCount"], 2);
+
+        let poll = poll_until_nonempty(&reg, "graph-window");
+        assert!(!poll.is_error, "poll failed: {:?}", poll.content);
+        assert_eq!(poll.content["count"], 1);
+        assert!(poll.content["results"][0]["bindings"].get("temp").is_some());
+        assert!(poll.content["results"][0]["bindings"]
+            .get("status")
+            .is_some());
     }
 
     #[test]

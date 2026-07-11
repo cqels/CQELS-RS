@@ -538,6 +538,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn push_without_subscribers_keeps_stream_open() {
+        let engine = CqelsEngine::builder().build().unwrap();
+        let stream = engine.create_stream("hot").await.unwrap();
+        engine.start().await.unwrap();
+
+        stream
+            .push_triple("http://s1", "http://p", "http://o1")
+            .await
+            .unwrap();
+        stream
+            .push_triple("http://s2", "http://p", "http://o2")
+            .await
+            .unwrap();
+
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_engine_with_reasoning() {
         use cqels_reasoning::ReasoningProfile;
 

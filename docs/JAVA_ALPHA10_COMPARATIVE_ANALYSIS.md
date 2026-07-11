@@ -20,9 +20,11 @@ environment key. That is surface coverage for many agent workflows, not a proof
 that the behavior is identical.
 
 The remaining gap is semantic parity. Rust now has the default MCP server wired
-to fail closed for the main governed tool/resource surfaces, but Java alpha.10
-also adds atomic-observation, persistence, notification, plugin, and
-ingest-hardening behaviors that Rust does not fully implement yet.
+to fail closed for the main governed tool/resource surfaces, and it now
+preserves Java-style graph observations on the CQELS-QL/MCP stream-ingest path.
+That is still not full Java alpha.10 parity: persistence, notification, plugin,
+ingest-hardening, and broader fixture contracts are not fully implemented or
+proved yet.
 
 ## Evidence Summary
 
@@ -45,12 +47,17 @@ Java alpha.10:
 
 Rust current state:
 
-- `cqels-core/src/stream.rs` has `StreamElement::Rdf` and
-  `StreamElement::Record`, but no graph element variant.
-- `cqels-core/src/compiler/compiled.rs` only expands `StreamElement::Rdf` in
-  the CQELS-QL matcher and self-join fast path.
-- `cqels-mcp/src/stream_query.rs` parses RDF-message observations, but pushes
-  every statement into the engine as an individual `RdfStreamElement`.
+- `cqels-core/src/stream.rs` now has `StreamElement::Graph` and
+  `GraphStreamElement`; `is_rdf()` remains a single-statement guard, while
+  `rdf_statements()` expands graph observations.
+- `cqels-core/src/compiler/compiled.rs` expands graph observations during
+  CQELS-QL matching and the self-join fast path while count windows still count
+  the graph as one stream element.
+- `cqels-engine::DataStream` exposes `push_graph`, and
+  `cqels-storage-spi` round-trips graph elements through the JSON stream codec.
+- `cqels-mcp/src/stream_query.rs` parses RDF-message observations and now
+  pushes one statement as `RdfStreamElement`, multi-statement observations as
+  `GraphStreamElement`, and inferred triples as appended single RDF elements.
 - `cqels-mcp/src/tools.rs` has an `AccessPolicyRegistry`, and the default
   server now wires it into memory recall, context assembly, `query`, governed
   stream tools, continuous observer registration, result polling, and live
@@ -69,21 +76,21 @@ Rust current state:
 |---|---|---|---|
 | MCP tool/resource names | Alpha.10 advertises stream ingest, stream query, continuous reasoning, memory, reasoning, procedure, episodic, decision, governance, resources, prompts, stdio/HTTP. | Rust exposes the main names plus several Rust extras; this analysis did not produce a formal one-by-one inventory diff. | Broad surface overlap; inventory diff still needed before final parity sign-off. |
 | `create_stream` | Idempotent, bounded by `MAX_STREAMS`, denied under active governance. | Idempotent and denied under active governance in the default server; still no stream cap. | Partial. |
-| `push_stream_events` | Parse/validate all events before push, cap events/messages/statements/chars/streams, reject fractional/out-of-range event times, reject `cqels://` graph contexts, deny under governance, push one statement as RDF and multi-statement observations as graph elements. | Parses before push, denies under active governance in the default server, caps event count, total statements, N-Quads body size, and rejects reserved contexts, but accepts rounded floats/out-of-range times, lacks per-message/total-observation/total-character/stream caps, and pushes multi-statement observations as separate RDF elements. | Partial; not alpha.10 equivalent. |
-| Atomic multi-statement observations | `GraphStreamElement` keeps one observation in one window slot; CQELS-QL expands statements for matching. | No graph element; engine windows see N statement elements for an N-triple observation. MCP observers see the batch whole, but CQELS-QL count windows do not. | Blocker. |
-| `[TRIPLES n]` observation semantics | Counts stream elements, so graph observations count as one and never split. | Counts per-statement elements for multi-statement observations pushed by MCP. | Blocker. |
+| `push_stream_events` | Parse/validate all events before push, cap events/messages/statements/chars/streams, reject fractional/out-of-range event times, reject `cqels://` graph contexts, deny under governance, push one statement as RDF and multi-statement observations as graph elements. | Parses before push, denies under active governance in the default server, caps event count, total statements, N-Quads body size, rejects reserved contexts, and now pushes single-vs-multi observations with the Java RDF/graph split. It still accepts rounded floats/out-of-range times and lacks per-message/total-observation/total-character/stream caps. | Partial; graph push is closed, hardening is not. |
+| Atomic multi-statement observations | `GraphStreamElement` keeps one observation in one window slot; CQELS-QL expands statements for matching. Java documents this as supported on the CQELS-QL compiled stream/windowed path, not on every legacy/Cypher/CEP path. | Rust now has the same CQELS-QL/MCP support boundary: graph observations count as one element for windows, expand for CQELS-QL matching and the self-join fast path, round-trip through the stream codec, and are exposed via `DataStream::push_graph`. | Close for CQELS-QL/MCP graph-observation semantics; cross-language fixture evidence still needed. |
+| `[TRIPLES n]` observation semantics | Counts stream elements, so graph observations count as one and never split. | Rust count windows now count a graph observation as one element, and MCP multi-statement observations are delivered as graph elements. | Close for the tested CQELS-QL path. |
 | `register_stream_query` | Governed fail-closed; buffers results, supports Java language/CEP surface according to Java handler. Existing listeners drop results while governance is active. | Buffers and polls results, denies registration under active governance in the default server, and listener callbacks drop results under active policy; still only accepts `cqelsql`, while `cep:true` fails loud. | Partial. |
 | `poll_stream_results` / result resource | Java drains via `recall_memory(queryId)` and resource template, denied/withheld under governance. | `poll_stream_results` denies under active governance; `cqels://queries/{queryId}/results` returns a denial payload without draining. | Close for governed withholding; remaining parity depends on broader Java result-resource semantics. |
 | `watch_invariant` | Continuous SHACL per observation, governed fail-closed, registration caps, shape size cap, optional notifications, drops results under governance. | Present, denied under active governance in the default server, and drops observer results while governance is active; no Java-equivalent registration/shape caps; notifications accepted but not pushed. | Partial. |
 | `register_rules` | Continuous ASP accumulate/solve, governed fail-closed, rules/args/facts/buffer caps, optional notifications, result drop under governance. | Present with `maxFacts`, `emit`, buffers, solver injection, default-server governance denial, and result drop under active policy; notifications accepted but not pushed; caps are not fully aligned. | Partial. |
-| `CQELS_MCP_REASONING` | Opt-in `rdfs` or `rdfs-full` stream reasoning; inferred triples flow to standing queries; RETE fact cap hardens memory. | Opt-in parser and RDFS/RDFS-full flow are present; inferred statements are batched for MCP observers. The MCP `register_rules` path has `maxFacts`, but `apply_stream_reasoning` does not wire a Java-equivalent fact cap for the opt-in stream RETE path. | Partial. |
+| `CQELS_MCP_REASONING` | Opt-in `rdfs` or `rdfs-full` stream reasoning; original observations flow first, graph observations stay atomic, inferred single triples are appended, and a RETE fact cap hardens memory. | Opt-in parser and RDFS/RDFS-full flow are present; original observations flow first, graph observations stay atomic, and inferred triples are appended as single RDF observations. `apply_stream_reasoning` still does not wire a Java-equivalent RETE fact cap. | Partial. |
 | MCP resources | Metadata resources are withheld under governance, except liveness fields in `engine/status`; `engine/status` reports persistence and RDF-store persistence facts. | Governed resource registry withholds metadata/result resources and keeps `engine/status` liveness/features readable; status still lacks Java's persistence/rdfStore shape. | Partial. |
 | `CQELS_MCP_RDF_STORE_PATH` | Switches the RDF repository to RDF4J `NativeStore`; stored facts and saved procedures survive restart. | Accepted as an alias root for sled MCP memory; stream events and RDF quads are not persisted as Java NativeStore equivalents. | Not equivalent. |
 | Plugin SPI | New `cqels-plugin-spi`; `ServiceLoader` discovers plugins and embedding providers; plugin tools are namespaced, atomic, and governed. | Native `ToolRegistry`, `MemoryStore`, solver injection, and resource registries exist, but no deploy-time plugin discovery or governed plugin registrar. | Intentional non-parity today; blocker if the goal is full Java alpha.10 parity. |
 | Notifications | Java uses `McpNotifier` for query/resource result notifications when requested. | Rust accepts `notify` and has notification helper payloads, but tool schemas state unsolicited push notifications are not wired. | Partial. |
 | Ingest event-time validation | Whole-number epoch millis or ISO instant, bounded to `[0, 7258118400000]`, overflow-safe. | Accepts i64, clamps u64 to i64 max, rounds finite f64, accepts negative/out-of-range i64. | Blocker for alpha.10 hardening. |
 | Fixture parity | Java/Rust fixture harness exists; the CI Java-runner gate enforces a named known-passing subset and runs the full corpus informationally. | Rust has fixture-by-fixture validation for selected workloads, plus gap-tracking fixtures for parser, static graph, CEP, aggregate ordering, and emission-semantics differences. | Good evidence for covered fixtures only, not universal equality. |
-| Broader core-query parity | Java alpha.10 includes fixes or behavior for some fixtures outside the alpha.10 MCP delta, including static lookup joins and Java-side ORDER BY/LIMIT handling. | Current fixture metadata tracks Rust gaps: `FILTER(SEQ())` parsed but not enforced through the standard CQELS-QL path, `OPTIONAL` and `UNION` inside `STREAM` rejected by the parser, `ORDER BY DESC(?var)` rejected, `FROM <iri>` static graph parsed but not applied at evaluation, and aggregate row order can be nondeterministic. | Full Java alpha.10 parity must include these, not just MCP alpha.10. |
+| Broader core-query parity | Java alpha.10 includes fixes or behavior for some fixtures outside the alpha.10 MCP delta, including static lookup joins and Java-side ORDER BY/LIMIT handling. Some fixtures also document intentional or unresolved semantic differences, such as raw RSTREAM re-emission versus Rust's single-emission output. | Current fixture metadata tracks Rust gaps: `FILTER(SEQ())` parsed but not enforced through the standard CQELS-QL path, `OPTIONAL` and `UNION` inside `STREAM` rejected by the parser, `ORDER BY DESC(?var)` rejected, `FROM <iri>` static graph parsed but not applied at evaluation, aggregate row order can be nondeterministic, and multi-pattern emission semantics need comparison-mode handling. | Full Java alpha.10 parity must include these, not just MCP alpha.10. |
 
 ## Meaning of Fixture-by-Fixture, Not Universal Equality
 
@@ -110,46 +117,40 @@ It cannot yet be declared universally identical to Java alpha.10.
 
 ## Blockers to Claiming Full Alpha.10 Parity
 
-1. Add a Rust `GraphStreamElement` equivalent and update CQELS-QL execution so
-   graph observations count as one window element but expand to statements for
-   CQELS matching.
-2. Change MCP stream ingest to push single-statement observations as RDF
-   elements and multi-statement observations as graph elements.
-3. Add cross-language governed fixtures for denials, resource withholding, and
+1. Add cross-language fixtures for graph observations, governed denials,
+   resource withholding, and
    result-drop behavior, and ensure future extension/plugin tools are wrapped
    in the same fail-closed posture.
-4. Harden `push_stream_events` to match Java alpha.10 bounds and event-time
+2. Harden `push_stream_events` to match Java alpha.10 bounds and event-time
    validation.
-5. Reconcile the broader core-query fixture gaps that still separate the Rust
+3. Reconcile the broader core-query fixture gaps that still separate the Rust
    port from Java alpha.10 behavior or from Java/Rust deterministic comparison:
    standard-path SEQ execution, STREAM-scoped OPTIONAL/UNION parsing, ORDER BY
    DESC parsing, SPARQL `FROM <iri>` static graph evaluation, and deterministic
    aggregate row ordering.
-6. Decide and implement the persistence story for `CQELS_MCP_RDF_STORE_PATH`:
+4. Decide and implement the persistence story for `CQELS_MCP_RDF_STORE_PATH`:
    true persistent RDF quad store parity, or an explicit documented non-parity
    accepted by the project.
-7. Choose the notification parity target. If Rust claims Java `notify:true`
+5. Choose the notification parity target. If Rust claims Java `notify:true`
    parity, wire unsolicited result/resource notifications; otherwise keep it
    documented as accepted-but-not-implemented compatibility.
-8. Choose the plugin parity target. Full Java alpha.10 parity requires a
+6. Choose the plugin parity target. Full Java alpha.10 parity requires a
    deploy-time Rust plugin SPI/discovery layer with namespacing, collision
    checks, atomic registration, and governance wrapping; otherwise this remains
    a deliberate non-parity item.
-9. Expand cross-language fixtures to cover alpha.9/alpha.10 MCP semantics,
-   including graph observations, governed denials, event-time rejection, result
-   withholding, and persistence restart behavior.
+7. Expand cross-language fixtures to cover alpha.9/alpha.10 MCP semantics,
+   including event-time rejection, result withholding, and persistence restart
+   behavior.
 
 ## Recommended Next Implementation Order
 
-1. Graph observation semantics. This is the core stream correctness gap for
-   RDF Messages and `[TRIPLES n]`.
-2. Ingest hardening. This closes alpha.10's network-facing DoS and overflow
+1. Ingest hardening. This closes alpha.10's network-facing DoS and overflow
    posture.
-3. Core-query fixture reconciliation. This keeps the alpha.10 claim from being
+2. Core-query fixture reconciliation. This keeps the alpha.10 claim from being
    MCP-only.
-4. Persistence semantics. This needs a design choice before code.
-5. Governed cross-language fixtures. The default Rust server is now wired
+3. Persistence semantics. This needs a design choice before code.
+4. Governed cross-language fixtures. The default Rust server is now wired
    fail-closed, but fixture evidence should lock down denial/resource/result
    behavior against Java.
-6. Notifications and plugin SPI. These are important for full release parity
+5. Notifications and plugin SPI. These are important for full release parity
    but less likely to corrupt query results than the first three.

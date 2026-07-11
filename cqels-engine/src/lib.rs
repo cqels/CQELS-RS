@@ -57,7 +57,8 @@ pub use cep::{Contiguity, NfaPatternProcessor, Pattern, PatternMatch, Quantifier
 pub use cep_compiler::{CepCompileError, CepPatternCompiler};
 pub use checkpoint_manager::CheckpointManager;
 pub use cqels_core::stream::{
-    RdfStreamElement, StreamElement, StreamEvent, StreamRecord, Timestamped, TimestampedValue,
+    GraphStreamElement, RdfStreamElement, StreamElement, StreamEvent, StreamRecord, Timestamped,
+    TimestampedValue,
 };
 pub use data_stream::DataStream;
 pub use engine::{create_stream_pair, receiver_to_stream, ReactiveStreamEngine, StreamEngine};

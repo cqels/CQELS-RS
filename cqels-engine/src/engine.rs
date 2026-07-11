@@ -436,11 +436,10 @@ impl ReactiveStreamEngine {
                             }
                         }
                         if tx.send(element).is_err() {
-                            tracing::warn!(
+                            tracing::debug!(
                                 stream = %stream_name,
-                                "broadcast send failed: all receivers dropped, stopping forwarding"
+                                "broadcast send skipped: no active receivers"
                             );
-                            break;
                         }
                     }
                 });

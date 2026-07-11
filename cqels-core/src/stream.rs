@@ -12,8 +12,8 @@ pub trait Timestamped {
 
 /// Core stream element — the atom of stream processing.
 ///
-/// Maps to Java's `StreamElement` interface. Can contain either an RDF statement
-/// or a generic payload.
+/// Maps to Java's `StreamElement` interface. Can contain one RDF statement,
+/// one RDF graph observation, or a generic payload.
 ///
 /// # Examples
 ///
@@ -40,6 +40,8 @@ pub trait Timestamped {
 pub enum StreamElement {
     /// An RDF stream element carrying an RDF statement.
     Rdf(RdfStreamElement),
+    /// An RDF stream element carrying one atomic multi-statement observation.
+    Graph(GraphStreamElement),
     /// A generic stream record carrying an arbitrary payload.
     Record(StreamRecord),
 }
@@ -49,20 +51,28 @@ impl StreamElement {
     pub fn timestamp(&self) -> i64 {
         match self {
             StreamElement::Rdf(rdf) => rdf.timestamp,
+            StreamElement::Graph(graph) => graph.timestamp,
             StreamElement::Record(rec) => rec.timestamp,
         }
     }
 
-    /// Returns `true` if this element contains an RDF statement.
+    /// Returns `true` if this element carries exactly one RDF statement.
+    ///
+    /// Graph observations carry RDF data, but not as a single-statement
+    /// payload; use [`rdf_statements`](Self::rdf_statements) to expand them.
     pub fn is_rdf(&self) -> bool {
         matches!(self, StreamElement::Rdf(_))
     }
 
     /// Returns the RDF statement if this is an RDF element, `None` otherwise.
+    ///
+    /// Graph observations can carry multiple statements, so use
+    /// [`as_graph`](Self::as_graph) or [`rdf_statements`](Self::rdf_statements)
+    /// to inspect them.
     pub fn as_statement(&self) -> Option<&Statement> {
         match self {
             StreamElement::Rdf(rdf) => Some(&rdf.statement),
-            StreamElement::Record(_) => None,
+            StreamElement::Graph(_) | StreamElement::Record(_) => None,
         }
     }
 
@@ -71,6 +81,27 @@ impl StreamElement {
         match self {
             StreamElement::Rdf(rdf) => Some(rdf),
             _ => None,
+        }
+    }
+
+    /// Returns the RDF graph observation if this is a graph element.
+    pub fn as_graph(&self) -> Option<&GraphStreamElement> {
+        match self {
+            StreamElement::Graph(graph) => Some(graph),
+            _ => None,
+        }
+    }
+
+    /// Returns the RDF statements carried by this stream element.
+    pub fn rdf_statements(&self) -> Vec<(&Statement, i64)> {
+        match self {
+            StreamElement::Rdf(rdf) => vec![(&rdf.statement, rdf.timestamp)],
+            StreamElement::Graph(graph) => graph
+                .statements
+                .iter()
+                .map(|statement| (statement, graph.timestamp))
+                .collect(),
+            StreamElement::Record(_) => Vec::new(),
         }
     }
 }
@@ -85,6 +116,7 @@ impl fmt::Display for StreamElement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StreamElement::Rdf(rdf) => write!(f, "{rdf}"),
+            StreamElement::Graph(graph) => write!(f, "{graph}"),
             StreamElement::Record(rec) => write!(f, "{rec}"),
         }
     }
@@ -155,6 +187,70 @@ impl fmt::Display for RdfStreamElement {
 impl From<RdfStreamElement> for StreamElement {
     fn from(rdf: RdfStreamElement) -> Self {
         StreamElement::Rdf(rdf)
+    }
+}
+
+/// An RDF stream element carrying an atomic graph observation.
+///
+/// A graph observation counts as one stream element for windowing, while query
+/// matching expands its statements against triple patterns. This mirrors Java
+/// alpha.10's `GraphStreamElement` behavior for RDF Message observations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphStreamElement {
+    pub statements: Vec<Statement>,
+    pub timestamp: i64,
+}
+
+impl GraphStreamElement {
+    /// Creates a new graph stream element with the given statements and timestamp.
+    pub fn new(statements: Vec<Statement>, timestamp: i64) -> Self {
+        Self {
+            statements,
+            timestamp,
+        }
+    }
+
+    /// Creates a new graph stream element with the current system time.
+    pub fn now(statements: Vec<Statement>) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        Self {
+            statements,
+            timestamp,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.statements.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.statements.is_empty()
+    }
+}
+
+impl Timestamped for GraphStreamElement {
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+}
+
+impl fmt::Display for GraphStreamElement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphStreamElement[ts={}, statements={}]",
+            self.timestamp,
+            self.statements.len()
+        )
+    }
+}
+
+impl From<GraphStreamElement> for StreamElement {
+    fn from(graph: GraphStreamElement) -> Self {
+        StreamElement::Graph(graph)
     }
 }
 
@@ -400,11 +496,35 @@ mod tests {
     }
 
     #[test]
+    fn test_graph_stream_element() {
+        let statements = vec![sample_statement(), sample_statement()];
+        let graph = GraphStreamElement::new(statements.clone(), 750);
+        let elem = StreamElement::Graph(graph);
+
+        assert!(!elem.is_rdf());
+        assert_eq!(elem.timestamp(), 750);
+        assert!(elem.as_statement().is_none());
+        assert_eq!(elem.as_graph().unwrap().len(), 2);
+        assert_eq!(elem.rdf_statements().len(), 2);
+        assert_eq!(elem.rdf_statements()[0].0, &statements[0]);
+        assert_eq!(elem.rdf_statements()[0].1, 750);
+    }
+
+    #[test]
     fn test_stream_element_from_rdf() {
         let rdf = RdfStreamElement::new(sample_statement(), 42);
         let elem: StreamElement = rdf.into();
         assert!(elem.is_rdf());
         assert_eq!(elem.timestamp(), 42);
+    }
+
+    #[test]
+    fn test_stream_element_from_graph() {
+        let graph = GraphStreamElement::new(vec![sample_statement()], 43);
+        let elem: StreamElement = graph.into();
+        assert!(!elem.is_rdf());
+        assert_eq!(elem.timestamp(), 43);
+        assert_eq!(elem.as_graph().unwrap().len(), 1);
     }
 
     #[test]

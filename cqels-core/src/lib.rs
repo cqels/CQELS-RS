@@ -61,4 +61,4 @@ pub use expression::{Expression, ExpressionEvaluator};
 pub use parser::{CqelsQlParser, CypherQlParser, ParseError, ParseResult};
 pub use query::{ContinuousQuery, QueryInputs, QueryType};
 pub use store::{create_rdf_store, RdfStore};
-pub use stream::{RdfStreamElement, StreamElement, StreamRecord, Timestamped};
+pub use stream::{GraphStreamElement, RdfStreamElement, StreamElement, StreamRecord, Timestamped};

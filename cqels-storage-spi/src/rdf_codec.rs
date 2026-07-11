@@ -39,7 +39,7 @@ pub fn deserialize_stream_element(data: &[u8]) -> Result<StreamElement, StorageE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqels_core::stream::{RdfStreamElement, StreamRecord};
+    use cqels_core::stream::{GraphStreamElement, RdfStreamElement, StreamRecord};
     use cqels_model::statement::Statement;
     use cqels_model::term::{IriTerm, LiteralTerm};
     use cqels_model::Term;
@@ -68,6 +68,31 @@ mod tests {
             element.as_statement().unwrap(),
             deserialized.as_statement().unwrap()
         );
+    }
+
+    #[test]
+    fn test_roundtrip_graph_element() {
+        let statements = vec![
+            Statement::new(
+                Term::Iri(IriTerm::new("http://example.org/sensor1")),
+                IriTerm::new("http://example.org/temperature"),
+                Term::Literal(LiteralTerm::new("25.5")),
+            ),
+            Statement::new(
+                Term::Iri(IriTerm::new("http://example.org/sensor1")),
+                IriTerm::new("http://example.org/status"),
+                Term::Literal(LiteralTerm::new("ok")),
+            ),
+        ];
+        let element = StreamElement::Graph(GraphStreamElement::new(statements, 1000));
+
+        let bytes = serialize_stream_element(&element).unwrap();
+        let deserialized = deserialize_stream_element(&bytes).unwrap();
+
+        assert_eq!(element.timestamp(), deserialized.timestamp());
+        assert!(!deserialized.is_rdf());
+        assert!(deserialized.as_statement().is_none());
+        assert_eq!(deserialized.as_graph().unwrap().len(), 2);
     }
 
     #[test]
