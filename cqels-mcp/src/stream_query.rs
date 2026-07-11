@@ -672,6 +672,12 @@ impl McpTool for CreateStreamTool {
         let Some(stream) = required_nonempty_str(invocation, "stream") else {
             return ToolResult::error("missing `stream` argument");
         };
+        let stream_names = self.hub.registered_stream_names();
+        if !stream_names.iter().any(|name| name == &stream) && stream_names.len() >= MAX_STREAMS {
+            return ToolResult::error(format!(
+                "stream limit reached: {MAX_STREAMS} distinct streams"
+            ));
+        }
         match self.hub.create_stream(&stream) {
             Ok(created) => ToolResult::success(json!({
                 "ok": true,
@@ -711,8 +717,13 @@ pub struct PushStreamEventsTool {
 }
 
 const MAX_PUSH_EVENTS: usize = 1000;
+const MAX_STATEMENTS_PER_MESSAGE: usize = 10_000;
+const MAX_TOTAL_OBSERVATIONS: usize = 10_000;
 const MAX_PUSH_STATEMENTS: usize = 100_000;
 const MAX_NQUADS_CHARS: usize = 2_000_000;
+const MAX_TOTAL_CHARS: usize = 8_000_000;
+const MAX_STREAMS: usize = 1024;
+const MAX_EVENT_TIME: i64 = 7_258_118_400_000;
 
 impl McpTool for PushStreamEventsTool {
     fn name(&self) -> &str {
@@ -739,7 +750,9 @@ impl McpTool for PushStreamEventsTool {
                 "events",
                 json!({
                     "type": "array",
-                    "description": "Events to push. Each item may include eventTime, facts, and/or nquads.",
+                    "maxItems": MAX_PUSH_EVENTS,
+                    "minItems": 1,
+                    "description": "Events to push. Each item may include eventTime plus facts or RDF-message nquads.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -764,6 +777,9 @@ impl McpTool for PushStreamEventsTool {
         let Some(events) = invocation.get("events").and_then(JsonValue::as_array) else {
             return ToolResult::error("missing or non-array `events` argument");
         };
+        if events.is_empty() {
+            return ToolResult::error("push_stream_events requires a non-empty `events` array");
+        }
         if events.len() > MAX_PUSH_EVENTS {
             return ToolResult::error(format!(
                 "too many events: {} > {MAX_PUSH_EVENTS}",
@@ -773,22 +789,32 @@ impl McpTool for PushStreamEventsTool {
 
         let mut observations = Vec::new();
         let mut statement_count = 0usize;
+        let mut total_chars = 0usize;
         for (event_index, event) in events.iter().enumerate() {
             let Some(object) = event.as_object() else {
                 return ToolResult::error(format!("events[{event_index}] must be an object"));
             };
+            total_chars = match total_chars.checked_add(event_payload_chars(object)) {
+                Some(total) => total,
+                None => {
+                    return ToolResult::error("too many characters in one call".to_string());
+                }
+            };
+            if total_chars > MAX_TOTAL_CHARS {
+                return ToolResult::error(format!(
+                    "too many characters in one call: {total_chars} > {MAX_TOTAL_CHARS}"
+                ));
+            }
             let timestamp = match parse_event_time(object.get("eventTime")) {
                 Ok(timestamp) => timestamp,
                 Err(e) => return ToolResult::error(format!("events[{event_index}].{e}")),
             };
             let mut event_observations = Vec::new();
-            if let Some(facts) = object.get("facts") {
-                match parse_fact_array(facts, &format!("events[{event_index}].facts")) {
-                    Ok(statements) => event_observations.push(statements),
-                    Err(e) => return ToolResult::error(e),
-                }
-            }
-            if let Some(nquads) = object.get("nquads").and_then(JsonValue::as_str) {
+            if let Some(nquads) = object
+                .get("nquads")
+                .and_then(JsonValue::as_str)
+                .filter(|nquads| !nquads.trim().is_empty())
+            {
                 if nquads.len() > MAX_NQUADS_CHARS {
                     return ToolResult::error(format!(
                         "events[{event_index}].nquads exceeds {MAX_NQUADS_CHARS} characters"
@@ -800,15 +826,57 @@ impl McpTool for PushStreamEventsTool {
                         return ToolResult::error(format!("events[{event_index}].nquads: {e}"));
                     }
                 }
+            } else if let Some(facts) = object.get("facts") {
+                let Some(items) = facts.as_array() else {
+                    return ToolResult::error(format!(
+                        "events[{event_index}].facts must be an array"
+                    ));
+                };
+                if items.len() > MAX_STATEMENTS_PER_MESSAGE {
+                    return ToolResult::error(format!(
+                        "events[{event_index}].facts array too large: {} > {MAX_STATEMENTS_PER_MESSAGE}",
+                        items.len()
+                    ));
+                }
+                let fact_chars = fact_array_payload_chars(items);
+                if fact_chars > MAX_NQUADS_CHARS {
+                    return ToolResult::error(format!(
+                        "events[{event_index}].facts payload exceeds {MAX_NQUADS_CHARS} characters"
+                    ));
+                }
+                match parse_fact_array(facts, &format!("events[{event_index}].facts")) {
+                    Ok(statements) if statements.is_empty() => {
+                        return ToolResult::error(format!(
+                            "events[{event_index}] requires non-empty `facts`"
+                        ));
+                    }
+                    Ok(statements) => event_observations.push(statements),
+                    Err(e) => return ToolResult::error(e),
+                }
             }
             if event_observations.is_empty() {
                 return ToolResult::error(format!(
-                    "events[{event_index}] requires `facts` and/or `nquads`"
+                    "events[{event_index}] requires non-empty `facts` or `nquads`"
                 ));
             }
             for statements in event_observations {
+                if statements.is_empty() {
+                    continue;
+                }
                 if let Err(e) = validate_statement_graphs(&statements) {
                     return ToolResult::error(e);
+                }
+                if statements.len() > MAX_STATEMENTS_PER_MESSAGE {
+                    return ToolResult::error(format!(
+                        "events[{event_index}] message too large: {} > {MAX_STATEMENTS_PER_MESSAGE}",
+                        statements.len()
+                    ));
+                }
+                if observations.len() >= MAX_TOTAL_OBSERVATIONS {
+                    return ToolResult::error(format!(
+                        "too many observations: {} >= {MAX_TOTAL_OBSERVATIONS}",
+                        observations.len()
+                    ));
                 }
                 statement_count += statements.len();
                 if statement_count > MAX_PUSH_STATEMENTS {
@@ -821,6 +889,12 @@ impl McpTool for PushStreamEventsTool {
         }
 
         let observation_count = observations.len();
+        let stream_names = self.hub.registered_stream_names();
+        if !stream_names.iter().any(|name| name == &stream) && stream_names.len() >= MAX_STREAMS {
+            return ToolResult::error(format!(
+                "stream limit reached: {MAX_STREAMS} distinct streams"
+            ));
+        }
         let mut pushed_statements = 0usize;
         for (timestamp, statements) in observations {
             match self
@@ -1781,31 +1855,86 @@ fn parse_stream_reasoning_profile(value: &str) -> Result<Option<ReasoningProfile
     }
 }
 
+fn valid_event_time(ms: i64) -> Result<i64, String> {
+    if !(0..=MAX_EVENT_TIME).contains(&ms) {
+        return Err(format!(
+            "eventTime out of range [0, {MAX_EVENT_TIME}]: {ms}"
+        ));
+    }
+    Ok(ms)
+}
+
 fn parse_event_time(value: Option<&JsonValue>) -> Result<i64, String> {
     let Some(value) = value else {
-        return Ok(current_timestamp_ms());
+        return valid_event_time(current_timestamp_ms());
     };
     if let Some(ms) = value.as_i64() {
-        return Ok(ms);
+        return valid_event_time(ms);
     }
     if let Some(ms) = value.as_u64() {
-        return Ok(ms.min(i64::MAX as u64) as i64);
+        if ms > MAX_EVENT_TIME as u64 {
+            return Err(format!(
+                "eventTime out of range [0, {MAX_EVENT_TIME}]: {ms}"
+            ));
+        }
+        return Ok(ms as i64);
     }
     if let Some(ms) = value.as_f64() {
-        if ms.is_finite() {
-            return Ok(ms.round() as i64);
+        if !ms.is_finite() {
+            return Err(format!("eventTime is not a finite number: {ms}"));
         }
+        if ms.fract() != 0.0 {
+            return Err(format!(
+                "eventTime must be a whole number of epoch millis, got: {ms}"
+            ));
+        }
+        if ms < 0.0 || ms > MAX_EVENT_TIME as f64 {
+            return Err(format!(
+                "eventTime out of range [0, {MAX_EVENT_TIME}]: {ms}"
+            ));
+        }
+        return Ok(ms as i64);
     }
     if let Some(text) = value.as_str() {
         let trimmed = text.trim();
         if let Ok(ms) = trimmed.parse::<i64>() {
-            return Ok(ms);
+            return valid_event_time(ms);
         }
         if let Some(ms) = parse_rfc3339_utc_millis(trimmed) {
-            return Ok(ms);
+            return valid_event_time(ms);
         }
     }
     Err("eventTime must be Unix milliseconds or UTC RFC3339".to_string())
+}
+
+fn event_payload_chars(event: &serde_json::Map<String, JsonValue>) -> usize {
+    if let Some(nquads) = event
+        .get("nquads")
+        .and_then(JsonValue::as_str)
+        .filter(|nquads| !nquads.trim().is_empty())
+    {
+        return nquads.len();
+    }
+    event
+        .get("facts")
+        .and_then(JsonValue::as_array)
+        .map(|facts| fact_array_payload_chars(facts))
+        .unwrap_or(0)
+}
+
+fn fact_array_payload_chars(facts: &[JsonValue]) -> usize {
+    facts.iter().map(fact_payload_chars).sum()
+}
+
+fn fact_payload_chars(fact: &JsonValue) -> usize {
+    let Some(object) = fact.as_object() else {
+        return 0;
+    };
+    ["subject", "predicate", "object"]
+        .into_iter()
+        .filter_map(|key| object.get(key).and_then(JsonValue::as_str))
+        .map(str::len)
+        .sum()
 }
 
 fn parse_rfc3339_utc_millis(value: &str) -> Option<i64> {
@@ -1848,13 +1977,11 @@ fn parse_rfc3339_utc_millis(value: &str) -> Option<i64> {
         millis = format!("{digits:0<3}").parse::<u32>().ok()?;
     }
     let days = days_from_civil(year, month, day);
-    Some(
-        days * 86_400_000
-            + hour as i64 * 3_600_000
-            + minute as i64 * 60_000
-            + second as i64 * 1000
-            + millis as i64,
-    )
+    days.checked_mul(86_400_000)?
+        .checked_add(hour as i64 * 3_600_000)?
+        .checked_add(minute as i64 * 60_000)?
+        .checked_add(second as i64 * 1000)?
+        .checked_add(millis as i64)
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -1872,13 +1999,13 @@ fn is_leap_year(year: i32) -> bool {
 }
 
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year - i32::from(month <= 2);
+    let year = year as i64 - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let yoe = year - era * 400;
-    let month = month as i32;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let month = month as i64;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i64 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    (era * 146_097 + doe - 719_468) as i64
+    era * 146_097 + doe - 719_468
 }
 
 fn parse_shapes_argument(value: &JsonValue) -> Result<Vec<Statement>, String> {
@@ -2487,21 +2614,26 @@ MESSAGE
                     .with_arg("stream", json!("sensors"))
                     .with_arg(
                         "events",
-                        json!([{
-                            "eventTime": "2026-07-11T12:00:00.123Z",
-                            "facts": [{
-                                "subject": "ex:s1",
-                                "predicate": "ex:p",
-                                "object": "v1",
-                                "objectType": "literal"
-                            }],
-                            "nquads": nquads
-                        }]),
+                        json!([
+                            {
+                                "eventTime": "2026-07-11T12:00:00.123Z",
+                                "facts": [{
+                                    "subject": "ex:s1",
+                                    "predicate": "ex:p",
+                                    "object": "v1",
+                                    "objectType": "literal"
+                                }]
+                            },
+                            {
+                                "eventTime": "2026-07-11T12:00:00.123Z",
+                                "nquads": nquads
+                            }
+                        ]),
                     ),
             )
             .expect("dispatch");
         assert!(!pushed.is_error, "push failed: {:?}", pushed.content);
-        assert_eq!(pushed.content["eventCount"], 1);
+        assert_eq!(pushed.content["eventCount"], 2);
         assert_eq!(pushed.content["observationCount"], 3);
         assert_eq!(pushed.content["inputStatementCount"], 3);
         assert_eq!(pushed.content["statementCount"], 3);
@@ -2509,6 +2641,318 @@ MESSAGE
             .registered_stream_names()
             .iter()
             .any(|name| name == "sensors"));
+    }
+
+    #[test]
+    fn push_stream_events_uses_nquads_payload_when_facts_are_also_present() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 10,
+                            "facts": [{
+                                "subject": "ex:ignored",
+                                "predicate": "ex:p",
+                                "object": "ignored",
+                                "objectType": "literal"
+                            }],
+                            "nquads": "<http://example.org/s> <http://example.org/p> \"v\" .\n"
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "push failed: {:?}", pushed.content);
+        assert_eq!(pushed.content["observationCount"], 1);
+        assert_eq!(pushed.content["inputStatementCount"], 1);
+        assert_eq!(pushed.content["statementCount"], 1);
+    }
+
+    #[test]
+    fn push_stream_events_skips_empty_rdf_messages() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 10,
+                            "nquads": "VERSION \"1.2-messages\"\nMESSAGE\n<http://example.org/s> <http://example.org/p> \"v\" .\n"
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(!pushed.is_error, "push failed: {:?}", pushed.content);
+        assert_eq!(pushed.content["observationCount"], 1);
+        assert_eq!(pushed.content["inputStatementCount"], 1);
+        assert_eq!(pushed.content["statementCount"], 1);
+    }
+
+    #[test]
+    fn push_stream_events_rejects_empty_events_array() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("events", json!([])),
+            )
+            .expect("dispatch");
+        assert!(pushed.is_error);
+        assert!(pushed.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("non-empty"));
+    }
+
+    #[test]
+    fn push_stream_events_rejects_empty_facts_array() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        let pushed = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 1,
+                            "facts": []
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(pushed.is_error);
+        assert!(pushed.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("non-empty `facts`"));
+    }
+
+    #[test]
+    fn push_stream_events_rejects_invalid_event_time_bounds() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        for (event_time, expected) in [
+            (json!(1.9), "whole number"),
+            (json!(-1), "out of range"),
+            (json!(MAX_EVENT_TIME + 1), "out of range"),
+            (json!("-1"), "out of range"),
+            (json!("1969-12-31T23:59:59Z"), "out of range"),
+        ] {
+            let pushed = reg
+                .call(
+                    "push_stream_events",
+                    &ToolInvocation::new()
+                        .with_arg("stream", json!("sensors"))
+                        .with_arg(
+                            "events",
+                            json!([{
+                                "eventTime": event_time,
+                                "facts": [{
+                                    "subject": "ex:s1",
+                                    "predicate": "ex:p",
+                                    "object": "ex:o",
+                                    "objectType": "uri"
+                                }]
+                            }]),
+                        ),
+                )
+                .expect("dispatch");
+            assert!(pushed.is_error, "{event_time:?} should fail");
+            assert!(
+                pushed.content["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected),
+                "{event_time:?} should contain {expected}: {:?}",
+                pushed.content
+            );
+        }
+    }
+
+    #[test]
+    fn push_stream_events_rejects_message_and_observation_caps() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+
+        let too_many_facts = (0..=MAX_STATEMENTS_PER_MESSAGE)
+            .map(|idx| {
+                json!({
+                    "subject": format!("http://example.org/s{idx}"),
+                    "predicate": "http://example.org/p",
+                    "object": "http://example.org/o",
+                    "objectType": "uri"
+                })
+            })
+            .collect::<Vec<_>>();
+        let facts_result = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 1,
+                            "facts": too_many_facts
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(facts_result.is_error);
+        assert!(facts_result.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("facts array too large"));
+
+        let mut nquads = String::from("VERSION \"1.2-messages\"\n");
+        for idx in 0..=MAX_TOTAL_OBSERVATIONS {
+            if idx > 0 {
+                nquads.push_str("MESSAGE\n");
+            }
+            nquads.push_str(&format!(
+                "<http://example.org/s{idx}> <http://example.org/p> <http://example.org/o> .\n"
+            ));
+        }
+        let observations_result = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 1,
+                            "nquads": nquads
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(observations_result.is_error);
+        assert!(observations_result.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("too many observations"));
+    }
+
+    #[test]
+    fn push_stream_events_rejects_character_budgets() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+
+        let huge_literal = "x".repeat(MAX_NQUADS_CHARS + 1);
+        let per_event = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 1,
+                            "facts": [{
+                                "subject": "http://example.org/s",
+                                "predicate": "http://example.org/p",
+                                "object": huge_literal,
+                                "objectType": "literal"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(per_event.is_error);
+        assert!(per_event.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("facts payload exceeds"));
+
+        let big_literal = "y".repeat(1_800_000);
+        let events = (0..5)
+            .map(|idx| {
+                json!({
+                    "eventTime": idx + 1,
+                    "facts": [{
+                        "subject": format!("http://example.org/s{idx}"),
+                        "predicate": "http://example.org/p",
+                        "object": big_literal,
+                        "objectType": "literal"
+                    }]
+                })
+            })
+            .collect::<Vec<_>>();
+        let total = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("sensors"))
+                    .with_arg("events", JsonValue::Array(events)),
+            )
+            .expect("dispatch");
+        assert!(total.is_error);
+        assert!(total.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("too many characters in one call"));
+    }
+
+    #[test]
+    fn create_and_push_stream_events_enforce_stream_cap() {
+        let (hub, _rt) = fresh_hub();
+        let reg = install_all(&hub);
+        for idx in 0..MAX_STREAMS {
+            hub.create_stream(&format!("filler-{idx}"))
+                .expect("stream creation below cap");
+        }
+
+        let create = reg
+            .call(
+                "create_stream",
+                &ToolInvocation::new().with_arg("stream", json!("one-too-many")),
+            )
+            .expect("dispatch");
+        assert!(create.is_error);
+        assert!(create.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("stream limit reached"));
+
+        let push = reg
+            .call(
+                "push_stream_events",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("one-too-many"))
+                    .with_arg(
+                        "events",
+                        json!([{
+                            "eventTime": 1,
+                            "facts": [{
+                                "subject": "ex:s1",
+                                "predicate": "ex:p",
+                                "object": "ex:o",
+                                "objectType": "uri"
+                            }]
+                        }]),
+                    ),
+            )
+            .expect("dispatch");
+        assert!(push.is_error);
+        assert!(push.content["message"]
+            .as_str()
+            .unwrap()
+            .contains("stream limit reached"));
     }
 
     #[test]
