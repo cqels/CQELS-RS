@@ -137,13 +137,10 @@ fn resolve_pattern_term(
         // Prefixed name → expand
         let prefix = &term[..colon_pos];
         let local = &term[colon_pos + 1..];
-        if let Some(base) = prefixes.get(prefix) {
-            // We need to return an owned string, so we'll construct the node directly
-            let expanded = format!("{base}{local}");
-            return oxrdf::NamedNode::new(&expanded).ok();
-        } else {
-            return None;
-        }
+        let base = prefixes.get(prefix)?;
+        // We need to return an owned string, so we'll construct the node directly
+        let expanded = format!("{base}{local}");
+        return oxrdf::NamedNode::new(&expanded).ok();
     } else {
         term
     };
