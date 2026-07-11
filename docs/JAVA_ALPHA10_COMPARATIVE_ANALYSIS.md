@@ -27,8 +27,8 @@ core-query fixture failures in this corpus: Rust now passes all 12 parity
 fixtures against the checked-in oracles. That is still not full Java alpha.10
 parity: persistence, broader notifications, plugin SPI/discovery, broader
 cross-language fixture contracts, and exact input-contract details such as
-Java's Turtle-only SHACL shape registration and registration-time ASP parse are
-not fully implemented or proved yet.
+Java's Turtle-only SHACL shape registration and full Delta-compatible ASP parse
+coverage are not fully implemented or proved yet.
 
 ## Evidence Summary
 
@@ -72,7 +72,9 @@ Rust current state:
   prefixes (`wi-` / `rl-`), enforce Java alpha.10 live-registration caps,
   advertise/enforce the Java buffer-size caps, and reject over-limit SHACL shape
   or ASP rule payloads before registration. `register_rules` also enforces the
-  Java alpha.10 `argNames`, `emit`, and `maxFacts` bounds.
+  Java alpha.10 `argNames`, `emit`, and `maxFacts` bounds, and now performs
+  lightweight ASP program structure validation before reserving an observer or
+  auto-creating a stream.
 - `cqels-mcp/src/tools.rs` has an `AccessPolicyRegistry`, and the default
   server now wires it into memory recall, context assembly, `query`, governed
   stream tools, continuous observer registration, result polling, and live
@@ -88,6 +90,7 @@ Rust current state:
 - Rust extension points are native registries and traits; there is no
   Java-style deploy-time plugin SPI or provider discovery layer.
 - Focused Rust MCP verification on this branch (2026-07-12):
+  - `cargo test -p cqels-asp program::tests --lib`: 4/4 passed.
   - `cargo test -p cqels-mcp watch_invariant --lib`: 2/2 passed.
   - `cargo test -p cqels-mcp register_rules --lib`: 3/3 passed.
   - `cargo test -p cqels-mcp`: 217 unit tests plus stdio integration passed.
@@ -140,7 +143,7 @@ alpha.10 emitted no matching rows in this run.
 | `register_stream_query` | Governed fail-closed; buffers results, supports Java language/CEP surface according to Java handler. Existing listeners drop results while governance is active. | Buffers and polls results, denies registration under active governance in the default server, and listener callbacks drop results under active policy; still only accepts `cqelsql`, while `cep:true` fails loud. | Partial. |
 | `poll_stream_results` / result resource | Java drains via `recall_memory(queryId)` and resource template, denied/withheld under governance. | `poll_stream_results` denies under active governance; `cqels://queries/{queryId}/results` returns a denial payload without draining. | Close for governed withholding; remaining parity depends on broader Java result-resource semantics. |
 | `watch_invariant` | Continuous SHACL per observation, governed fail-closed, forced `wi-` query-id prefix, registration cap of 16, 500k shape-size cap, buffer cap, optional notifications, drops results under governance. Java accepts SHACL Turtle and parses/compiles before registration. | Present, denied under active governance in the default server, drops observer results while governance is active, forces `wi-` ids, enforces 16 live watch registrations, rejects over-500k shape payloads, clamps buffers, and queues stdio `notifications/resources/updated` signals for notify-enabled query-results resources. Rust still accepts JSON/N-Quads shape statements rather than Java's Turtle-only shape contract. | Close for governance, prefix, caps, buffering, and stdio query-result notifications; partial for exact shape input contract. |
-| `register_rules` | Continuous ASP accumulate/solve, governed fail-closed, forced `rl-` query-id prefix, registration cap of 8, 100k rule-size cap, `argNames` cap/validation, `emit` validation, `maxFacts`/buffer caps, registration-time ASP parse, delta-memory diagnostic, optional notifications, result drop under governance. | Present with `maxFacts`, `emit`, buffers, solver injection, default-server governance denial, result drop under active policy, forced `rl-` ids, 8 live rule registrations, 100k rule payload rejection, `argNames` cap/blank/duplicate validation, Java-style `maxFacts` and buffer caps, and stdio query-result notifications. Rust does not yet parse the ASP program at registration time or emit Java's delta-memory-cap diagnostic. | Close for the main input bounds and runtime observer behavior; partial for Java's registration-time ASP parse and diagnostic details. |
+| `register_rules` | Continuous ASP accumulate/solve, governed fail-closed, forced `rl-` query-id prefix, registration cap of 8, 100k rule-size cap, `argNames` cap/validation, `emit` validation, `maxFacts`/buffer caps, registration-time ASP parse, delta-memory diagnostic, optional notifications, result drop under governance. | Present with `maxFacts`, `emit`, buffers, solver injection, default-server governance denial, result drop under active policy, forced `rl-` ids, 8 live rule registrations, 100k rule payload rejection, `argNames` cap/blank/duplicate validation, Java-style `maxFacts` and buffer caps, stdio query-result notifications, and pre-registration ASP structure validation that rejects missing statement terminators, unbalanced delimiters, and unterminated strings before registry/stream side effects. Rust does not yet implement Java Delta's full parser or emit Java's delta-memory-cap diagnostic. | Close for the main input bounds, structural parse-before-side-effect behavior, and runtime observer behavior; partial for full Delta parser and diagnostic details. |
 | `CQELS_MCP_REASONING` | Opt-in `rdfs` or `rdfs-full` stream reasoning; original observations flow first, graph observations stay atomic, inferred single triples are appended, and a RETE fact cap hardens memory. | Opt-in parser and RDFS/RDFS-full flow are present; original observations flow first, graph observations stay atomic, and inferred triples are appended as single RDF observations. `apply_stream_reasoning` still does not wire a Java-equivalent RETE fact cap. | Partial. |
 | MCP resources | Metadata resources are withheld under governance, except liveness fields in `engine/status`; `engine/status` reports persistence and RDF-store persistence facts. | Governed resource registry withholds metadata/result resources, keeps Java-style `engine/status` liveness fields readable, reports `registeredQueryCount`, `persistence`, `rdfStore.persistent`, and `streamReasoning`, preserves result buffers when governed, and drains queued query-result update notifications for stdio transports. `rdfStore.persistent` correctly remains `false` because Rust does not yet implement Java's RDF4J NativeStore equivalent. | Close for status shape, governed liveness, and stdio query-result notification shape; broader persistence and non-stdio/non-query notification semantics remain partial. |
 | `CQELS_MCP_RDF_STORE_PATH` | Switches the RDF repository to RDF4J `NativeStore`; stored facts and saved procedures survive restart. | Accepted as an alias root for sled MCP memory; stream events and RDF quads are not persisted as Java NativeStore equivalents. | Not equivalent. |
@@ -198,8 +201,8 @@ It cannot yet be declared universally identical to Java alpha.10.
 6. Finish the exact MCP input-contract inventory beyond the now-closed
    `push_stream_events` `facts[*].objectType` contract and the newly aligned
    continuous-reasoning caps: notably Java's Turtle-only `watch_invariant`
-   shapes contract, `register_rules` registration-time ASP parse, and
-   Java's delta-memory-cap diagnostic behavior.
+   shapes contract, full Delta-compatible `register_rules` ASP parse coverage,
+   and Java's delta-memory-cap diagnostic behavior.
 
 ## Recommended Next Implementation Order
 

@@ -44,7 +44,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use cqels_asp::{AnswerSet, AspFactMapper, AspSolver, ClingoSubprocessSolver};
+use cqels_asp::{
+    validate_program_syntax, AnswerSet, AspFactMapper, AspSolver, ClingoSubprocessSolver,
+};
 use cqels_core::parser::{CqelsQlParser, CypherQlParser};
 use cqels_core::stream::{GraphStreamElement, RdfStreamElement, StreamElement};
 use cqels_engine::listener::listener_from_fn;
@@ -1406,7 +1408,6 @@ impl McpTool for RegisterRulesTool {
         let Some(result_predicate) = required_nonempty_str(invocation, "resultPredicate") else {
             return ToolResult::error("missing `resultPredicate` argument");
         };
-        let query_id = observer_query_id(RULE_PREFIX, invocation);
         let arg_names = match parse_arg_names(invocation.get("argNames")) {
             Ok(names) => names,
             Err(e) => return ToolResult::error(e),
@@ -1431,6 +1432,10 @@ impl McpTool for RegisterRulesTool {
             .get("notify")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false);
+        if let Err(e) = validate_program_syntax(&rules) {
+            return ToolResult::error(format!("Invalid ASP program: {e}"));
+        }
+        let query_id = observer_query_id(RULE_PREFIX, invocation);
         if let Err(e) = self.hub.register_observer(
             query_id.clone(),
             ObserverRegistration {
@@ -3603,6 +3608,40 @@ MESSAGE
             .as_str()
             .unwrap()
             .contains("duplicate"));
+
+        let rejected = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("syntax-stream"))
+                    .with_arg("queryId", json!("syntax"))
+                    .with_arg("rules", json!("alert(alice) :- rdf(_,_,_)"))
+                    .with_arg("resultPredicate", json!("alert")),
+            )
+            .expect("dispatch");
+        assert!(rejected.is_error);
+        let message = rejected.content["message"].as_str().unwrap();
+        assert!(message.contains("Invalid ASP program"), "{message}");
+        assert!(message.contains("terminating"), "{message}");
+        assert!(hub.registered_query_ids().is_empty());
+        assert!(hub.registered_stream_names().is_empty());
+
+        let rejected = reg
+            .call(
+                "register_rules",
+                &ToolInvocation::new()
+                    .with_arg("stream", json!("syntax-stream-2"))
+                    .with_arg("queryId", json!("syntax-2"))
+                    .with_arg("rules", json!("alert((alice)."))
+                    .with_arg("resultPredicate", json!("alert")),
+            )
+            .expect("dispatch");
+        assert!(rejected.is_error);
+        let message = rejected.content["message"].as_str().unwrap();
+        assert!(message.contains("Invalid ASP program"), "{message}");
+        assert!(message.contains("unclosed '('"), "{message}");
+        assert!(hub.registered_query_ids().is_empty());
+        assert!(hub.registered_stream_names().is_empty());
 
         for idx in 0..MAX_RULE_REGISTRATIONS {
             let registered = reg

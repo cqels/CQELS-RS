@@ -23,7 +23,9 @@ liveness/runtime fields while leaving `rdfStore.persistent` false until true
 RDF quad-store persistence exists, and notify-enabled stream-query/SHACL/ASP
 result buffers now emit stdio `notifications/resources/updated` signals. The
 continuous-reasoning observer path also now validates Java alpha.10-style
-`wi-`/`rl-` returned query ids and registration/payload/buffer/argument caps.
+`wi-`/`rl-` returned query ids, registration/payload/buffer/argument caps, and
+pre-registration ASP program structure checks that reject malformed rules
+before registry or stream side effects.
 Rust parity runner now passes **12/12**
 checked-in Java/Rust fixtures locally after closing the `FROM <iri>`
 static-graph evaluation gap and correcting the numeric FILTER fixture to use
@@ -40,7 +42,7 @@ differences in `JAVA_ALPHA10_COMPARATIVE_ANALYSIS.md`.
 
 | Metric | Value |
 |---|---|
-| **Total tests** | **1,892 passing** (default features) + 43 optional-feature tests = **~1,935** |
+| **Total tests** | **1,896 passing** (default features) + 43 optional-feature tests = **~1,939** |
 | **Failures** | **0** |
 | **Ignored** | 4 (live-server or opt-in doc tests gated by env vars / explicit examples) |
 | **Test groups** | 51 across 15 workspace crates |
@@ -58,7 +60,7 @@ differences in `JAVA_ALPHA10_COMPARATIVE_ANALYSIS.md`.
 | Clippy (workspace) | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
 | Clippy (kuksa feature) | `cargo clippy -p cqels-cdsp --features kuksa --all-targets -- -D warnings` | ✅ clean |
 | Clippy (thrift feature) | `cargo clippy -p cqels-storage-iotdb --features thrift --all-targets -- -D warnings` | ✅ clean |
-| Tests | `cargo test --workspace` | ✅ 1892 passed, 4 ignored |
+| Tests | `cargo test --workspace` | ✅ 1896 passed, 4 ignored |
 | Tests (kuksa feature) | `cargo test -p cqels-cdsp --features kuksa` | ✅ 27 passed, 1 ignored (`KUKSA_HOST`) |
 | Tests (thrift feature) | `cargo test -p cqels-storage-iotdb --features thrift` | ✅ 16 passed, 2 ignored (`IOTDB_HOST`) |
 | Docs | `RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps` | ✅ clean |
@@ -76,7 +78,7 @@ differences in `JAVA_ALPHA10_COMPARATIVE_ANALYSIS.md`.
 | `cqels-geo` | **67** | GeoSPARQL spatial reasoning | `cqels-geo` |
 | `cqels-mcp` | **217** | MCP tool/prompt/resource surface + JSON-RPC stdio / HTTP transports | `cqels-mcp` |
 | `cqels-shacl` | **60** | SHACL validation engine, repair candidates | `cqels-shacl` |
-| `cqels-asp` | **50** | ASP solver trait, Clingo subprocess solver | `cqels-asp` |
+| `cqels-asp` | **54** | ASP solver trait, Clingo subprocess solver, program structure validation | `cqels-asp` |
 | `cqels-cdsp` | **15** | COVESA VSS signal envelope + mapper + source | `cqels-cdsp` |
 | `cqels-storage-iotdb` | **14** | IoTDB-backed persistent storage adapter | `cqels-storage-iotdb` |
 | `cqels-benchmarks` | **10** | Workload generators + benchmark harness | (Rust-only) |
@@ -84,9 +86,9 @@ differences in `JAVA_ALPHA10_COMPARATIVE_ANALYSIS.md`.
 | `cqels-storage-lmdb` | **8** | LMDB embedded backend via `heed` | (Rust-only fill-in) |
 | `cqels-storage-rocksdb` | **8** | RocksDB backend (real C++ library) | `cqels-storage-rocksdb` |
 | `cqels-storage-spi` | **15** | Trait-only crate (impls live in backend crates) | `cqels-storage-spi` |
-| **TOTAL (lib unit)** | **1,627** | | |
+| **TOTAL (lib unit)** | **1,631** | | |
 | Integration + doc tests across the workspace | **265** | | |
-| **GRAND TOTAL** | **1,892** | | |
+| **GRAND TOTAL** | **1,896** | | |
 
 ---
 
@@ -128,8 +130,9 @@ the tests that prove the port.
 | RocksDB backend (lifts `links = "rocksdb"` oxigraph clash) | `cqels-storage-rocksdb` | 8 tests, same shape |
 | IoTDB time-series adapter | `cqels-storage-iotdb` — narrow `IotDbExecutor` trait + in-memory ref impl | 14 tests (executor-level + backend-level) |
 | IoTDB **real Thrift client** | `cqels-storage-iotdb::ThriftIotDbExecutor` (feature `thrift`) | 2 unit tests + 1 `IOTDB_HOST`-gated live round-trip |
+| ASP program structure validation | `cqels-asp::validate_program_syntax` | 4 tests covering common rules/facts/constraints/choice rules plus missing terminators, unbalanced delimiters, unterminated strings, comments, and periods inside terms |
 | MCP tool + prompt + resource surface (Java's `cqels-mcp`) | `cqels-mcp` (`query`, `parse_query`, `analyze_query`, `validate_stream_query`, `reasoning_profiles`, `shacl_capabilities`, `reason`, `store/recall/forget_memory`, `create_stream`, `push_stream_events`, `register_stream_query`/`forget_stream_query`, `watch_invariant`, `register_rules`, `save/list/run_procedure`, `record_event`/`recall_episodes`, `explain_decision`/`recall_decisions`, `register_reasoning`, `set_access_policy`, `assemble_context`, `validate`, `solve`, initialize instructions, 8 CQELS prompt templates; resources `cqels://kg/stats`, `cqels://kg/namespaces`, `cqels://engine/status`, `cqels://streams`, `cqels://queries`, `cqels://reasoning/capabilities`, `cqels://docs/cqelsql`, `cqels://docs/cep`, `cqels://queries/{queryId}/results`; stdio + HTTP JSON-RPC transports; stdio `notifications/resources/updated` for notify-enabled query result buffers; `CQELS_MCP_RDF_STORE_PATH` accepted as an alias root for MCP memory records/procedure definitions, with sled data kept under `<path>/cqels-mcp-memory` and not used for pushed stream events) | 217 `cqels-mcp` unit tests plus stdio integration, covering stateless/memory/reasoning tools, stream ingest/query/observer tools, SHACL `validate`, ASP `solve`, Java alpha.10 `engine/status` runtime facts, resources, prompts, stdio notifications, and HTTP transport |
-| MCP stream ingest/query/observer wiring | `cqels-mcp::stream_query::StreamQueryHub` | `stream_query::tests::*` (custom `queryId` / buffer coverage, RDF-message ingest, graph observation atomicity, Java alpha.10 event-time, DoS caps, strict fact `objectType` default/enum handling, `watch_invariant` prefixes/caps, `register_rules` prefixes/caps, notify-enabled result-resource updates, `CQELS_MCP_REASONING`, bounded ASP delta dedup, reasoned observer batching, plus unregister race regression) |
+| MCP stream ingest/query/observer wiring | `cqels-mcp::stream_query::StreamQueryHub` | `stream_query::tests::*` (custom `queryId` / buffer coverage, RDF-message ingest, graph observation atomicity, Java alpha.10 event-time, DoS caps, strict fact `objectType` default/enum handling, `watch_invariant` prefixes/caps, `register_rules` prefixes/caps and parse-before-side-effect behavior, notify-enabled result-resource updates, `CQELS_MCP_REASONING`, bounded ASP delta dedup, reasoned observer batching, plus unregister race regression) |
 | MCP `validate` (SHACL bridge) | `cqels-mcp::validate` (any `Arc<dyn AspSolver>`) | 8 tests with recording `MockSolver` |
 | MCP `solve` (ASP bridge) | `cqels-mcp::solve` | 8 tests |
 | COVESA CDSP / VSS signal ingestion | `cqels-cdsp` | 15 default + 12 with `kuksa` feature = 27 (live test gated by `KUKSA_HOST`) |
@@ -183,7 +186,7 @@ These appear in the Java codebase but are deliberately not ported, per
 
 | Build invocation | Build OK | Tests passing |
 |---|:---:|:---:|
-| `cargo build --workspace` | ✅ | 1,892 passed, 4 ignored |
+| `cargo build --workspace` | ✅ | 1,896 passed, 4 ignored |
 | `cargo build -p cqels-cdsp --features kuksa` | ✅ | 27 / 27 |
 | `cargo build -p cqels-storage-iotdb --features thrift` | ✅ | 16 / 16 |
 
@@ -200,7 +203,7 @@ Five consecutive isolated runs after the fix and the latest full-workspace
 run on the alpha.10 MCP parity stack produced:
 
 ```
-Latest full workspace: passed=1892 failed=0 ignored=4
+Latest full workspace: passed=1896 failed=0 ignored=4
 ```
 
 No failures were observed in the latest full-workspace run.
