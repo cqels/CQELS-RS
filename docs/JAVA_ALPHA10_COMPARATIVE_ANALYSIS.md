@@ -81,12 +81,42 @@ Rust current state:
   persistent RDF quad store.
 - Rust extension points are native registries and traits; there is no
   Java-style deploy-time plugin SPI or provider discovery layer.
-- Fresh fixture sweep on this branch:
+- Fresh fixture sweep on this branch (2026-07-11):
   - `cargo xtask parity --rust-only`: Rust passed 12/12 fixtures.
-  - `cargo xtask parity --java-only`: Java passed 6/12 fixtures against the
-    current checked-in oracles; the remaining Java failures/errors are either
-    documented semantic/oracle differences or Java parser hard-errors for
-    STREAM-scoped OPTIONAL/UNION.
+  - Java alpha.10 runner (`mvn -q -B -DskipTests
+    -Dcqels.dependency.version=2.0.0-alpha.10 package`, then
+    `java -jar target/cqels-parity-runner-java-0.1.0-SNAPSHOT-jar-with-dependencies.jar --all ../fixtures`):
+    Java alpha.10 passed 5/12 fixtures against the current checked-in oracles. The
+    remaining Java failures/errors are documented semantic/oracle differences
+    or Java parser hard-errors for STREAM-scoped OPTIONAL/UNION.
+
+## Latest Executable Sweep
+
+| Fixture | Rust current | Java alpha.10 |
+|---|---|---|
+| `simple-select-now` | ok | ok |
+| `range-window-low-volume` | ok | ok |
+| `triples-window-batch` | ok | ok |
+| `order-by-limit` | ok | ok |
+| `stream-static-lookup-join` | ok | ok |
+| `cep-sequence-two-events` | ok | FAIL |
+| `count-aggregate` | ok | FAIL |
+| `self-join-rides` | ok | FAIL |
+| `triples-filter-numeric` | ok | FAIL |
+| `triples-multi-pattern-join` | ok | FAIL |
+| `optional-extra-property` | ok | ERR |
+| `union-two-properties` | ok | ERR |
+
+The Java `ERR` rows are alpha.10 parser/runtime hard errors for OPTIONAL/UNION
+inside a `STREAM` block. The Java `FAIL` rows are binding mismatches against
+the current hand-spec/Rust-oriented oracles, not necessarily regressions in
+Java: several fixture metadata files intentionally document RSTREAM cumulative
+emission, SEQ standard-path behavior, aggregate emission shape, or typed-filter
+differences. The current 5/12 Java alpha.10 count is against checked-in
+hand-spec/Rust-oriented oracles, not Java-golden captures; the
+`triples-filter-numeric` row is one reason the stale earlier 6/12 note no
+longer applies, because the fixture now uses typed integer data and Java
+alpha.10 emitted no matching rows in this run.
 
 ## Capability Matrix
 
@@ -107,7 +137,7 @@ Rust current state:
 | Plugin SPI | New `cqels-plugin-spi`; `ServiceLoader` discovers plugins and embedding providers; plugin tools are namespaced, atomic, and governed. | Native `ToolRegistry`, `MemoryStore`, solver injection, and resource registries exist, but no deploy-time plugin discovery or governed plugin registrar. | Intentional non-parity today; blocker if the goal is full Java alpha.10 parity. |
 | Notifications | Java uses `McpNotifier` for query/resource result notifications when requested. | Rust accepts `notify` and has notification helper payloads, but tool schemas state unsolicited push notifications are not wired. | Partial. |
 | Ingest event-time validation | Whole-number epoch millis or ISO instant, bounded to `[0, 7258118400000]`, overflow-safe. | Rust now rejects fractional, negative, and far-future event times, validates numeric strings and UTC instants through the same upper bound, and uses checked timestamp arithmetic. | Close for the MCP ingest path. |
-| Fixture parity | Java/Rust fixture harness exists; the CI Java-runner gate enforces a named known-passing subset and runs the full corpus informationally. A fresh local Java run passed 6/12 against the current oracles. | Rust now passes the full checked-in 12-fixture corpus locally. The corpus covers NOW, TRIPLES windows, FILTER, STREAM-scoped OPTIONAL/UNION, ORDER BY/LIMIT, static `FROM <iri>` lookup, aggregate, CEP SEQ documentation, and known emission-semantics differences. | Strong evidence for covered fixtures only, not universal equality. |
+| Fixture parity | Java/Rust fixture harness exists; the CI Java-runner gate enforces a named known-passing subset and runs the full corpus informationally. A fresh local Java alpha.10 run passed 5/12 against the current oracles. | Rust now passes the full checked-in 12-fixture corpus locally. The corpus covers NOW, TRIPLES windows, FILTER, STREAM-scoped OPTIONAL/UNION, ORDER BY/LIMIT, static `FROM <iri>` lookup, aggregate, CEP SEQ documentation, and known emission-semantics differences. | Strong evidence for covered fixtures only, not universal equality. |
 | Broader core-query parity | Java alpha.10 includes fixes or behavior for static lookup joins and Java-side ORDER BY/LIMIT handling. Some fixtures also document intentional or unresolved semantic differences, such as raw RSTREAM re-emission versus Rust's single-emission output. Java currently hard-errors for STREAM-scoped OPTIONAL/UNION in the local Java runner. | Rust now accepts the fixture-covered STREAM-scoped OPTIONAL/UNION forms, `ORDER BY DESC(?var)`, numeric FILTERs over typed integer fixture events, and SPARQL `FROM <iri>` static graph evaluation. Known remaining comparison limits are `FILTER(SEQ())` standard-path semantics, Java/Rust RSTREAM-vs-single-emission differences, and broader untested grammar/runtime surfaces. | Improved; full Java alpha.10 parity still needs more cross-language fixtures beyond this corpus. |
 
 ## Meaning of Fixture-by-Fixture, Not Universal Equality

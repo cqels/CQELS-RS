@@ -410,13 +410,11 @@ jobs:
   # workflow green for forks / contributors who don't have access to
   # cqels/claude, which is intentional.
   #
-  # Today's 7 fixtures split into:
-  #   • 4 known-passing on cqels-java   → enforced (any regression fails the job)
-  #   • 3 known-failing on cqels-java   → run informationally, never fail the job
-  # The "informational" set is uploaded as a log artifact for visibility.
-  # When a delta is reconciled (fixture flipped to java-golden, or the
-  # underlying engine bug fixed), move its name from `parity_java_known_failing`
-  # to `parity_java_known_passing` here.
+  # The configured known-passing fixtures below are enforced against the moving
+  # cqels/claude default branch. The full fixture sweep still runs
+  # informationally and is uploaded as a log artifact for visibility. When a
+  # delta is reconciled (fixture flipped to java-golden, comparison mode added,
+  # or the underlying engine bug fixed), add its name to the enforced list.
   nightly-parity-java:
     name: Parity Java Runner
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

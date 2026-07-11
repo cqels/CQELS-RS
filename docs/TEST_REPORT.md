@@ -24,7 +24,11 @@ RDF quad-store persistence exists. The Rust parity runner now passes **12/12**
 checked-in Java/Rust fixtures locally after closing the `FROM <iri>`
 static-graph evaluation gap and correcting the numeric FILTER fixture to use
 typed integer literals. `cargo test -p cqels-mcp` now passes **210** unit
-tests plus the stdio integration test.
+tests plus the stdio integration test. A release-artifact Java alpha.10 sweep
+against the same fixture corpus currently passes **5/12** checked-in oracles;
+those oracles are hand-spec/Rust-oriented rather than Java-golden captures.
+The remaining Java rows are documented comparison-mode, parser, or semantic
+differences in `JAVA_ALPHA10_COMPARATIVE_ANALYSIS.md`.
 
 ---
 
