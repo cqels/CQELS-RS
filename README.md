@@ -131,4 +131,4 @@ issue-regression rules, and CI process.
 
 ## License
 
-Apache-2.0
+MIT
