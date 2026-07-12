@@ -1,6 +1,6 @@
 # CQELS-RS Test Report — Java Parity Verification
 
-**Repository:** `HiveIntel/cqels-rs`
+**Repository:** `cqels/CQELS-RS`
 **Captured at:** alpha.10 MCP parity stack (2026-07-12)
 **Toolchain:** Rust 1.83+ (MSRV), Cargo 1.95.0
 

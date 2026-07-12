@@ -24,7 +24,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
-repository = "https://github.com/cqels/cqels-rs"
+repository = "https://github.com/cqels/CQELS-RS"
 keywords = ["rdf", "streaming", "sparql", "cypher", "rete"]
 
 [workspace.dependencies]

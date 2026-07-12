@@ -15,9 +15,8 @@ row order is non-deterministic.** Discovered via
   `cqels-core/src/compiler/pipeline.rs::apply_group_by_aggregates`
   — uses a `HashMap` (randomized hash seed) to group, then
   iterates it. Order-sensitive parity comparison therefore
-  **flakes** on this fixture. Filed against cqels-rs as
-  **HiveIntel/cqels-rs#70** with a one-line fix suggestion
-  (swap to `BTreeMap`).
+  **flakes** on this fixture. The parity note records the one-line
+  fix suggestion: swap the grouping map to `BTreeMap`.
 - **cqels-java:** ✅ correct and deterministic. Emits the 2
   expected rows in `(s1, s2)` order every run.
 

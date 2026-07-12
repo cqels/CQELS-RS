@@ -27,10 +27,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cqels-model = { git = "https://github.com/HiveIntel/cqels-rs" }
-cqels-core = { git = "https://github.com/HiveIntel/cqels-rs" }
-cqels-engine = { git = "https://github.com/HiveIntel/cqels-rs" }
-cqels-reasoning = { git = "https://github.com/HiveIntel/cqels-rs" }
+cqels-model = { git = "https://github.com/cqels/CQELS-RS" }
+cqels-core = { git = "https://github.com/cqels/CQELS-RS" }
+cqels-engine = { git = "https://github.com/cqels/CQELS-RS" }
+cqels-reasoning = { git = "https://github.com/cqels/CQELS-RS" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 ```
