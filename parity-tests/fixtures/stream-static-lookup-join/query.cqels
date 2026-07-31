@@ -1,7 +1,0 @@
-SELECT ?sensor ?temp ?location
-FROM STREAM readings [TRIPLES 4]
-FROM <http://ex.org/static/sensors>
-WHERE {
-    STREAM readings { ?sensor <http://ex.org/temp> ?temp . }
-    ?sensor <http://ex.org/location> ?location .
-}

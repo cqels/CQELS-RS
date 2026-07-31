@@ -1,6 +1,0 @@
-SELECT ?sensor (COUNT(?temp) AS ?n)
-FROM STREAM sensors [TRIPLES 6]
-WHERE {
-    STREAM sensors { ?sensor <http://ex.org/temp> ?temp . }
-}
-GROUP BY ?sensor

@@ -1,3 +1,0 @@
-name = "self-join-rides"
-description = "Indexed self-join (Java PR #25): two STREAM blocks on the same source joining on a shared variable. Compiler should emit a self-join hint and the runtime routes through WindowedSelfJoinState. The expected output reflects the optimized fast-path semantic — one binding per *new* pairing emitted at the second event's arrival — not the full Cartesian product."
-ground_truth = "hand-spec"

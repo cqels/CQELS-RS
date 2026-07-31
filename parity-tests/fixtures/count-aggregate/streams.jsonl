@@ -1,5 +1,0 @@
-{"stream": "sensors", "ts": 1000, "s": "http://ex.org/s1", "p": "http://ex.org/temp", "o": "21"}
-{"stream": "sensors", "ts": 1100, "s": "http://ex.org/s2", "p": "http://ex.org/temp", "o": "22"}
-{"stream": "sensors", "ts": 1200, "s": "http://ex.org/s1", "p": "http://ex.org/temp", "o": "21.5"}
-{"stream": "sensors", "ts": 1300, "s": "http://ex.org/s1", "p": "http://ex.org/temp", "o": "21.7"}
-{"stream": "sensors", "ts": 1400, "s": "http://ex.org/s2", "p": "http://ex.org/temp", "o": "22.3"}

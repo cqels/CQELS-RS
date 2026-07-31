@@ -1,6 +1,0 @@
-SELECT ?sensor ?temp
-FROM STREAM sensors [TRIPLES 3]
-WHERE {
-    STREAM sensors { ?sensor <http://ex.org/temp> ?temp . }
-    FILTER(?temp > 24)
-}

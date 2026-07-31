@@ -1,3 +1,0 @@
-/target
-# maven-shade-plugin writes this alongside the pom on every build
-dependency-reduced-pom.xml

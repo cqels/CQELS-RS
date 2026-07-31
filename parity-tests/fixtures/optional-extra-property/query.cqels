@@ -1,8 +1,0 @@
-SELECT ?sensor ?temp ?room
-FROM STREAM sensors [TRIPLES 6]
-WHERE {
-    STREAM sensors {
-        ?sensor <http://ex.org/temp> ?temp .
-        OPTIONAL { ?sensor <http://ex.org/in_room> ?room . }
-    }
-}
