@@ -1,0 +1,12 @@
+[package]
+name = "cqels-rs-examples"
+version = "2.0.0-alpha.14"
+edition = "2021"
+publish = false
+
+[dependencies]
+cqels-core = "2.0.0-alpha.14"
+
+[[bin]]
+name = "query-language"
+path = "src/query_language.rs"

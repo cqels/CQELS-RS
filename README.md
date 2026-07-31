@@ -29,6 +29,13 @@ archive includes a SHA-256 checksum.
 See [GETTING_STARTED.md](GETTING_STARTED.md) for installation and release
 selection guidance.
 
+## Public contents
+
+- [CQELS-QL specification](CQELS-QL_SPEC.md)
+- [Runnable Rust examples](examples/)
+- [MCP server distribution guide](mcp-server/README.md)
+- [Release verification](SUPPLY_CHAIN.md)
+
 ## License
 
 MIT

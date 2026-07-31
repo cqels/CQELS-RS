@@ -20,6 +20,14 @@ Use the crate documentation for the public Rust API:
 
 The release notes identify the compatible CQELS-RS and MCP protocol version.
 
+## Examples
+
+The public examples consume released crates and do not include engine source:
+
+```bash
+cargo run --manifest-path examples/Cargo.toml
+```
+
 ## Source and development
 
 The public repository is intentionally artifact-only. The implementation source
