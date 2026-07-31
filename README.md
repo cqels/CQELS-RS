@@ -2,6 +2,8 @@
 
 **Continuous Query Evaluation over Linked Streams -- in Rust.**
 
+> Development, design records, agent configuration, issue tracking, and pull requests are maintained in the private [HiveIntel/cqels-rs](https://github.com/HiveIntel/cqels-rs) repository. This public repository is a generated publishing proxy for approved source snapshots and releases.
+
 A high-performance streaming query engine for RDF data, featuring dual query
 languages, windowed processing, complex event detection, and rule-based
 reasoning. Rust port of the [CQELS 2.0](https://cqels.github.io/) engine.
