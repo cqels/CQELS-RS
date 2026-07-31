@@ -2,13 +2,8 @@
 
 ## Rust libraries
 
-Install the runtime from crates.io and select the same version for the CQELS
-packages used by your application:
-
-```bash
-cargo add cqels-engine@2.0.0-alpha.14
-cargo add cqels-reasoning@2.0.0-alpha.14
-```
+Install the runtime from crates.io using the version named by the release you
+are targeting. Keep all CQELS packages on the same version.
 
 Use the crate documentation for the public Rust API:
 

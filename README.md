@@ -10,12 +10,9 @@ repository.
 
 ## Distribution
 
-Use the published Rust crates for library applications:
-
-```bash
-cargo add cqels-engine@2.0.0-alpha.14
-cargo add cqels-reasoning@2.0.0-alpha.14
-```
+Use the published Rust crates for library applications. Select the version
+listed by the release you are targeting, then add `cqels-engine` and any
+supporting packages from crates.io.
 
 The related packages include:
 
