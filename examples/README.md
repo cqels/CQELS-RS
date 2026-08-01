@@ -1,14 +1,35 @@
-# Examples
+# CQELS-RS Examples
 
-This is a small public examples project that consumes the released CQELS-RS
-crates. It does not vendor or mirror the engine implementation.
+These self-contained Rust programs consume released CQELS-RS crates. They
+demonstrate the same progression as the Java distribution: query parsing,
+windowing, joins, CEP, reasoning, and MCP deployment guidance. They do not
+vendor or mirror the engine implementation.
 
-Run the query-language example from the repository root:
+## Prerequisites
+
+- Rust 1.85+
+- Cargo
+
+All dependencies resolve from the published crate release named in
+`Cargo.toml`; no engine source checkout is required.
+
+## Build and run
 
 ```bash
-cargo run --manifest-path examples/Cargo.toml
+cargo run --manifest-path examples/Cargo.toml --bin query-language
+cargo run --manifest-path examples/Cargo.toml --bin windowing
+cargo run --manifest-path examples/Cargo.toml --bin cep
+cargo run --manifest-path examples/Cargo.toml --bin reasoning
 ```
 
-The example demonstrates parsing a CQELS-QL stream query. Additional engine,
-reasoning, CEP, and storage examples can be added here as released APIs
-stabilize.
+## Scenarios
+
+| Binary | Demonstrates |
+|--------|--------------|
+| `query-language` | CQELS-QL parsing, prefixes, stream windows, ordering, and limits |
+| `windowing` | Count and time windows over timestamped RDF elements |
+| `cep` | Declarative `SEQ` syntax and CEP query registration |
+| `reasoning` | RDFS subclass/type entailment with the RETE profile |
+
+The examples are intentionally small and API-focused. Full engine source,
+benchmarks, profiling studies, and parity fixtures remain private.

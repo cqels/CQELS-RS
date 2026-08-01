@@ -1,12 +1,30 @@
 [package]
 name = "cqels-rs-examples"
-version = "2.0.0-alpha.14"
+version = "2.0.0-alpha.16"
 edition = "2021"
 publish = false
 
+[workspace]
+
 [dependencies]
-cqels-core = "2.0.0-alpha.14"
+cqels-core = "2.0.0-alpha.16"
+cqels-model = "2.0.0-alpha.16"
+cqels-reasoning = "2.0.0-alpha.16"
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[bin]]
 name = "query-language"
 path = "src/query_language.rs"
+
+[[bin]]
+name = "windowing"
+path = "src/windowing.rs"
+
+[[bin]]
+name = "cep"
+path = "src/cep.rs"
+
+[[bin]]
+name = "reasoning"
+path = "src/reasoning.rs"
