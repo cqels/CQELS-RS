@@ -1,9 +1,9 @@
 # Getting Started with CQELS-RS
 
 This guide takes you from zero to a running Rust query and the standalone MCP
-server using the public alpha.16 distribution.
+server using the public alpha.18 distribution.
 
-> **Current release:** `2.0.0-alpha.16` -- keep all CQELS crates on this version.
+> **Current release:** `2.0.0-alpha.18` -- keep all CQELS crates on this version.
 
 ## Prerequisites
 
@@ -26,10 +26,10 @@ Add the crates you need to your `Cargo.toml`. Most applications start with
 
 ```toml
 [dependencies]
-cqels-model = "2.0.0-alpha.16"
-cqels-core = "2.0.0-alpha.16"
-cqels-engine = "2.0.0-alpha.16"
-cqels-reasoning = "2.0.0-alpha.16"
+cqels-model = "2.0.0-alpha.18"
+cqels-core = "2.0.0-alpha.18"
+cqels-engine = "2.0.0-alpha.18"
+cqels-reasoning = "2.0.0-alpha.18"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 ```
@@ -52,7 +52,7 @@ distribution does not serve version ranges or `LATEST` metadata.
 
 The release notes identify the compatible CQELS-RS and MCP protocol version.
 
-The alpha.16 server also supports opt-in Streamable HTTP through the
+The alpha.18 server also supports opt-in Streamable HTTP through the
 `CQELS_MCP_TRANSPORT=http` environment setting. See the release compatibility
 guide in the private development repository for the full deployment surface.
 

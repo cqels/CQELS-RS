@@ -1,6 +1,6 @@
 # Release Verification
 
-The current release line is `2.0.0-alpha.16`. Release archives are published
+The current release line is `2.0.0-alpha.18`. Release archives are published
 from the reviewed private Rust source and mirrored here as distribution
 artifacts only.
 

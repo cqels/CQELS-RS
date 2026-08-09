@@ -6,7 +6,7 @@ CQELS is a continuous query engine for RDF and graph streams, with CQELS-QL
 and CypherQL queries, windowed processing, CEP, reasoning, geospatial
 functions, SHACL validation, persistent storage, and an MCP server.
 
-> **Latest release:** [`2.0.0-alpha.16`](https://github.com/cqels/CQELS-RS/releases/tag/v2.0.0-alpha.16) · **License:** MIT · **Requires:** Rust 1.85+
+> **Latest release:** [`2.0.0-alpha.18`](https://github.com/cqels/CQELS-RS/releases/tag/v2.0.0-alpha.18) · **License:** MIT · **Requires:** Rust 1.85+
 >
 > **New here?** Start with [GETTING_STARTED.md](GETTING_STARTED.md) · **Runnable examples:** [examples/](examples/)
 
@@ -36,10 +36,10 @@ Add the crates for the release you are targeting:
 
 ```toml
 [dependencies]
-cqels-model = "2.0.0-alpha.16"
-cqels-core = "2.0.0-alpha.16"
-cqels-engine = "2.0.0-alpha.16"
-cqels-reasoning = "2.0.0-alpha.16"
+cqels-model = "2.0.0-alpha.18"
+cqels-core = "2.0.0-alpha.18"
+cqels-engine = "2.0.0-alpha.18"
+cqels-reasoning = "2.0.0-alpha.18"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 ```
