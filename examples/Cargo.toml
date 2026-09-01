@@ -1,15 +1,15 @@
 [package]
 name = "cqels-rs-examples"
-version = "2.0.0-alpha.18"
+version = "2.0.0-alpha.20"
 edition = "2021"
 publish = false
 
 [workspace]
 
 [dependencies]
-cqels-core = "2.0.0-alpha.18"
-cqels-model = "2.0.0-alpha.18"
-cqels-reasoning = "2.0.0-alpha.18"
+cqels-core = "2.0.0-alpha.20"
+cqels-model = "2.0.0-alpha.20"
+cqels-reasoning = "2.0.0-alpha.20"
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
