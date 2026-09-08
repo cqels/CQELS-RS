@@ -78,4 +78,8 @@ python3 examples/mcp_fleet.py --java-jar cqels-mcp-2.0.0-alpha.20-shaded.jar --r
 
 The driver launches Java with the required module-opening argument. It verifies
 server versions and the full discovery contract before checking the scenarios.
+The Java reference launcher has a startup race: sending `initialize` before its
+startup-completion log can lose the response with a "Failed to enqueue message"
+error. The driver waits for that log before negotiation, then checks engine
+readiness on both servers. Keep the reference jar's default startup logging.
 Reports distinguish passing scenarios from reproduced known differences.

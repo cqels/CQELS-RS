@@ -58,6 +58,18 @@ class Rpc:
         self.process.stdin.write(json.dumps(message) + "\n")
         self.process.stdin.flush()
 
+    def wait_for_java_launcher(self):
+        # The pinned Java stdio transport can accept stdin before its output
+        # queue is subscribed. Sending initialize then can lose its response.
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            if any("CQELS MCP server is running." in line for line in self.stderr):
+                return
+            if self.process.poll() is not None:
+                raise RuntimeError(f"Java exited before launcher readiness: {self.stderr}")
+            time.sleep(0.05)
+        raise TimeoutError(f"Java launcher did not report readiness: {self.stderr}")
+
     def request(self, method, params=None):
         self.sequence += 1
         self.send({"jsonrpc": "2.0", "id": self.sequence, "method": method,
@@ -251,6 +263,8 @@ def main():
         for name in selected:
             rpc = Rpc(command)
             try:
+                if engine == "java":
+                    rpc.wait_for_java_launcher()
                 init = rpc.initialize()
                 if init["serverInfo"]["version"] != pin["version"]:
                     raise AssertionError(f"release version mismatch: {init['serverInfo']}")
