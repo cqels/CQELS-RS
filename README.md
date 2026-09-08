@@ -61,10 +61,7 @@ assert_eq!(definition.streams.len(), 1);
 ```
 
 This repository is the public artifact proxy. It intentionally does not contain
-the engine workspace or implementation source. Development, source review,
-design records, agent configuration, issues, and pull requests are maintained
-in the private [HiveIntel/cqels-rs](https://github.com/HiveIntel/cqels-rs)
-repository.
+the engine workspace or implementation source. 
 
 ## Distribution
 
@@ -98,8 +95,7 @@ selection guidance.
 This repository contains the public distribution surface only: specifications,
 examples, release metadata, checksums, and launcher guidance. The Rust engine
 workspace, source review, design records, agent configuration, issues, pull
-requests, and release build workflow remain in the private
-[HiveIntel/cqels-rs](https://github.com/HiveIntel/cqels-rs) repository.
+requests.
 
 ## License
 
