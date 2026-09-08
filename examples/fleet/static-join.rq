@@ -1,0 +1,6 @@
+PREFIX sosa: <http://www.w3.org/ns/sosa/>
+PREFIX fleet: <https://covesa.global/fleet#>
+SELECT ?vehicle ?depot FROM STREAM Enrich [NOW]
+WHERE { STREAM Enrich { ?obs sosa:hasFeatureOfInterest ?vehicle }
+  ?vehicle fleet:depot ?depot
+}

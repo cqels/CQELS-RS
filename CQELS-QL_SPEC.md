@@ -1,76 +1,71 @@
-# CQELS-QL Specification
+# CQELS-QL reference for the Rust distribution
 
-**CQELS-RS release:** 2.0.0-alpha.20
+Release: **2.0.0-alpha.20**. CQELS-QL combines SPARQL-style graph patterns with
+continuous stream sources and windows. This compact reference describes the
+measured public examples. The complete server-advertised syntax is available
+through `resources/read` at `cqels://docs/cqelsql` and `cqels://docs/cep`.
+Read [COMPATIBILITY.md](COMPATIBILITY.md): accepted syntax is not proof of correct
+execution, and the runtime's broad syntax descriptions include known gaps.
 
-CQELS-QL extends SPARQL-style graph patterns with continuous stream sources
-and window semantics. This document is the compact distribution reference.
+## Sources, patterns, and filters
 
-## Query shape
+Create the stream before registration. [low-battery.rq](examples/fleet/low-battery.rq)
+uses `FROM STREAM Telemetry [NOW]`, an explicit `STREAM Telemetry { ... }` block,
+and `FILTER(?soc < 20)`. Variables `?obs` and `?soc` bind each observation and its
+numeric value. Prefixes expand to RDF IRIs; send typed numeric literals through
+N-Quads rather than relying on string-to-number coercion.
 
-```text
-[PREFIX prefix: <iri>]*
-[REGISTER QUERY name AS]
-SELECT [DISTINCT] select_items
-FROM STREAM stream_name [window]
-[FROM STATIC <graph-iri>]
-WHERE { triple_patterns [FILTER(expression)] }
-[GROUP BY variables]
-[HAVING(expression)]
-[ORDER BY variable [ASC|DESC]]*
-[LIMIT number]
-```
+## Windows and event time
 
-`FILTER NOT EXISTS { ... }` is supported as a correlated anti-join. Its
-patterns are evaluated against the complete pre-projection solution, so a
-correlation variable does not need to appear in `SELECT`.
+`push_stream_events` carries explicit epoch-millisecond or ISO-instant event
+times. An event groups its statements atomically. The tested `[NOW]` filter
+matches incoming observations. `[RANGE 30s]` bounds the tested CEP sequence.
+The grouped `[RANGE 3s]` aggregate in [aggregation.rq](examples/fleet/aggregation.rq)
+returns no Rust rows on the probe input even though it registers successfully.
 
-## Windows
+The server advertises count, sliding, and directional windows as well. Their
+complete semantics depend on the query route. This public suite does not verify
+all such shapes and does not label every RANGE window as universally tumbling
+or rolling. Consult the server syntax resource and test your actual query.
 
-| Syntax | Meaning |
-| --- | --- |
-| `[NOW]` | Evaluate each incoming observation immediately. |
-| `[RANGE 10s]` | Tumbling event-time window. |
-| `[RANGE 30s STEP 10s]` | Overlapping sliding window. |
-| `[TRIPLES 100]` | Count-based window. |
+## Joins and aggregation
 
-`FROM STREAM` may be declared twice for the alpha.20 two-stream interval-join
-route. Each `STREAM` block is a natural-join side; multiple triple patterns in
-one block are conjoined within that side's declared window. Shared variables
-on both sides must agree, and the interval endpoints are inclusive. Per-side
-interval retention is bounded by `CQELS_JOIN_INTERVAL_BUFFER_CAP` (default
-100000); an exceeded bound fails loudly rather than silently losing rows.
+[static-join.rq](examples/fleet/static-join.rq) combines a stream observation with
+stored depot data. The probe seeds data before registering; Java emits a lookup
+row but this Rust artifact emits none. [aggregation.rq](examples/fleet/aggregation.rq)
+uses three conjoined observation patterns, AVG, MAX, COUNT, and GROUP BY vehicle;
+Java emits three running aggregate rows, while this Rust artifact emits none.
+Both limitations have executable expectations. Neither probe proves the status
+of every possible join or aggregate variant.
 
-The `sameTerm(A, B)` expression function compares RDF term identity, including
-datatype and language tag, without numeric promotion. An unbound argument is
-a type error.
+## Complex Event Processing
 
-Durations support `ms`, `s`, `m`, `h`, and `d`.
+[cep.rq](examples/fleet/cep.rq) uses `FILTER(SEQ(?e1 ; ?e2))` to detect a speed
+drop followed by a speed spike. Register with `cep: true`, then send the two
+single-triple event observations in order. The result carries `start`, `end`,
+and event details. Reversing their order must produce no match, as checked by
+[cep-reversed.rq](examples/fleet/cep-reversed.rq) with reversed input.
+Quantifiers, negation, and multi-triple event patterns need separate validation;
+they are not implied by this two-event example.
 
-## Example
+## Reasoning
 
-```sparql
-PREFIX ex: <http://example.org/>
+The RDFS demo stores an EV-to-Vehicle subclass edge in `cqels://memory/schema`,
+an EV instance in `cqels://memory/longterm`, and calls `reason` with `RDFS_FULL`.
+It verifies the inferred Vehicle type. This one-shot materialization example
+does not claim support-time retraction or arbitrary Delta/ASP program parity.
 
-SELECT ?sensor ?temperature
-FROM STREAM sensors [RANGE 10s]
-WHERE {
-  ?sensor ex:temperature ?temperature .
-  FILTER(?temperature > 30)
-}
-ORDER BY ?temperature DESC
-LIMIT 5
-```
+## CypherQL and other SPARQL constructs
 
-## CypherQL
+CypherQL is the server's reduced streaming MATCH/RETURN graph dialect, not full
+openCypher. The MCP descriptors and syntax resources advertise additional
+SPARQL-style operators. Use `validate_stream_query` for registration diagnostics,
+then assert the emitted results for your input. Java-only limitations and
+workarounds should not be assumed to apply to Rust without evidence.
 
-The distribution also supports a Cypher-style graph syntax:
+## Executable specification
 
-```cypher
-FROM STREAM social [NOW]
-MATCH (person:Person)-[:FOLLOWS]->(friend:Person)
-WHERE person.age > 18
-RETURN person.name, friend.name
-```
-
-For CEP, use the Rust API or the released MCP server to register sequence
-patterns with `FILTER(SEQ(...))` semantics.
+Run `python3 examples/mcp_fleet.py --server .cqels/bin/cqels-mcp` to check all
+linked query files against the release. The driver fails on unexpected rows or
+a changed known limitation; reports preserve the distinction between working
+scenarios and reproduced differences.

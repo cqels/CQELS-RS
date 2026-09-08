@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0-alpha.20",
+  "source_revision": "a76244c51456ecc20252d718ca8f26b39a05c756",
+  "public_repository": "cqels/CQELS-RS",
+  "java_reference": {
+    "version": "2.0.0-alpha.20",
+    "url": "https://github.com/cqels/CQELS4J/releases/download/v2.0.0-alpha.20/cqels-mcp-2.0.0-alpha.20-shaded.jar",
+    "sha256": "ff05c860775a6734d47b09a8e8c102fca4156c4955a67022992b572e5a52dab2"
+  },
+  "archives": {
+    "aarch64-apple-darwin": {
+      "filename": "cqels-mcp-2.0.0-alpha.20-aarch64-apple-darwin.tar.gz",
+      "sha256": "919b9f3744c43d668b9a2b044d23a66b339dacb5f9a4b48da69e635954fcbde9"
+    },
+    "x86_64-apple-darwin": {
+      "filename": "cqels-mcp-2.0.0-alpha.20-x86_64-apple-darwin.tar.gz",
+      "sha256": "9a2849405f0cc873c71649ca84eb2df6544024889999dd722fc81f95dce3daa5"
+    },
+    "x86_64-pc-windows-msvc": {
+      "filename": "cqels-mcp-2.0.0-alpha.20-x86_64-pc-windows-msvc.zip",
+      "sha256": "ce9e5816556a7c98b960ee1930f364b72cee763a554e249517302ad3c1f3b8f9"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "filename": "cqels-mcp-2.0.0-alpha.20-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "2db7bfade5a511e9fc5eda56f2dfc56004d6a11984b6b0b1dc4677c8b20821ef"
+    }
+  }
+}

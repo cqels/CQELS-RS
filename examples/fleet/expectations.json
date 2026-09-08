@@ -1,0 +1,103 @@
+{
+  "low-battery": {
+    "stream": "Telemetry",
+    "java_demo": "HelloCqels",
+    "rust": [
+      {
+        "obs": "https://example.org/fleet/obs/2",
+        "soc": 18.5
+      },
+      {
+        "obs": "https://example.org/fleet/obs/4",
+        "soc": 12.0
+      }
+    ],
+    "java": [
+      {
+        "obs": "https://example.org/fleet/obs/2",
+        "soc": 18.5
+      },
+      {
+        "obs": "https://example.org/fleet/obs/4",
+        "soc": 12.0
+      }
+    ]
+  },
+  "aggregation": {
+    "stream": "Telemetry",
+    "java_demo": "WindowedAggregation",
+    "difference": true,
+    "rust": [],
+    "java": [
+      {
+        "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
+        "avgSpeed": 60.0,
+        "peak": 60.0,
+        "n": 1
+      },
+      {
+        "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
+        "avgSpeed": 70.0,
+        "peak": 80.0,
+        "n": 2
+      },
+      {
+        "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
+        "avgSpeed": 60.0,
+        "peak": 80.0,
+        "n": 2
+      }
+    ]
+  },
+  "static-join": {
+    "stream": "Enrich",
+    "java_demo": "StreamStaticJoin",
+    "difference": true,
+    "rust": [],
+    "java": [
+      {
+        "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
+        "depot": "https://example.org/fleet/depot/north"
+      }
+    ]
+  },
+  "cep": {
+    "stream": "Events",
+    "java_demo": "ComplexEventPattern",
+    "rust": [
+      {
+        "start": 1000,
+        "end": 2000
+      }
+    ],
+    "java": [
+      {
+        "start": 1000,
+        "end": 2000
+      }
+    ]
+  },
+  "cep-reversed": {
+    "stream": "Events",
+    "java_demo": "ComplexEventPattern (negative control)",
+    "rust": [],
+    "java": []
+  },
+  "rdfs": {
+    "java_demo": "RdfsReasoning",
+    "rust": [
+      {
+        "subject": "https://example.org/fleet/vehicle/EV-7Q2",
+        "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "object": "https://example.org/fleet/Vehicle"
+      }
+    ],
+    "java": [
+      {
+        "subject": "https://example.org/fleet/vehicle/EV-7Q2",
+        "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "object": "https://example.org/fleet/Vehicle"
+      }
+    ]
+  }
+}

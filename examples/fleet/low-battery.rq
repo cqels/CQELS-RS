@@ -1,0 +1,3 @@
+PREFIX sosa: <http://www.w3.org/ns/sosa/>
+SELECT ?obs ?soc FROM STREAM Telemetry [NOW]
+WHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20) }
