@@ -61,7 +61,7 @@ assert_eq!(definition.streams.len(), 1);
 ```
 
 This repository is the public artifact proxy. It intentionally does not contain
-the engine workspace or implementation source. 
+the engine workspace or implementation source.
 
 ## Distribution
 
@@ -93,9 +93,7 @@ selection guidance.
 ## Public boundary
 
 This repository contains the public distribution surface only: specifications,
-examples, release metadata, checksums, and launcher guidance. The Rust engine
-workspace, source review, design records, agent configuration, issues, pull
-requests.
+examples, release metadata, checksums, and launcher guidance.
 
 ## License
 

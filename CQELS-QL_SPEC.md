@@ -3,8 +3,7 @@
 **CQELS-RS release:** 2.0.0-alpha.20
 
 CQELS-QL extends SPARQL-style graph patterns with continuous stream sources
-and window semantics. This document is the compact distribution reference;
-implementation details remain private to the canonical development repository.
+and window semantics. This document is the compact distribution reference.
 
 ## Query shape
 

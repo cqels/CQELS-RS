@@ -54,7 +54,7 @@ The release notes identify the compatible CQELS-RS and MCP protocol version.
 
 The alpha.20 server also supports opt-in Streamable HTTP through the
 `CQELS_MCP_TRANSPORT=http` environment setting. See the release compatibility
-guide in the private development repository for the full deployment surface.
+guide in [mcp-server/README.md](mcp-server/README.md) for server setup.
 
 ## Examples
 
@@ -66,9 +66,5 @@ cargo run --manifest-path examples/Cargo.toml
 
 ## Source and development
 
-The public repository is intentionally artifact-only. The implementation source
-and engineering workflow are maintained privately in
-[HiveIntel/cqels-rs](https://github.com/HiveIntel/cqels-rs).
-
-The public repository is intentionally not a source checkout and should not be
-used as the development workspace.
+This repository distributes documentation, examples, and release artifacts.
+It does not contain the engine implementation workspace.

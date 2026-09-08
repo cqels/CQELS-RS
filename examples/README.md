@@ -31,5 +31,4 @@ cargo run --manifest-path examples/Cargo.toml --bin reasoning
 | `cep` | Declarative `SEQ` syntax and CEP query registration |
 | `reasoning` | RDFS subclass/type entailment with the RETE profile |
 
-The examples are intentionally small and API-focused. Full engine source,
-benchmarks, profiling studies, and parity fixtures remain private.
+The examples are intentionally small and API-focused.

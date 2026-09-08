@@ -20,7 +20,7 @@ and readiness settings with the `CQELS_MCP_HTTP_*` environment variables.
 
 The alpha.20 server exposes CQELS-QL stream queries, CEP, reasoning, SHACL,
 memory, prompts, resources, durable operator state, and stream lifecycle
-operations. Its wire compatibility boundary is documented by the release
-notes and the Java parity reports in the private development repository.
+operations. See the [release notes](https://github.com/cqels/CQELS-RS/releases)
+for release-specific information.
 
 The server implementation is not mirrored in this public repository.

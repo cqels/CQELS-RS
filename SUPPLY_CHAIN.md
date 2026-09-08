@@ -1,8 +1,7 @@
 # Release Verification
 
 The current release line is `2.0.0-alpha.20`. Release archives are published
-from the reviewed private Rust source and mirrored here as distribution
-artifacts only.
+here as distribution artifacts.
 
 CQELS-RS release archives are published with a SHA-256 checksum beside each
 archive. Verify an archive before extracting it:
@@ -16,6 +15,5 @@ archive, and the filename in the checksum entry must match the downloaded
 file. Release notes identify the target triple and compatible CQELS-RS
 version.
 
-The private HiveIntel repository contains the build, Java parity, and
-validation workflow; this public repository contains only the resulting
-distribution metadata and release-facing verification instructions.
+This repository contains distribution metadata and release verification
+instructions.
