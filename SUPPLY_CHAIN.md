@@ -2,7 +2,8 @@
 
 Current release: **2.0.0-alpha.20**. Each platform archive has an adjacent
 SHA-256 checksum file. [RELEASE.json](RELEASE.json) independently pins the expected
-archive digests used by the public installer and CI.
+archive digests used by the public installer and the separately maintained
+release-validation pipeline.
 
 ## Recommended installation
 

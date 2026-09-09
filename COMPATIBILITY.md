@@ -93,4 +93,11 @@ The Java reference launcher has a startup race: sending `initialize` before its
 startup-completion log can lose the response with a "Failed to enqueue message"
 error. The driver waits for that log before negotiation, then checks engine
 readiness on both servers. Keep the reference jar's default startup logging.
-Reports distinguish passing scenarios from reproduced known differences.
+Reports retain raw rows and normalized comparison rows separately, including
+controls for failed scenarios. They distinguish passing scenarios from reproduced
+known differences.
+
+The Java reference can also intermittently fail to enqueue a response after
+startup, during a tool call. Waiting for the launcher does not eliminate this
+separate transport failure. The driver reports the timeout and fails the run;
+it does not retry the operation into a passing result.

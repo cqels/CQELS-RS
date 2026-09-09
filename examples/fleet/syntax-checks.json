@@ -1,0 +1,70 @@
+{
+  "version": "2.0.0-alpha.20",
+  "engine": "Rust public aarch64-apple-darwin archive",
+  "scope": "parser validation only; not execution guarantees",
+  "checks": {
+    "register-query": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nREGISTER QUERY LowBattery AS\nSELECT ?obs ?soc FROM STREAM Telemetry [NOW]\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20) }\n",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    },
+    "from-static": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nSELECT ?obs ?soc FROM STREAM Telemetry [NOW]\nFROM STATIC <https://example.org/fleet/graph>\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20) }\n",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    },
+    "same-term": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nSELECT ?obs ?soc FROM STREAM Telemetry [NOW]\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(sameTerm(?soc, ?soc)) }\n",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    },
+    "not-exists": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nSELECT ?obs ?soc FROM STREAM Telemetry [NOW]\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20)  FILTER NOT EXISTS { ?obs <https://example.org/fleet/missing> ?x } }",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    },
+    "duration-ms": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nSELECT ?obs ?soc FROM STREAM Telemetry [RANGE 10ms]\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20) }\n",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    },
+    "duration-s": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nSELECT ?obs ?soc FROM STREAM Telemetry [RANGE 10s]\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20) }\n",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    },
+    "duration-m": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nSELECT ?obs ?soc FROM STREAM Telemetry [RANGE 10m]\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20) }\n",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    },
+    "duration-h": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nSELECT ?obs ?soc FROM STREAM Telemetry [RANGE 10h]\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20) }\n",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    },
+    "duration-d": {
+      "query": "PREFIX sosa: <http://www.w3.org/ns/sosa/>\nSELECT ?obs ?soc FROM STREAM Telemetry [RANGE 10d]\nWHERE { STREAM Telemetry { ?obs sosa:hasSimpleResult ?soc } FILTER(?soc < 20) }\n",
+      "result": {
+        "language": "cqelsql",
+        "valid": true
+      }
+    }
+  }
+}

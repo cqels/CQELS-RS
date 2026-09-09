@@ -216,7 +216,7 @@ def run_scenario(rpc, name, controls=None):
     stream = fixture["stream"]
     if name == "static-join":
         rpc.tool("store_memory", turtle=f"<{EX}vehicle/EV-7Q2> <{FLEET}depot> <{EX}depot/north> .")
-        stored = rpc.tool("query", query=f"SELECT ?vehicle ?depot WHERE {{ GRAPH <cqels://memory/longterm> {{ ?vehicle <{FLEET}depot> ?depot }} }}")
+        stored = rpc.tool("query", query=f"SELECT ?vehicle ?depot WHERE {{ GRAPH <cqels://memory/longterm> {{ ?vehicle <{FLEET}depot> ?depot }} }}", waitMs=1000)
         expected = [{"vehicle": EX + "vehicle/EV-7Q2", "depot": EX + "depot/north"}]
         if stored != expected:
             raise AssertionError(f"static seed readback mismatch: {stored}")
@@ -248,6 +248,7 @@ def run_scenario(rpc, name, controls=None):
             raise AssertionError(f"observation was not accepted exactly once: {response}")
         controls.setdefault("push_acks", []).append(ack)
     rows = rpc.drain(name)
+    controls["query_rows"] = rows
     rpc.tool("forget_stream_query", queryId=name)
     if name.startswith("cep"):
         # Keep the event identities as well as the timing, to catch matches of
@@ -268,7 +269,10 @@ def canonical_rows(rows, name=None):
     rows = [dict(row) for row in rows]
     for row in rows:
         for key in numeric:
-            row[key] = float(row[key])
+            try:
+                row[key] = float(row[key])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise AssertionError(f"{name}: malformed numeric column {key} in row {row}") from exc
     return sorted(rows, key=lambda row: json.dumps(row, sort_keys=True))
 
 
@@ -301,7 +305,7 @@ def main():
             verify_java_jar(args.java_jar, pin["java_reference"])
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
-    expected_surface = json.loads((HERE.parent / "mcp-server" / "contract.json").read_text(encoding="utf-8"))
+    expected_surface = normalize_schema(json.loads((HERE.parent / "mcp-server" / "contract.json").read_text(encoding="utf-8")))
     fixtures = json.loads((HERE / "fleet" / "expectations.json").read_text(encoding="utf-8"))
     selected = list(fixtures) if args.scenario == "all" else [args.scenario]
     if any(name not in fixtures for name in selected):
@@ -309,6 +313,8 @@ def main():
     report = {"engine": engine, "version": version, "discovery": "not checked", "scenarios": {}}
     try:
         for name in selected:
+            controls = {}
+            report["scenarios"][name] = {"status": "running", "controls": controls}
             rpc = Rpc(command)
             try:
                 if engine == "java":
@@ -320,13 +326,15 @@ def main():
                     if surface(rpc) != expected_surface:
                         raise AssertionError("MCP descriptor drift: update the public contract and guide together")
                     report["discovery"] = "pass"
-                controls = {}
-                rows = canonical_rows(run_scenario(rpc, name, controls), name)
+                observed = run_scenario(rpc, name, controls)
+                report["scenarios"][name]["rows"] = observed
+                rows = canonical_rows(observed, name)
+                report["scenarios"][name]["normalized"] = rows
                 expected = fixtures[name][engine]
                 if rows != canonical_rows(expected, name):
                     raise AssertionError(f"{name}: expected {expected}, received {rows}")
                 status = "known difference" if fixtures[name].get("difference") else "pass"
-                report["scenarios"][name] = {"status": status, "rows": rows, "controls": controls}
+                report["scenarios"][name]["status"] = status
                 print(f"{name}: {status.upper()} {json.dumps(rows, sort_keys=True)}", flush=True)
             finally:
                 rpc.close()
@@ -334,6 +342,7 @@ def main():
                 raise AssertionError(f"non-JSON protocol stdout: {rpc.contamination}")
     except Exception as exc:
         report["error"] = str(exc)
+        report["scenarios"][name].update(status="fail", error=str(exc))
         raise
     finally:
         if args.report:

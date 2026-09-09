@@ -36,8 +36,12 @@ WHERE { graph_patterns [FILTER(expression)] }
 | `[FUTURE 10s]` | Directional window; consult the server resource for emission options |
 | `[RANGE 10s LATENESS 2s]` | Allowed lateness on supported routes |
 
-Duration units include `ms`, `s`, `m`, `h`, and `d`. These forms are advertised
-by the release descriptors; only the concrete linked fixtures have execution
+Duration units include `ms`, `s`, `m`, `h`, and `d`. The window table follows the
+release descriptors. Parser-only checks of the declaration, static-graph,
+`sameTerm`, `FILTER NOT EXISTS`, and duration forms are recorded in
+[syntax-checks.json](examples/fleet/syntax-checks.json) for the Rust alpha.20
+artifact. The fleet static-join fixture uses a plain BGP outside STREAM, rather
+than FROM STATIC. Only the concrete linked fleet fixtures have execution
 assertions in this public suite. A parser accepting a form does not establish
 its retention, emission cadence, or late-event behavior for your query shape.
 

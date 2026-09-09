@@ -15,7 +15,7 @@ repository. No Rust toolchain or Java runtime is needed to run the Rust binary.
 | Windows, x86-64 | x86_64-pc-windows-msvc | zip |
 
 There is no Linux ARM or musl archive in this release. The Linux archive is
-validated in CI on Ubuntu 24.04; compatibility with older glibc is not established.
+validated on Ubuntu 24.04 by the separately maintained release pipeline; compatibility with older glibc is not established.
 The installer rejects unsupported platforms rather than selecting another CPU.
 
 ## 2. Download and verify

@@ -131,6 +131,53 @@ class FleetControls(unittest.TestCase):
         actual = [{k: str(v) for k, v in row.items()} for row in reversed(expected)]
         self.assertEqual(fleet.canonical_rows(actual, "aggregation"), fleet.canonical_rows(expected, "aggregation"))
 
+    def capture_fake_report(self, observed, expected, fail_during_push=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            here = root / "examples"
+            (here / "fleet").mkdir(parents=True)
+            (root / "mcp-server").mkdir()
+            server = root / "server"
+            server.write_bytes(b"fake")
+            (root / "RELEASE.json").write_text('{"version":"test"}', encoding="utf-8")
+            (root / "mcp-server/contract.json").write_text('{}', encoding="utf-8")
+            (here / "fleet/expectations.json").write_text(json.dumps({"low-battery": {"rust": expected}}), encoding="utf-8")
+            report = root / "report.json"
+            rpc = Mock(contamination=[])
+            rpc.initialize.return_value = {"serverInfo": {"version": "test"}}
+            def scenario(rpc, name, controls):
+                controls["push_acks"] = [{"accepted": 1}]
+                if fail_during_push:
+                    raise AssertionError("later push failed")
+                return observed
+            with patch.object(fleet, "HERE", here), patch.object(fleet, "Rpc", return_value=rpc), \
+                 patch.object(fleet, "surface", return_value={}), patch.object(fleet, "run_scenario", side_effect=scenario), \
+                 patch("sys.argv", ["fleet", "--server", str(server), "--report", str(report)]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    fleet.main()
+                except AssertionError:
+                    pass
+            return json.loads(report.read_text(encoding="utf-8"))["scenarios"]["low-battery"]
+
+    def test_report_preserves_raw_numeric_strings(self):
+        entry = self.capture_fake_report([{"soc": "18.5"}], [{"soc": 18.5}])
+        self.assertEqual(entry["status"], "pass")
+        self.assertEqual(entry["rows"], [{"soc": "18.5"}])
+        self.assertEqual(entry["normalized"], [{"soc": 18.5}])
+
+    def test_mismatch_report_preserves_observations_and_controls(self):
+        entry = self.capture_fake_report([{"soc": "12"}], [{"soc": 18.5}])
+        self.assertEqual(entry["status"], "fail")
+        self.assertEqual(entry["rows"], [{"soc": "12"}])
+        self.assertEqual(entry["controls"]["push_acks"], [{"accepted": 1}])
+
+    def test_partial_failure_report_preserves_controls(self):
+        entry = self.capture_fake_report([], [], fail_during_push=True)
+        self.assertEqual(entry["status"], "fail")
+        self.assertIn("later push failed", entry["error"])
+        self.assertEqual(entry["controls"]["push_acks"], [{"accepted": 1}])
+
 
 if __name__ == "__main__":
     unittest.main()
