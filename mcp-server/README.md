@@ -165,6 +165,7 @@ status and readiness resources to inspect the actual configured process.
 ## Compatibility and evidence
 
 The release-specific public probes cover discovery, the fleet scenarios, and
-known differences. Publication CI additionally runs the pinned Java/Rust HTTP
-and persistence comparison suites. See [COMPATIBILITY.md](../COMPATIBILITY.md)
+known differences. The release-validation pipeline, maintained separately from this distribution
+repository, additionally runs the pinned Java/Rust HTTP and persistence
+comparison suites. See [COMPATIBILITY.md](../COMPATIBILITY.md)
 for the scope: matching wire schemas does not imply complete Java engine parity.

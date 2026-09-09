@@ -1,6 +1,0 @@
-PREFIX fleet: <https://covesa.global/fleet#>
-SELECT ?e1 FROM STREAM Events [RANGE 30s]
-WHERE { ?e1 fleet:event fleet:SpeedDropEvent .
-  ?e2 fleet:event fleet:SpeedSpikeEvent .
-  FILTER(SEQ(?e1 ; ?e2))
-}

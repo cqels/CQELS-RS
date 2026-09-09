@@ -60,3 +60,16 @@ behavioral parity.
 crates are not available on crates.io, so these files are **not currently runnable
 from a clean public checkout**. Do not use them as installation instructions.
 The MCP examples above consume only public release artifacts.
+
+## Test the driver controls
+
+These tests use synthetic responses and files; they need no server or account:
+
+```bash
+python3 -m unittest discover -s examples -p 'test_*.py'
+python3 -m unittest discover -s mcp-server -p 'test_*.py'
+```
+
+The live reports also record each accepted-observation acknowledgement, the
+static seed readback, and the CEP events encoding. These controls distinguish
+accepted input from successful query execution.

@@ -7,6 +7,48 @@ through `resources/read` at `cqels://docs/cqelsql` and `cqels://docs/cep`.
 Read [COMPATIBILITY.md](COMPATIBILITY.md): accepted syntax is not proof of correct
 execution, and the runtime's broad syntax descriptions include known gaps.
 
+## Query shape and advertised syntax
+
+The following is a compact syntax map, not a claim that every combination
+executes correctly in this release. The measured limitations below still apply.
+
+```text
+[PREFIX prefix: <iri>]*
+[REGISTER QUERY name AS]
+SELECT [DISTINCT] select_items
+FROM STREAM stream_name [window]
+[FROM STREAM second_stream [window]]
+[FROM STATIC <graph-iri>]
+WHERE { graph_patterns [FILTER(expression)] }
+[GROUP BY variables]
+[HAVING(expression)]
+[ORDER BY expressions]
+[LIMIT number]
+```
+
+| Window form | Syntax intent |
+| --- | --- |
+| `[NOW]` | Current observation |
+| `[RANGE 10s]` | Time extent; evaluation/closure depends on the route |
+| `[RANGE 30s STEP 10s]` | Time extent with a step |
+| `[SLIDE 30s STEP 10s]` | Sliding-window form |
+| `[TRIPLES 100]` | Count of observations, not individual statements |
+| `[FUTURE 10s]` | Directional window; consult the server resource for emission options |
+| `[RANGE 10s LATENESS 2s]` | Allowed lateness on supported routes |
+
+Duration units include `ms`, `s`, `m`, `h`, and `d`. These forms are advertised
+by the release descriptors; only the concrete linked fixtures have execution
+assertions in this public suite. A parser accepting a form does not establish
+its retention, emission cadence, or late-event behavior for your query shape.
+
+`FILTER NOT EXISTS { ... }` expresses a correlated anti-join; `sameTerm(A, B)`
+expresses RDF term identity rather than numeric equality. Two `FROM STREAM`
+clauses describe a two-source join. This compact reference preserves those
+language entry points without asserting that all operator combinations or
+interval-join retention paths have been verified by the fleet probes. Use the
+server syntax resources for detailed constraints and test emitted rows for
+these forms before relying on them.
+
 ## Sources, patterns, and filters
 
 Create the stream before registration. [low-battery.rq](examples/fleet/low-battery.rq)
@@ -44,7 +86,7 @@ of every possible join or aggregate variant.
 drop followed by a speed spike. Register with `cep: true`, then send the two
 single-triple event observations in order. The result carries `start`, `end`,
 and event details. Reversing their order must produce no match, as checked by
-[cep-reversed.rq](examples/fleet/cep-reversed.rq) with reversed input.
+the same [cep.rq](examples/fleet/cep.rq) with reversed input.
 Quantifiers, negation, and multi-triple event patterns need separate validation;
 they are not implied by this two-event example.
 

@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import platform
 import tarfile
+import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -25,6 +27,8 @@ def host_target():
     architecture = {"arm64": "aarch64", "amd64": "x86_64"}.get(machine, machine)
     suffix = {"Darwin": "apple-darwin", "Linux": "unknown-linux-gnu",
               "Windows": "pc-windows-msvc"}.get(platform.system())
+    if suffix is None:
+        raise ValueError(f"unsupported operating system: {platform.system()}")
     return f"{architecture}-{suffix}"
 
 
@@ -33,7 +37,7 @@ def verify_archive(data, checksum, filename, expected):
     fields = checksum.decode("utf-8-sig").strip().split()
     if len(fields) != 2 or fields[1].lstrip("*") != filename:
         raise ValueError("checksum must identify exactly the downloaded archive")
-    if fields[0] != expected or actual != expected:
+    if fields[0].lower() != expected.lower() or actual != expected.lower():
         raise ValueError(f"SHA-256 mismatch for {filename}: expected {expected}, received {actual}")
 
 
@@ -68,9 +72,11 @@ def install(target, destination, pin=None):
     name, payload = executable_bytes(archive, filename)
     destination.mkdir(parents=True, exist_ok=True)
     output = destination / name
-    temporary = destination / (name + ".partial")
+    fd, temporary_name = tempfile.mkstemp(prefix=name + ".", suffix=".partial", dir=destination)
+    temporary = Path(temporary_name)
     try:
-        temporary.write_bytes(payload)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
         temporary.chmod(0o755)
         os.replace(temporary, output)
     finally:
@@ -81,7 +87,10 @@ def install(target, destination, pin=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", default=host_target())
+    parser.add_argument("--target", help="override the detected platform target")
     parser.add_argument("--output", type=Path, default=Path(".cqels/bin"))
     args = parser.parse_args()
-    print(f"Verified and installed: {install(args.target, args.output)}")
+    try:
+        print(f"Verified and installed: {install(args.target or host_target(), args.output)}")
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        parser.exit(1, f"Installation failed: {exc}\n")

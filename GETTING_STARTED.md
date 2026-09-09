@@ -29,7 +29,8 @@ python3 mcp-server/install.py
 Expected: `Verified and installed: .cqels/bin/cqels-mcp` (Windows: `cqels-mcp.exe`).
 The installer downloads the archive and its checksum anonymously, verifies both
 against `RELEASE.json`, and extracts only the executable. It replaces an existing
-executable at that destination after successful verification.
+executable at that destination after successful verification. Stop a running
+Windows server before replacing its executable.
 
 For manual installation, select the exact archive and adjacent `.sha256` file
 from the [release page](https://github.com/cqels/CQELS-RS/releases/tag/v2.0.0-alpha.20).
@@ -42,7 +43,7 @@ python3 examples/mcp_fleet.py --server .cqels/bin/cqels-mcp --scenario low-batte
 python3 examples/mcp_fleet.py --server .cqels/bin/cqels-mcp --report results.json
 ```
 
-The first command prints two low-battery alerts. The second runs six probes:
+The first command prints one line containing two low-battery alert rows. The second runs six probes:
 low battery, aggregation, static lookup, CEP, reversed CEP, and RDFS inference.
 It reports two `KNOWN DIFFERENCE` results, explained in
 [COMPATIBILITY.md](COMPATIBILITY.md). A mismatch or protocol error exits nonzero.
@@ -75,8 +76,8 @@ battery percentage, with `[NOW]` and `FILTER(?soc < 20)`. The runnable driver:
 See the [release-specific compatibility table](COMPATIBILITY.md). Most notably,
 matching MCP descriptors do not imply identical query behavior. The documented
 aggregate and static lookup probes register successfully but return no Rust rows.
-Do not debug those fixtures as missing input data or treat registration as proof
-of support. The native Rust example source files require unavailable crates and
+The probes verify push acknowledgements and read back the static seed. Treat
+registration and ingestion as separate checks from query execution. The native Rust example source files require unavailable crates and
 are retained as API illustrations only.
 
 ## 7. Where to go next

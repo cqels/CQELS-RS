@@ -33,13 +33,22 @@ specific subclass consequence independently of unrelated axiomatic triples.
 | cep-reversed | No matches | No matches | Reversed order is a negative control |
 | rdfs | EV-7Q2 inferred as Vehicle | Same consequence | Schema-driven subclass inference works with RDFS_FULL |
 
-Empty results are observed across a 1.5-second drain interval after all pushes.
+Every push must acknowledge exactly one accepted observation, and the static
+seed is read back from its named graph before registration. Reports retain these
+controls alongside the query rows. They prove that inputs were accepted and the
+seed was stored; they do not prove the streaming engine has wired the background
+graph into its lookup route. Empty results are observed across a 1.5-second drain
+interval after all pushes.
 The probes assert both the working behavior and the known differences. If a later
 release fixes a limitation, the old expectation fails so the documentation must
 change. Inputs, queries, and expected rows are in [examples/fleet/](examples/fleet/).
 These bounded probes do not prove that every aggregate or static query fails, nor
 that every other query form succeeds. There is currently no verified Rust
 workaround for the two listed query routes.
+
+The release descriptors describe CEP `events` as an array, but both tested
+artifacts actually return a human-readable string. The probe records this
+encoding and validates the event subjects in addition to the match timestamps.
 
 ## Query shapes and external dependencies
 
@@ -76,7 +85,9 @@ verify its SHA-256 against `RELEASE.json`, install JDK 17+, and run:
 python3 examples/mcp_fleet.py --java-jar cqels-mcp-2.0.0-alpha.20-shaded.jar --report java.json
 ```
 
-The driver launches Java with the required module-opening argument. It verifies
+The driver verifies the jar against the pinned Java SHA-256 and uses
+`java_reference.version` for Java version checks. It launches Java with the
+required module-opening argument. It verifies
 server versions and the full discovery contract before checking the scenarios.
 The Java reference launcher has a startup race: sending `initialize` before its
 startup-completion log can lose the response with a "Failed to enqueue message"

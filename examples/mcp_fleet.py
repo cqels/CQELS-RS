@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Run public fleet demos and release-specific compatibility probes (stdlib only)."""
 import argparse
+from contextlib import suppress
+import hashlib
 import json
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import tempfile
 import threading
@@ -24,6 +27,7 @@ class Rpc:
         self.messages = queue.Queue()
         self.contamination = []
         self.stderr = []
+        self.java_started = threading.Event()
         self.sequence = 0
         self.directory = tempfile.TemporaryDirectory(prefix="cqels-fleet-")
         env = {k: v for k, v in os.environ.items() if not k.startswith("CQELS_")}
@@ -41,6 +45,8 @@ class Rpc:
 
     def _stdout(self):
         for line in self.process.stdout:
+            if not line.strip():
+                continue
             try:
                 message = json.loads(line)
                 if not isinstance(message, dict):
@@ -51,6 +57,8 @@ class Rpc:
 
     def _stderr(self):
         for line in self.process.stderr:
+            if "CQELS MCP server is running." in line:
+                self.java_started.set()
             self.stderr.append(line.rstrip())
             self.stderr[:] = self.stderr[-100:]
 
@@ -63,7 +71,7 @@ class Rpc:
         # queue is subscribed. Sending initialize then can lose its response.
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
-            if any("CQELS MCP server is running." in line for line in self.stderr):
+            if self.java_started.is_set():
                 return
             if self.process.poll() is not None:
                 raise RuntimeError(f"Java exited before launcher readiness: {self.stderr}")
@@ -92,6 +100,8 @@ class Rpc:
     def initialize(self):
         result = self.request("initialize", {"protocolVersion": "2024-11-05",
             "capabilities": {}, "clientInfo": {"name": "cqels-fleet", "version": "1"}})
+        if result.get("protocolVersion") != "2024-11-05":
+            raise AssertionError(f"unexpected negotiated protocol: {result.get('protocolVersion')}")
         self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
@@ -104,10 +114,14 @@ class Rpc:
             raise TimeoutError("MCP initialized but the engine never became ready")
         return result
 
-    def tool(self, name, **arguments):
+    def tool_result(self, name, **arguments):
         result = self.request("tools/call", {"name": name, "arguments": arguments})
         if result.get("isError"):
             raise RuntimeError(f"{name}: {result}")
+        return result
+
+    def tool(self, name, **arguments):
+        result = self.tool_result(name, **arguments)
         text = "\n".join(c["text"] for c in result.get("content", []) if c["type"] == "text")
         try:
             return json.loads(text)
@@ -128,7 +142,8 @@ class Rpc:
         return rows
 
     def close(self):
-        self.process.stdin.close()
+        with suppress(OSError):
+            self.process.stdin.close()
         try:
             self.process.wait(timeout=2)
         except subprocess.TimeoutExpired:
@@ -140,13 +155,15 @@ class Rpc:
                 self.process.wait(timeout=2)
         for reader in self.readers:
             reader.join(timeout=2)
-        self.process.stdout.close()
-        self.process.stderr.close()
+        with suppress(OSError):
+            self.process.stdout.close()
+        with suppress(OSError):
+            self.process.stderr.close()
         self.directory.cleanup()
 
 
 def surface(rpc):
-    """Full descriptors; ordering is immaterial, schema contents are not."""
+    """Full descriptors; ignore discovery, required and enum order only."""
     result = {}
     for label, method, key, identity in [
         ("tools", "tools/list", "tools", "name"),
@@ -180,10 +197,11 @@ def speed_event(i, timestamp, value):
                (SOSA + "hasFeatureOfInterest", f"<{EX}vehicle/EV-7Q2>"),
                (SOSA + "hasSimpleResult", f'"{value}"^^<http://www.w3.org/2001/XMLSchema#double>')]
     return {"eventTime": timestamp,
-            "nquads": "\n".join(f"<{subject}> <{p}> {o} ." for p, o in triples)}
+            "nquads": 'VERSION "1.2-messages"\n' + "\n".join(f"<{subject}> <{p}> {o} ." for p, o in triples)}
 
 
-def run_scenario(rpc, name):
+def run_scenario(rpc, name, controls=None):
+    controls = controls if controls is not None else {}
     fixture = json.loads((HERE / "fleet" / "expectations.json").read_text(encoding="utf-8"))[name]
     if name == "rdfs":
         rpc.tool("store_memory", graph="cqels://memory/schema",
@@ -198,12 +216,18 @@ def run_scenario(rpc, name):
     stream = fixture["stream"]
     if name == "static-join":
         rpc.tool("store_memory", turtle=f"<{EX}vehicle/EV-7Q2> <{FLEET}depot> <{EX}depot/north> .")
+        stored = rpc.tool("query", query=f"SELECT ?vehicle ?depot WHERE {{ GRAPH <cqels://memory/longterm> {{ ?vehicle <{FLEET}depot> ?depot }} }}")
+        expected = [{"vehicle": EX + "vehicle/EV-7Q2", "depot": EX + "depot/north"}]
+        if stored != expected:
+            raise AssertionError(f"static seed readback mismatch: {stored}")
+        controls["static_readback"] = stored
     rpc.tool("create_stream", stream=stream)
-    query = (HERE / "fleet" / f"{name}.rq").read_text(encoding="utf-8")
+    query_name = "cep" if name == "cep-reversed" else name
+    query = (HERE / "fleet" / f"{query_name}.rq").read_text(encoding="utf-8")
     rpc.tool("register_stream_query", query=query, queryId=name, cep=name.startswith("cep"))
     if name == "low-battery":
         events = [{"eventTime": i * 1000, "nquads":
-                   f'<{EX}obs/{i}> <{SOSA}hasSimpleResult> "{v}"^^<http://www.w3.org/2001/XMLSchema#double> .'}
+                   f'VERSION "1.2-messages"\n<{EX}obs/{i}> <{SOSA}hasSimpleResult> "{v}"^^<http://www.w3.org/2001/XMLSchema#double> .'}
                   for i, v in enumerate([64.0, 18.5, 41.0, 12.0, 27.5], 1)]
     elif name == "aggregation":
         events = [speed_event(i, t, v) for i, (t, v) in enumerate([(1000, 60), (2000, 80), (5000, 40)], 1)]
@@ -218,28 +242,43 @@ def run_scenario(rpc, name):
     else:
         raise ValueError(name)
     for item in events:
-        rpc.tool("push_stream_events", stream=stream, events=[item])
+        response = rpc.tool_result("push_stream_events", stream=stream, events=[item])
+        ack = response.get("structuredContent", {})
+        if ack.get("accepted") != 1:
+            raise AssertionError(f"observation was not accepted exactly once: {response}")
+        controls.setdefault("push_acks", []).append(ack)
     rows = rpc.drain(name)
     rpc.tool("forget_stream_query", queryId=name)
-    if name == "low-battery":
-        for row in rows:
-            row["soc"] = float(row["soc"])  # Java JSON number vs Rust numeric string
-    if name == "aggregation":
-        for row in rows:
-            for key in ("avgSpeed", "peak", "n"):
-                row[key] = float(row[key])
     if name.startswith("cep"):
         # Keep the event identities as well as the timing, to catch matches of
         # the wrong observations (the release encodes events in a string).
         for row in rows:
-            if EX + "event/1" not in row.get("events", "") or EX + "event/2" not in row.get("events", ""):
+            events = row["events"]
+            controls["cep_events_encoding"] = "string" if isinstance(events, str) else "array"
+            subjects = (re.findall(r"subject=([^,}]+)", events) if isinstance(events, str)
+                        else [item["subject"] for item in events] if isinstance(events, list) else [])
+            if subjects != [EX + "event/1", EX + "event/2"]:
                 raise AssertionError(f"unexpected CEP observations: {row}")
         rows = [{k: row[k] for k in ("start", "end")} for row in rows]
     return rows
 
 
-def canonical_rows(rows):
+def canonical_rows(rows, name=None):
+    numeric = {"low-battery": ("soc",), "aggregation": ("avgSpeed", "peak", "n")}.get(name, ())
+    rows = [dict(row) for row in rows]
+    for row in rows:
+        for key in numeric:
+            row[key] = float(row[key])
     return sorted(rows, key=lambda row: json.dumps(row, sort_keys=True))
+
+
+def verify_java_jar(path, reference):
+    digest = hashlib.sha256()
+    with path.open("rb") as jar:
+        for chunk in iter(lambda: jar.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != reference["sha256"]:
+        raise ValueError("Java jar SHA-256 does not match RELEASE.json")
 
 
 def main():
@@ -253,12 +292,21 @@ def main():
     engine = "rust" if args.server else "java"
     command = [str(args.server.resolve())] if args.server else ["java", "--add-opens=java.base/java.nio=ALL-UNNAMED", "-jar", str(args.java_jar.resolve())]
     pin = json.loads((HERE.parent / "RELEASE.json").read_text(encoding="utf-8"))
+    path = args.server or args.java_jar
+    if not path.is_file():
+        parser.error(f"server artifact not found: {path}; install/download it first")
+    version = pin["version"] if engine == "rust" else pin["java_reference"]["version"]
+    if engine == "java":
+        try:
+            verify_java_jar(args.java_jar, pin["java_reference"])
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
     expected_surface = json.loads((HERE.parent / "mcp-server" / "contract.json").read_text(encoding="utf-8"))
     fixtures = json.loads((HERE / "fleet" / "expectations.json").read_text(encoding="utf-8"))
     selected = list(fixtures) if args.scenario == "all" else [args.scenario]
     if any(name not in fixtures for name in selected):
         parser.error(f"scenario must be all or one of {', '.join(fixtures)}")
-    report = {"engine": engine, "version": pin["version"], "discovery": "not checked", "scenarios": {}}
+    report = {"engine": engine, "version": version, "discovery": "not checked", "scenarios": {}}
     try:
         for name in selected:
             rpc = Rpc(command)
@@ -266,18 +314,19 @@ def main():
                 if engine == "java":
                     rpc.wait_for_java_launcher()
                 init = rpc.initialize()
-                if init["serverInfo"]["version"] != pin["version"]:
+                if init["serverInfo"]["version"] != version:
                     raise AssertionError(f"release version mismatch: {init['serverInfo']}")
                 if report["discovery"] != "pass":
                     if surface(rpc) != expected_surface:
                         raise AssertionError("MCP descriptor drift: update the public contract and guide together")
                     report["discovery"] = "pass"
-                rows = run_scenario(rpc, name)
+                controls = {}
+                rows = canonical_rows(run_scenario(rpc, name, controls), name)
                 expected = fixtures[name][engine]
-                if canonical_rows(rows) != canonical_rows(expected):
+                if rows != canonical_rows(expected, name):
                     raise AssertionError(f"{name}: expected {expected}, received {rows}")
                 status = "known difference" if fixtures[name].get("difference") else "pass"
-                report["scenarios"][name] = {"status": status, "rows": rows}
+                report["scenarios"][name] = {"status": status, "rows": rows, "controls": controls}
                 print(f"{name}: {status.upper()} {json.dumps(rows, sort_keys=True)}", flush=True)
             finally:
                 rpc.close()
