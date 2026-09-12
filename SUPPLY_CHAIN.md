@@ -1,19 +1,50 @@
-# Release Verification
+# Verifying CQELS-RS releases
 
-The current release line is `2.0.0-alpha.20`. Release archives are published
-here as distribution artifacts.
+Current release: **2.0.0-alpha.21**. Each platform archive has an adjacent
+SHA-256 checksum file. [RELEASE.json](RELEASE.json) independently pins the expected
+archive digests used by the public installer and the separately maintained
+release-validation pipeline.
 
-CQELS-RS release archives are published with a SHA-256 checksum beside each
-archive. Verify an archive before extracting it:
+## Recommended installation
 
 ```bash
-shasum -a 256 -c cqels-mcp-<version>-<target>.tar.gz.sha256
+python3 mcp-server/install.py
 ```
 
-The checksum file must be downloaded from the same GitHub release as the
-archive, and the filename in the checksum entry must match the downloaded
-file. Release notes identify the target triple and compatible CQELS-RS
-version.
+The installer checks that the downloaded checksum identifies the exact archive,
+that it agrees with the pinned digest, and that the archive bytes hash to that
+digest. Only then does it extract the root executable. It does not extract the
+older README bundled in historical archives.
 
-This repository contains distribution metadata and release verification
-instructions.
+## Manual verification
+
+Download the archive and its `.sha256` file from the same release. Example for
+Apple Silicon macOS, run in the download directory:
+
+```bash
+shasum -a 256 -c cqels-mcp-2.0.0-alpha.21-aarch64-apple-darwin.tar.gz.sha256
+```
+
+Expected: the archive filename followed by `OK`. Also compare the digest to
+`RELEASE.json`. Linux can use `sha256sum --check`; on Windows use the Python
+installer or compare `Get-FileHash -Algorithm SHA256` with the pinned digest.
+Do not extract an archive when a checksum disagrees.
+
+## What the checks establish
+
+A checksum detects differing bytes. Its trust depends on the release metadata
+and the pinned copy of this repository you trust. Rust alpha.21 does not publish
+a signed manifest or signature bundle. The retained `cosign.pub` file alone is
+not evidence that the Rust archives were signed, and this guide makes no such
+claim. CQELS4J has its own verification procedure; it does not authenticate Rust
+artifacts.
+
+`RELEASE.json` records the source revision associated with the successful Rust
+binary build and pins the Java reference jar separately. Public distribution
+commits and binary build revisions serve different purposes and need not match.
+Release assets must not be silently replaced to repair documentation: update the
+public guides or publish a new version when binary contents change.
+
+This release includes `PROVENANCE.json` with source/build identifiers and asset
+digests. It is an unsigned provenance record, not a cryptographic signature.
+The archive checksums and pinned public manifest must still agree.

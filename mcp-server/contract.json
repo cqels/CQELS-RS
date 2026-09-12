@@ -1,0 +1,1245 @@
+{
+  "prompts": [
+    {
+      "arguments": [
+        {
+          "description": "Full IRI of the rdf:type to list, e.g. http://example.org/Sensor",
+          "name": "type",
+          "required": true
+        }
+      ],
+      "description": "Predefined SPARQL template: list entities of a given rdf:type with their labels",
+      "name": "entity_by_type"
+    },
+    {
+      "arguments": [
+        {
+          "description": "The conversation or text to extract durable facts from",
+          "name": "conversation",
+          "required": true
+        },
+        {
+          "description": "Target named graph (default cqels://memory/longterm; use cqels://memory/user/{id} for per-user memory)",
+          "name": "graph",
+          "required": false
+        }
+      ],
+      "description": "Fact-extraction seed: distill a conversation into durable Turtle facts and store them with store_memory (the client LLM performs the extraction)",
+      "name": "extract_facts"
+    },
+    {
+      "arguments": [
+        {
+          "description": "The information, event, skill, or standing intent to put into memory",
+          "name": "content",
+          "required": true
+        }
+      ],
+      "description": "Routing discipline: which CQELS tool stores/retrieves each kind of memory (durable facts, events, skills, working context, prospective watches)",
+      "name": "memory_routing"
+    },
+    {
+      "arguments": [
+        {
+          "description": "The question to reason about",
+          "name": "question",
+          "required": true
+        }
+      ],
+      "description": "Step-by-step reasoning over existing knowledge to answer a question",
+      "name": "reasoning_workflow"
+    },
+    {
+      "arguments": [
+        {
+          "description": "The topic to recall knowledge about",
+          "name": "topic",
+          "required": true
+        }
+      ],
+      "description": "Template for recalling everything known about a topic",
+      "name": "recall_about"
+    },
+    {
+      "arguments": [
+        {
+          "description": "Stream name to read recent events from",
+          "name": "stream",
+          "required": true
+        },
+        {
+          "description": "Window spec, e.g. 'RANGE 5m', 'RANGE 30s' or 'NOW' (default 'RANGE 5m')",
+          "name": "window",
+          "required": false
+        }
+      ],
+      "description": "Predefined CQELS-QL template: capture the most recent events from a stream over a time window (for \"what just happened / why\" questions)",
+      "name": "recent_events_window"
+    },
+    {
+      "arguments": [
+        {
+          "description": "The region as a WKT geometry, e.g. POLYGON((13.0 52.3, 13.8 52.3, 13.8 52.7, 13.0 52.7, 13.0 52.3)) \u2014 CRS84 lon/lat",
+          "name": "region",
+          "required": true
+        },
+        {
+          "description": "Predicate holding each subject's geometry (default geo:asWKT)",
+          "name": "geometryPredicate",
+          "required": false
+        }
+      ],
+      "description": "Template for spatial recall (#448): find stored facts whose geometry lies within a region, using GeoSPARQL geof:* over recall_memory SPARQL",
+      "name": "spatial_recall"
+    },
+    {
+      "arguments": [
+        {
+          "description": "The topic to store knowledge about",
+          "name": "topic",
+          "required": true
+        }
+      ],
+      "description": "Template for storing structured knowledge about a topic as RDF facts",
+      "name": "store_knowledge"
+    },
+    {
+      "arguments": [
+        {
+          "description": "The domain/type of data to validate",
+          "name": "domain",
+          "required": true
+        }
+      ],
+      "description": "Template for validating data quality using SHACL shapes",
+      "name": "validate_data"
+    },
+    {
+      "arguments": [
+        {
+          "description": "Stream name to observe",
+          "name": "stream",
+          "required": true
+        },
+        {
+          "description": "Full IRI of the property to read, e.g. http://example.org/temperature",
+          "name": "property",
+          "required": true
+        },
+        {
+          "description": "Window spec, e.g. 'RANGE 5m' or 'NOW' (default 'RANGE 5m')",
+          "name": "window",
+          "required": false
+        }
+      ],
+      "description": "Predefined CQELS-QL template: observe a property's values on a stream over a time window",
+      "name": "value_over_window"
+    }
+  ],
+  "resources": [
+    {
+      "description": "CEP syntax reference for authoring event-sequence (SEQ) pattern queries",
+      "mimeType": "text/markdown",
+      "name": "CQELS-QL CEP Syntax",
+      "uri": "cqels://docs/cep"
+    },
+    {
+      "description": "CQELS-QL syntax reference for authoring stream queries",
+      "mimeType": "text/markdown",
+      "name": "CQELS-QL Syntax Cheatsheet",
+      "uri": "cqels://docs/cqelsql"
+    },
+    {
+      "description": "How to use CQELS as agent memory: which tool for which memory operation, watch/notification scope, entailment-at-recall, statement-level governance, per-user tenancy convention",
+      "mimeType": "text/markdown",
+      "name": "CQELS Agent-Memory Profile",
+      "uri": "cqels://docs/memory-profile"
+    },
+    {
+      "description": "Operational health: running flag, version, transport, persistence (query count when ungoverned)",
+      "mimeType": "application/json",
+      "name": "Engine Status",
+      "uri": "cqels://engine/status"
+    },
+    {
+      "description": "Prefix to namespace-IRI mappings declared in the repository",
+      "mimeType": "application/json",
+      "name": "Knowledge Graph Namespaces",
+      "uri": "cqels://kg/namespaces"
+    },
+    {
+      "description": "Triple count, named graphs, active streams and queries",
+      "mimeType": "application/json",
+      "name": "Knowledge Graph Statistics",
+      "uri": "cqels://kg/stats"
+    },
+    {
+      "description": "List of registered continuous queries with buffered result counts",
+      "mimeType": "application/json",
+      "name": "Registered Queries",
+      "uri": "cqels://queries"
+    },
+    {
+      "description": "Available reasoning profiles and their inference capabilities",
+      "mimeType": "application/json",
+      "name": "Reasoning Capabilities",
+      "uri": "cqels://reasoning/capabilities"
+    },
+    {
+      "description": "List of active data streams",
+      "mimeType": "application/json",
+      "name": "Active Streams",
+      "uri": "cqels://streams"
+    }
+  ],
+  "templates": [
+    {
+      "description": "Buffered results for a registered stream query; reading drains the buffer",
+      "mimeType": "application/json",
+      "name": "Stream Query Results",
+      "uriTemplate": "cqels://queries/{queryId}/results"
+    }
+  ],
+  "tools": [
+    {
+      "description": "Assemble a ranked, budget-bounded working-memory bundle for a task: relevant facts (with their KG neighborhood) from semantic memory and matching runnable procedures.",
+      "inputSchema": {
+        "properties": {
+          "budget": {
+            "default": 4000,
+            "description": "Approx character budget (clamped to [1, 200000]); lowest-ranked items are dropped to fit",
+            "maximum": 200000,
+            "type": "integer"
+          },
+          "limit": {
+            "default": 10,
+            "description": "Max semantic search hits to consider",
+            "type": "integer"
+          },
+          "mode": {
+            "default": "lexical",
+            "description": "Retrieval strategy for the semantic slice (vector/hybrid need vector search enabled)",
+            "enum": [
+              "hybrid",
+              "lexical",
+              "vector"
+            ],
+            "type": "string"
+          },
+          "neighbors": {
+            "default": 5,
+            "description": "Max knowledge-graph neighborhood triples per matched fact",
+            "type": "integer"
+          },
+          "task": {
+            "description": "The task or question to assemble working-memory context for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "type": "object"
+      },
+      "name": "assemble_context"
+    },
+    {
+      "description": "Create a named stream (idempotent) so a continuous query can be registered over it BEFORE any events are pushed. This is the lossless workflow \u2014 streams are hot with no replay, so create_stream -> register_stream_query -> push_stream_events keeps the first observations from being dropped.",
+      "inputSchema": {
+        "properties": {
+          "stream": {
+            "description": "Name of the stream to create (idempotent). Create it, then register_stream_query over it, then push_stream_events \u2014 so no observation is lost to a hot stream that has no consumer yet.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream"
+        ],
+        "type": "object"
+      },
+      "name": "create_stream"
+    },
+    {
+      "description": "Reconstruct a recorded decision trace: inputs used, procedure applied, output, timestamps, applied policy and override flag.",
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "description": "The decision id returned by run_procedure when a trace was recorded",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "explain_decision"
+    },
+    {
+      "description": "Remove facts from long-term memory by specifying individual facts, executing a SPARQL DELETE query, or clearing an entire named graph.",
+      "inputSchema": {
+        "properties": {
+          "cascadeMeta": {
+            "default": true,
+            "description": "Also delete the context-graph metadata (RDF-star annotations) attached to each removed fact",
+            "type": "boolean"
+          },
+          "facts": {
+            "description": "Specific facts to remove",
+            "items": {
+              "properties": {
+                "object": {
+                  "type": "string"
+                },
+                "predicate": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "object",
+                "predicate",
+                "subject"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "graph": {
+            "description": "Named graph URI to clear entirely. The tool-owned system graphs (policy, annotations, procedures, decisions, episodic, inferred) are reserved and cannot be cleared here.",
+            "type": "string"
+          },
+          "sparql": {
+            "description": "SPARQL DELETE/UPDATE query to execute",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "forget_memory"
+    },
+    {
+      "description": "Stop and deregister a continuous query previously created with register_stream_query: unregisters its engine subscription and discards its result buffer.",
+      "inputSchema": {
+        "properties": {
+          "queryId": {
+            "description": "ID of the stream query to stop and deregister (as returned by register_stream_query)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "queryId"
+        ],
+        "type": "object"
+      },
+      "name": "forget_stream_query"
+    },
+    {
+      "description": "List saved procedures with their kind and description.",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "list_procedures"
+    },
+    {
+      "description": "Push timestamped observations onto a named stream (created if absent) so registered continuous queries react. Each event is one atomic observation with an explicit eventTime; register the query BEFORE pushing, since streams are hot (no replay). On a persistence-enabled server the batch is journaled at one commit boundary before emission and the structured ack reports durable/journalId/journalPosition; a generic error means nothing was committed or emitted (retry safe) EXCEPT the explicit indeterminate-commit error, which must not be resubmitted.",
+      "inputSchema": {
+        "properties": {
+          "events": {
+            "description": "Observations to push. Each event is ONE atomic observation (one RDF Message / GraphStreamElement): its statements share one event time and never split across a window boundary, so [TRIPLES n] counts observations not triples. CEP-matching note: a MULTI-triple observation is an atomic graph element \u2014 match it in a FILTER(SEQ(...)) step with a GRAPH pattern (several triple patterns sharing the event subject), not a single triple pattern; a single-triple SEQ step matches single-triple observations.",
+            "items": {
+              "properties": {
+                "eventTime": {
+                  "description": "Event time as epoch milliseconds (integer) or an ISO-8601 instant (e.g. 2026-07-08T10:15:30Z). REQUIRED for correct windowed/[NOW]-join/SEQ results; if omitted it defaults to processing time (server clock), which is unsafe for those queries.",
+                  "type": [
+                    "integer",
+                    "string"
+                  ]
+                },
+                "facts": {
+                  "description": "The observation as {subject, predicate, object, objectType} triples (objectType 'uri' or 'literal', default 'literal'). Use this OR 'nquads'.",
+                  "items": {
+                    "properties": {
+                      "object": {
+                        "type": "string"
+                      },
+                      "objectType": {
+                        "default": "literal",
+                        "enum": [
+                          "literal",
+                          "uri"
+                        ],
+                        "type": "string"
+                      },
+                      "predicate": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "object",
+                      "predicate",
+                      "subject"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "nquads": {
+                  "description": "The observation as an RDF Messages N-Quads body (W3C RSP CG spec): VERSION \"1.2-messages\" then quads, optionally MESSAGE-delimited for several observations sharing this eventTime. Use this OR 'facts'.",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          "stream": {
+            "description": "Target stream name (created if absent). Register the continuous query BEFORE pushing \u2014 streams are hot with no replay, so events pushed before a query is registered are dropped.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "events",
+          "stream"
+        ],
+        "type": "object"
+      },
+      "name": "push_stream_events",
+      "outputSchema": {
+        "description": "Durable-ingest ack (#28). accepted counts observations handed to the engine (delivery-neutral); durable:true only when the batch committed on a durable atomic primary journal. Error results may omit structured content (legacy validation errors are text-only).",
+        "properties": {
+          "accepted": {
+            "description": "Expanded non-empty observations handed to the engine.",
+            "type": "integer"
+          },
+          "durable": {
+            "description": "True iff the batch committed at one boundary on a durable (fsync + commit-pointer) primary journal.",
+            "type": "boolean"
+          },
+          "journalId": {
+            "description": "Stable primary-journal identity; present iff a batch commit happened (forensic-only on indeterminate-commit).",
+            "type": "string"
+          },
+          "journalPosition": {
+            "description": "Logical journal offset of the batch's last record, as a DECIMAL STRING (an i64 does not survive IEEE-double JSON round-trips).",
+            "type": "string"
+          },
+          "mirrorDegraded": {
+            "description": "True iff a strict mirror failed AFTER the primary commit of this batch (the offsets ARE committed; do not resubmit).",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Present when durable=false: empty-batch, engine-not-running, processors-present, no-persistence, non-atomic-primary, no-journal-identity, durability-none, or indeterminate-commit.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted",
+          "durable"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Execute a SPARQL, CQELS-QL, or Cypher query against the knowledge graph and streams. SPARQL queries run against the RDF repository. CQELS-QL and Cypher queries are registered as temporary continuous queries.",
+      "inputSchema": {
+        "properties": {
+          "format": {
+            "default": "json",
+            "description": "Output format for query results",
+            "enum": [
+              "json",
+              "natural",
+              "turtle"
+            ],
+            "type": "string"
+          },
+          "language": {
+            "default": "sparql",
+            "description": "sparql = one-shot snapshot over the repository. cqelsql/cypher = temporary continuous query over streams (auto-unregistered after collecting).",
+            "enum": [
+              "cqelsql",
+              "cypher",
+              "sparql"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "description": "Maximum number of results",
+            "type": "integer"
+          },
+          "query": {
+            "description": "The query text. SPARQL reads a point-in-time SNAPSHOT of the RDF repository (the triples put there by store_memory / inference); it does NOT observe in-flight stream events. To react to a live stream, register a continuous query instead (register_stream_query) or pass language=cqelsql/cypher here, which registers a TEMPORARY continuous query, collects for a few seconds, and returns.",
+            "type": "string"
+          },
+          "waitMs": {
+            "default": 0,
+            "description": "For a SPARQL snapshot only: milliseconds to wait before reading, so writes just committed by a concurrent store_memory/inference settle into the snapshot (clamped to [0, 5000]). Ignored for cqelsql/cypher, which already poll the stream.",
+            "maximum": 5000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "query"
+    },
+    {
+      "description": "Apply RDFS/OWL reasoning over the knowledge graph to derive new inferred facts. Supports profiles: RDFS_MINIMAL, RDFS_FULL, OWL2_QL, OWL2_RL, OWL2_EL.",
+      "inputSchema": {
+        "properties": {
+          "dataGraph": {
+            "description": "Named graph containing data triples to reason over (defaults to cqels://memory/longterm)",
+            "type": "string"
+          },
+          "format": {
+            "default": "json",
+            "description": "Output format for inferred triples",
+            "enum": [
+              "json",
+              "natural",
+              "turtle"
+            ],
+            "type": "string"
+          },
+          "includeAsserted": {
+            "default": false,
+            "description": "Whether to include original asserted statements in output",
+            "type": "boolean"
+          },
+          "profile": {
+            "default": "RDFS_FULL",
+            "description": "Reasoning profile to apply",
+            "enum": [
+              "OWL2_EL",
+              "OWL2_QL",
+              "OWL2_RL",
+              "RDFS_FULL",
+              "RDFS_MINIMAL"
+            ],
+            "type": "string"
+          },
+          "schemaGraph": {
+            "description": "Named graph containing ontology/schema triples (defaults to cqels://memory/schema)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "reason"
+    },
+    {
+      "description": "Find recorded decisions by time range, applied policy, and/or override flag, ordered by time.",
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "default": 50,
+            "description": "Maximum number of decisions to return (clamped to 1000)",
+            "type": "integer"
+          },
+          "override": {
+            "description": "Only decisions whose override flag equals this",
+            "type": "boolean"
+          },
+          "policy": {
+            "description": "Only decisions that applied this policy",
+            "type": "string"
+          },
+          "since": {
+            "description": "Inclusive lower bound on decision end time (xsd:date/dateTime; a date is start-of-day UTC)",
+            "type": "string"
+          },
+          "until": {
+            "description": "Exclusive upper bound on decision end time (xsd:date/dateTime; a date is start-of-day UTC)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "recall_decisions"
+    },
+    {
+      "description": "Recall past events from episodic memory by time range and/or entity, ordered by time.",
+      "inputSchema": {
+        "properties": {
+          "entity": {
+            "description": "Only events where this is the subject or object (URI or prefixed name)",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "description": "Maximum number of events to return (clamped to 1000)",
+            "type": "integer"
+          },
+          "newestFirst": {
+            "default": true,
+            "description": "Order newest-first (true) or oldest-first (false)",
+            "type": "boolean"
+          },
+          "predicate": {
+            "description": "Only events with this predicate",
+            "type": "string"
+          },
+          "since": {
+            "description": "Inclusive lower bound: events at or after this time (xsd:date/dateTime). A date resolves to start-of-day UTC.",
+            "type": "string"
+          },
+          "until": {
+            "description": "Exclusive upper bound: events strictly before this time (xsd:date/dateTime). A date resolves to start-of-day UTC, so use the next day to include a full day.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "recall_episodes"
+    },
+    {
+      "description": "Retrieve knowledge from memory via SPARQL query, natural language text search, graph pattern matching, or draining buffered results from a registered stream query.",
+      "inputSchema": {
+        "properties": {
+          "accessRole": {
+            "description": "Context-graph filter: only statements whose access label equals this role",
+            "type": "string"
+          },
+          "asOf": {
+            "description": "Context-graph filter: only statements whose temporal validity contains this instant (xsd:date or xsd:dateTime)",
+            "type": "string"
+          },
+          "entail": {
+            "default": false,
+            "description": "Ontology-aware recall (#443): return asserted PLUS entailed triples for the pattern (subsumption/inheritance/transitivity). Requires register_reasoning; computed on demand against the current base.",
+            "type": "boolean"
+          },
+          "format": {
+            "default": "json",
+            "description": "Output format for results",
+            "enum": [
+              "json",
+              "natural",
+              "turtle"
+            ],
+            "type": "string"
+          },
+          "includeMeta": {
+            "default": false,
+            "description": "Project context-graph metadata columns (source/confidence/validFrom/validTo/...) alongside matched triples",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 50,
+            "description": "Maximum number of results to return (clamped to [1, 1000])",
+            "maximum": 1000,
+            "type": "integer"
+          },
+          "minConfidence": {
+            "description": "Context-graph filter: only statements with confidence >= this value",
+            "type": "number"
+          },
+          "mode": {
+            "default": "lexical",
+            "description": "Text-search strategy: lexical (BM25), vector (dense-embedding similarity), or hybrid (RRF of both). vector/hybrid require the server started with vector search enabled, and match literal-valued facts only (IRI objects are not embedded).",
+            "enum": [
+              "hybrid",
+              "lexical",
+              "vector"
+            ],
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Simple graph pattern to match (subject/predicate/object, use null for wildcards)",
+            "properties": {
+              "object": {
+                "type": "string"
+              },
+              "objectType": {
+                "description": "How to match `object`: 'uri' = IRI term, 'literal' = literal value. Omit to match EITHER (a literal OR an IRI with that value) \u2014 set it to disambiguate when the same value exists as both.",
+                "enum": [
+                  "literal",
+                  "uri"
+                ],
+                "type": "string"
+              },
+              "predicate": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "queryId": {
+            "description": "ID of a registered stream query to drain buffered results from",
+            "type": "string"
+          },
+          "role": {
+            "description": "Caller role for governance enforcement (#447). Under an active access policy, only statements whose access label is permitted for this role are returned; pattern and entail recall enforce, other modes are denied.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Context-graph filter: only statements from this provenance source",
+            "type": "string"
+          },
+          "sparql": {
+            "description": "SPARQL SELECT or CONSTRUCT query to execute against the knowledge graph",
+            "type": "string"
+          },
+          "text": {
+            "description": "Natural language text for semantic search over stored knowledge",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "recall_memory"
+    },
+    {
+      "description": "Record a timestamped event (subject/predicate/object + time) into episodic memory.",
+      "inputSchema": {
+        "properties": {
+          "object": {
+            "description": "The value or related entity",
+            "type": "string"
+          },
+          "objectType": {
+            "default": "literal",
+            "description": "Whether object is a URI or literal",
+            "enum": [
+              "literal",
+              "uri"
+            ],
+            "type": "string"
+          },
+          "predicate": {
+            "description": "What happened / the relation (URI or prefixed name)",
+            "type": "string"
+          },
+          "subject": {
+            "description": "The entity the event is about (URI or prefixed name)",
+            "type": "string"
+          },
+          "time": {
+            "description": "Event time (xsd:date or xsd:dateTime); defaults to now",
+            "type": "string"
+          }
+        },
+        "required": [
+          "object",
+          "predicate",
+          "subject"
+        ],
+        "type": "object"
+      },
+      "name": "record_event"
+    },
+    {
+      "description": "Enable ontology-aware reasoning over semantic memory: materialize the current entailment closure and signal it. recall_memory(entail:true) then returns asserted plus entailed knowledge for a concept.",
+      "inputSchema": {
+        "properties": {
+          "dataGraph": {
+            "description": "Named graph holding the asserted facts/ABox (default cqels://memory/longterm)",
+            "type": "string"
+          },
+          "profile": {
+            "default": "RDFS_FULL",
+            "description": "Reasoning profile; defaults to RDFS_FULL",
+            "enum": [
+              "OWL2_EL",
+              "OWL2_QL",
+              "OWL2_RL",
+              "RDFS_FULL",
+              "RDFS_MINIMAL"
+            ],
+            "type": "string"
+          },
+          "schemaGraph": {
+            "description": "Named graph holding the ontology/TBox (default cqels://memory/schema)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "register_reasoning"
+    },
+    {
+      "description": "Register a standing ASP (Answer Set Programming) program over a named stream (created if absent). Stream facts arrive as rdf(S,P,O) atoms and ACCUMULATE; each observation triggers one solve, and newly derived atoms of resultPredicate are buffered like query results \u2014 poll with recall_memory(queryId), stop with forget_stream_query. Register BEFORE pushing (streams are hot, no replay).",
+      "inputSchema": {
+        "properties": {
+          "argNames": {
+            "default": [],
+            "description": "Names for the predicate's argument positions; also the arity filter (atoms of other arities are ignored). Empty = propositional (arity 0).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "bufferSize": {
+            "default": 100,
+            "description": "Max buffered result rows (clamped to [1, 100000]); oldest dropped when full.",
+            "maximum": 100000,
+            "type": "integer"
+          },
+          "emit": {
+            "default": "delta",
+            "description": "delta = only atoms newly derived vs the previous solve (recommended; an atom that later disappears is not re-reported). full = the complete projection every solve.",
+            "enum": [
+              "delta",
+              "full"
+            ],
+            "type": "string"
+          },
+          "maxFacts": {
+            "default": 5000,
+            "description": "Cap on accumulated stream facts (clamped to [1, 50000]); on breach the registration stops with a diagnostic row (forget_stream_query and re-register to reset).",
+            "maximum": 50000,
+            "type": "integer"
+          },
+          "notify": {
+            "default": false,
+            "description": "Push a resources/updated notification for cqels://queries/{queryId}/results on each new row.",
+            "type": "boolean"
+          },
+          "queryId": {
+            "description": "Optional id suffix; the returned queryId is always prefixed 'rl-'. Poll with recall_memory(queryId); stop with forget_stream_query.",
+            "type": "string"
+          },
+          "resultPredicate": {
+            "description": "Predicate symbol whose derived atoms become result rows (e.g. \"alert\").",
+            "type": "string"
+          },
+          "rules": {
+            "description": "ASP Core 2 program. Stream facts arrive as rdf(S,P,O) atoms: IRIs as iri(\"...\"), literals as literal_dt(\"label\",\"datatypeIri\") or literal_lang(\"label\",\"lang\"), bnodes as bnode(\"id\"). push_stream_events string objects are xsd:string literals. Example: alert(S) :- rdf(S, iri(\"http://ex/status\"), literal_dt(\"critical\",\"http://www.w3.org/2001/XMLSchema#string\")). Facts ACCUMULATE across observations; each observation triggers one solve over everything seen so far (first answer set only \u2014 prefer deterministic programs).",
+            "type": "string"
+          },
+          "stream": {
+            "description": "Stream the rules react to (created if absent). Register BEFORE pushing \u2014 streams are hot, no replay.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resultPredicate",
+          "rules",
+          "stream"
+        ],
+        "type": "object"
+      },
+      "name": "register_rules"
+    },
+    {
+      "description": "Register a persistent CQELS-QL or Cypher continuous query. Results are buffered and can be polled via recall_memory with the returned queryId.",
+      "inputSchema": {
+        "properties": {
+          "bufferSize": {
+            "default": 100,
+            "description": "Maximum number of results to buffer (clamped to [1, 100000])",
+            "maximum": 100000,
+            "type": "integer"
+          },
+          "cep": {
+            "default": false,
+            "description": "When true, register on the engine's CEP path so a FILTER(SEQ(...)) pattern gets NFA sequence semantics (requires language=cqelsql and a FILTER(SEQ(...)) in the query). Buffered rows are pattern matches, ONE ROW PER MATCH (not per event): {start, end, events:[{timestamp, subject, predicate, object}], named?} \u2014 each element of `events` has that shape for a single-triple observation, or {timestamp, payload} for a multi-triple (atomic graph) observation, so the row SHAPE varies with the element's payload arity.",
+            "type": "boolean"
+          },
+          "language": {
+            "default": "cqelsql",
+            "description": "cqelsql = windowed SPARQL (full CEP + window surface). cypher = the reduced CypherQL MATCH/RETURN dialect (see the query-field note for its limits).",
+            "enum": [
+              "cqelsql",
+              "cypher"
+            ],
+            "type": "string"
+          },
+          "notify": {
+            "default": false,
+            "description": "When true, push a notifications/resources/updated for cqels://queries/{queryId}/results on each new result (in addition to the always-on poll buffer). Read that resource to drain buffered results.",
+            "type": "boolean"
+          },
+          "query": {
+            "description": "The continuous query. CQELS-QL is SPARQL with the window on a FROM STREAM clause and a plain STREAM pattern in WHERE, e.g. SELECT ?s ?v FROM STREAM sensors [RANGE 10s] WHERE { STREAM sensors { ?s <p> ?v } }. The window goes on FROM STREAM, NOT inside the WHERE STREAM pattern. Window forms: [NOW] (current element; a zero-length window, so an aggregate over it WITHOUT GROUP BY is REJECTED at registration \u2014 nothing folds that shape and the route would emit the raw aggregate-argument binding instead of the alias, so use [RANGE dur] or [TRIPLES n] for an aggregate that accumulates), [RANGE dur] / [RANGE dur STEP step] (time), [TRIPLES n] (count), [FUTURE dur] (directional). ROW COUNTS: the number of rows an emission produces is NOT a property of the window spec \u2014 it is decided by (B) ORDER BY / LIMIT (hasBatchSolutionModifiers), which run HAVING -> ORDER BY -> DISTINCT -> LIMIT inside every evaluation on the routes that materialise evaluation batches, so any 'one row per X' here is the PRE-modifier count; on other routes bare ORDER BY and bare LIMIT are REJECTED at registration, and ORDER BY + LIMIT compiles into a continuous GLOBAL top-K only when the declared window is [NOW] (or none) and the query carries no aggregate at all \u2014 a declared RANGE/TRIPLES/SLIDE window, or GROUP BY + aggregates, is rejected at registration too, while a global (no-GROUP-BY) aggregate never reaches the top-K either: under [NOW] it is rejected at registration, and otherwise it materialises evaluation batches and takes the per-evaluation tail above. That top-K re-emits the whole current k-row snapshot on every change, ranked over the entire stream with no window eviction; (A) GROUP BY, which on a route with an evaluation boundary emits one row per group PER EVALUATION \u2014 per closed window on the incremental-aggregate and directional paths, per ARRIVING ELEMENT on the windowed hash join \u2014 and which on a boundary-less route ([NOW], or any shape that falls to the flat pipeline) emits NOTHING AT ALL when combined with aggregates, because the outer fold waits for an upstream completion a hot stream never signals \u2014 and beside which a reshaper in the same query is evaluated FIRST on every route (graph-pattern operators precede aggregation), so FILTER NOT EXISTS removes a solution from its own COUNT, a UNION whose two arms both match DOUBLES the aggregate input, and an OPTIONAL contributes one row per complete solution of its block \u2014 several solutions MULTIPLY the input the same way, while an unmatched or single-solution block preserves the input CARDINALITY, which is not the same as leaving the ANSWER alone since a block-bound variable can be a GROUP BY key and re-partition the input \u2014 and a block variable reaches the output only as such a key, the fold rebuilding each row from the GROUP BY keys and the aggregate aliases and nothing else. An aggregate over a variable a reshaper binds needs the block to RUN for that row: the record is projected before any block runs, an EMPTY one is dropped, and the block's PROBE SUBJECT must be resolvable from what remains. The record carries the SELECT list and the aggregate ARGUMENT variables and nothing else \u2014 NOT GROUP BY keys \u2014 so PROJECT the block's own subject (SELECT ?s (COUNT(?x) AS ?n) ... OPTIONAL { ?s ... ?x } GROUP BY ?s), or aggregate over it, and it counts correctly. Three near-misses do not: GROUP BY ?s without projecting ?s carries nothing and emits nothing, projecting some unrelated variable keeps the record alive but leaves the subject absent so every group answers 0, and naming nothing at all is dropped outright. An evaluation left with NO surviving solution emits no row rather than a zero-valued one, exactly as an evaluation whose WHERE-FILTER rejected every solution always has; (E/O) fan-out per element, ROUTE-DEPENDENT \u2014 on the incremental-aggregate and directional routes one payload per matched BINDING (a multi-statement graph element contributes one row per MATCHING statement), multiplied again by window-assignment fan-out; on the windowed hash join the fan-out is a natural join across the stream patterns, so two independent patterns matching k statements each give up to k*k bindings (fewer when they share a variable), and that whole join result is re-emitted on every arrival (cumulative re-evaluation, not window assignment); on the per-arrival stream-only route exactly one row per element (only the FIRST matching statement binds each variable); and on EITHER static-lookup route 0..N rows, because the static BGP is enumerated conjunctively: one row per complete assignment, and DROPPED when there is none. That holds on the per-arrival lookup route and on the composed windowed stream+static route alike, where the static fan-out multiplies the stream-side join result rather than replacing it; (D) the execution route, which also changes late-drop behaviour and BIND/FILTER order; (G/H/I) the static side, where each UNION arm and the lookup / GRAPH inner joins emit one row per complete static solution and ZERO when there is none - the lookup join on BOTH its routes, which differ in the scope the BGP is matched against (the composed windowed route sees only the forward BFS view from the join key, bounded by WITH DEPTH, with no repository fallback) and not in that row contract - while OPTIONAL is a LEFT OUTER join that can never emit zero (with no match it emits the row with the block's variables null). With no static repository configured these diverge rather than all going inert: FILTER NOT EXISTS lets every row pass, OPTIONAL emits the row with nulls, and every UNION arm plus the lookup and GRAPH joins DROP every row. A STREAM arm inside UNION throws rather than being ignored; and (C/F) the EMIT policy and the R2S operator. (Q) host-format validity \u2014 whether an edit to this text keeps the surrounding JSON legal, which a Java compile does NOT check; (R) source termination \u2014 whether the source completes and whether a terminal watermark follows (the directional path appends none, so a final window may never close); and (S) reshaper arm kind \u2014 a STREAM arm inside OPTIONAL / UNION / FILTER NOT EXISTS is not evaluated as a static arm is. This axis list is a WORKING list, not a closed one: it was A-F, then A-P, and is now A-S, and each revision was found incomplete by the next audit. This description is user-facing agent guidance; every count in it states the shape it holds for, because you cannot inspect the route. STEP behaves differently per LANGUAGE and per window family, so check both before relying on it. With language=cqelsql: on LEGACY windows ([RANGE d STEP s] / [SLIDE d STEP s]) the STEP is accepted and then IGNORED \u2014 evaluation is per arriving element, not gated on step boundaries \u2014 while on DIRECTIONAL windows ([FUTURE f STEP s], [PAST p FUTURE f STEP s], [RANGE p FUTURE f STEP s]) it IS honoured and spaces the evaluation anchors (default P+F). With language=cypher: [SLIDE d STEP s] DOES honour its step, but in the sense of window MEMBERSHIP, not emission cadence \u2014 the CypherQL compiler builds a real sliding window, so the step decides which windows each element belongs to. Those windows do NOT fire once per step on a live stream: the sliding window collects and emits only when the upstream COMPLETES, so a persistent registered query yields no per-step batch while it runs. Do not use a cypher STEP as an output-rate control either. (CypherQL still drops the step on the RANGE spelling; use SLIDE there. CypherQL also REJECTS directional windows outright \u2014 [FUTURE ...] / [PAST ... FUTURE ...] are not usable with language=cypher, only with language=cqelsql.) So a cypher SLIDE STEP does not throttle output at all (nothing fires until completion), and a cqelsql LEGACY STEP does not either. On a cqelsql DIRECTIONAL window STEP can control output cadence, but that depends on the EMIT policy. With EMIT ON_CLOSE (the default), and for a directional SELECT (which accepts no other policy), it sets the anchor grid and each window emits as the watermark passes it, so a smaller step yields more output \u2014 in EVENT time, not wall-clock, so a quiet stream advances no watermark and fires nothing. Adding ORDER BY or LIMIT changes that count: a grouped ON_UPDATE query with a solution-modifier tail ranks the window's COMPLETE current group set on every arrival and then truncates, so one arrival can emit several groups \u2014 and with LIMIT 1 the emitted group may be one the arrival never touched. EMIT EARLY_AND_FINAL does both: those per-arrival rows plus a final row at close (one per group with GROUP BY), folded from the window's authoritative final contents. Like every other directional emission it passes through the per-window ORDER BY / LIMIT tail, so LIMIT k truncates the close to k rows and a group outside the top k gets no final row. Note the close-row counts: an ungrouped aggregate emits one row per non-empty closed window, a GROUP BY aggregate one row PER GROUP per window, and a directional SELECT every row of the closed window. All three then pass through the SAME per-window ORDER BY / LIMIT tail, so LIMIT 1 yields one row per window on every one of them \u2014 one per window rather than one per group, and one per window rather than one per element. For cqelsql legacy windows per-arrival evaluation gives a correct superset of step-boundary results ONLY when three conditions hold: (1) input arrives in event-time order, (2) the query is a pure function of window contents \u2014 no RAND(), NOW(), UUID(), STRUUID(), BNODE(), which are all supported here in both BIND and FILTER \u2014 and (3) the query is monotone, which rules out aggregates, ORDER BY / LIMIT, and Istream(...) \u2014 whose per-evaluation delta is a function of the evaluation grid itself, so changing the grid changes the emitted set in both directions. (OPTIONAL and FILTER NOT EXISTS do NOT break it on these routes: both evaluate against the static repository only, so each is a per-row, window-invariant transform.) Even then emission time and multiplicity are not preserved. Outside those conditions neither containment direction is guaranteed: per-arrival can miss values a step boundary would produce (e.g. a value produced purely by expiry, with no arrival to trigger re-evaluation) and can produce values no step boundary would. Also note that a single-triple-pattern non-aggregate SELECT with a FIXED predicate and NO solution modifiers ignores a LEGACY window spec entirely and emits per arriving element, so [RANGE 10s] on such a query does nothing \u2014 [NOW], [RANGE ...], [TRIPLES n] and [SLIDE ...] all behave identically there. Add ORDER BY + LIMIT and they stop behaving identically: registration REFUSES [RANGE ...] / [TRIPLES n] / [SLIDE ...] on this route (the ranking would span the whole stream and an element that left the window would keep winning), while [NOW] compiles into an explicitly global continuous top-K. The fixed-predicate qualifier matters: a VARIABLE predicate (e.g. STREAM S { ?s ?p ?o }) forces the windowed hash join even for one pattern, and there the window is fully enforced \u2014 RANGE/SLIDE eviction and TRIPLES limits change both which rows appear and how many times. That applies to legacy forms ONLY: a DIRECTIONAL spec ([FUTURE ...]) on the same query shape is fully operative, because directional SELECT is routed before the stream-only path and evaluates closed LARS windows by extent and anchor step. If you want a window to actually constrain a simple SELECT, use a directional window or give the query a shape that needs windowed evaluation (multi-pattern BGP, or an aggregate). Late-event handling depends on the route: a legacy [RANGE ...] on the incremental windowed-aggregate path drops out-of-order events SILENTLY by default; on a directional [FUTURE ...] window nothing is dropped at the source \u2014 an out-of-order event still lands in every window of its that is still open, and is discarded only once all of them have been purged (watermark > a+F), giving up to the FUTURE extent of out-of-order tolerance with no LATENESS clause (an upper bound, not a guarantee \u2014 an event well inside it is still dropped once its own window has closed); on the windowed-hash-join route there is no watermark and late events are not dropped at all. Add LATENESS dur to hold the watermark back and admit events up to dur late, e.g. [RANGE 10s LATENESS 2s]. LATENESS is honoured on [FUTURE ...] windows and on single-stream [RANGE dur] aggregates (COUNT/SUM/AVG/MIN/MAX, optional GROUP BY, in-batch FILTER/BIND); any other shape rejects it with an explicit error \u2014 multi-stream joins, [SLIDE ...] and STEP forms, non-aggregate queries, cep=true on a legacy (non-directional) window (cep=true on a [FUTURE ...] window honours LATENESS via the window-first replay, same as the non-CEP directional path), language=cypher \u2014 and [NOW]/[TRIPLES n] have no LATENESS syntax at all. Read the cqels://docs/cqelsql resource for the full cheatsheet and cqels://docs/cep for FILTER(SEQ(...)) patterns. Cypher (CypherQL) is a REDUCED dialect \u2014 MATCH ... WHERE ... RETURN over the stream graph; it is NOT openCypher (no CREATE/MERGE/SET, no variable-length paths, boolean WHERE only). Validate a draft first with validate_stream_query.",
+            "type": "string"
+          },
+          "queryId": {
+            "description": "Optional custom query ID (auto-generated if not provided)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "register_stream_query"
+    },
+    {
+      "description": "Remove a named stream created with create_stream/push_stream_events, freeing its capacity slot. Fails while any registered continuous query, invariant, rule program, or CEP pattern still references the stream \u2014 deregister those first (forget_stream_query). Unknown stream is a no-op.",
+      "inputSchema": {
+        "properties": {
+          "stream": {
+            "description": "Name of the stream to remove. Fails while any registered continuous query, invariant, rule program, or CEP pattern still references the stream \u2014 call forget_stream_query on those first. Removing frees the stream's capacity slot for create_stream/push_stream_events. Unknown stream is a no-op; a 'did not complete (retryable)' error means the name stays reserved \u2014 call remove_stream again to finish.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream"
+        ],
+        "type": "object"
+      },
+      "name": "remove_stream"
+    },
+    {
+      "description": "Run a saved procedure by name, binding any {{param}} placeholders from params, and dispatching to the matching execution tool.",
+      "inputSchema": {
+        "properties": {
+          "inputs": {
+            "description": "IRIs of inputs this run consumed (e.g. episodic event IRIs). When present, a decision-lineage trace (#446) is recorded linking these inputs -> procedure -> output; the response includes the decision id.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "Name of the saved procedure to run",
+            "type": "string"
+          },
+          "options": {
+            "description": "Execution options forwarded literally (NOT {{param}}-substituted) to the underlying tool (e.g. maxModels for asp, dataGraph for shacl, limit/format for queries). The procedure body always overrides the body-bearing arg; for cep the queryId is forced to proc:<name>.",
+            "type": "object"
+          },
+          "override": {
+            "description": "Whether a human-in-the-loop override fired for this decision (recorded in the trace)",
+            "type": "boolean"
+          },
+          "params": {
+            "description": "Values bound to {{param}} placeholders in the procedure body. Substituted VERBATIM (regex-replacement-safe only, NOT SPARQL/Cypher/ASP-escaped): a value containing query syntax (quotes, braces, semicolons) can alter the dispatched query, so do not bind untrusted input to a procedure param without validating it.",
+            "type": "object"
+          },
+          "policy": {
+            "description": "Name of the policy applied to this decision (recorded in the trace when inputs/policy/override is present)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "run_procedure"
+    },
+    {
+      "description": "Save a named, runnable procedure (ASP/SHACL/SPARQL/CQELS-QL/Cypher/CEP) into procedural memory. The body may contain {{param}} placeholders bound at run time.",
+      "inputSchema": {
+        "properties": {
+          "body": {
+            "description": "Procedure body; may contain {{param}} placeholders bound at run time",
+            "type": "string"
+          },
+          "description": {
+            "description": "Human-readable description; indexed for retrieve-by-intent via assemble_context (recall_memory text returns user facts only, not procedures)",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Execution kind \u2014 determines which tool runs the body. Note: 'cqelsql'/'cypher' run a one-shot snapshot query; 'cep' registers a PERSISTENT CEP pattern query (FILTER(SEQ(...)) sequence semantics) under a stable proc:<name> id \u2014 re-running is idempotent, and options.queryId is ignored for cep.",
+            "enum": [
+              "asp",
+              "cep",
+              "cqelsql",
+              "cypher",
+              "shacl",
+              "sparql"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "description": "Procedure name (the handle for run_procedure)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "kind",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "save_procedure"
+    },
+    {
+      "description": "PRIVILEGED (admin). Grant a caller role the set of #444 access labels it may see on recall. Registering any policy activates fail-closed governance enforcement. The host MUST restrict who can call this \u2014 anyone who can set a policy can grant a role any label.",
+      "inputSchema": {
+        "properties": {
+          "labels": {
+            "description": "Access labels this role may see; include \"*\" to also see unlabelled statements. Replaces the role's existing grants.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "role": {
+            "description": "Caller role/principal the grant applies to",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
+      "name": "set_access_policy"
+    },
+    {
+      "description": "Solve an Answer Set Programming (ASP Core 2) logic program. Returns answer sets (models) containing atoms that satisfy the program constraints.",
+      "inputSchema": {
+        "properties": {
+          "format": {
+            "default": "json",
+            "description": "Output format for answer sets",
+            "enum": [
+              "json",
+              "natural"
+            ],
+            "type": "string"
+          },
+          "maxModels": {
+            "default": 1,
+            "description": "Maximum number of answer sets to compute",
+            "type": "integer"
+          },
+          "program": {
+            "description": "ASP Core 2 logic program to solve",
+            "type": "string"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      },
+      "name": "solve"
+    },
+    {
+      "description": "Store facts into long-term (persistent RDF knowledge graph) or short-term (time-windowed stream) memory. Supports individual facts as subject/predicate/object triples or bulk Turtle RDF data.",
+      "inputSchema": {
+        "$defs": {
+          "meta": {
+            "description": "Context-graph statement-level metadata (RDF-star annotations on the fact)",
+            "properties": {
+              "accessLabel": {
+                "description": "Governance/access label (who may rely on the fact)",
+                "type": "string"
+              },
+              "confidence": {
+                "description": "Certainty in [0,1]",
+                "type": "number"
+              },
+              "decisionScope": {
+                "description": "Decision scope the fact is evidence for (URI or text)",
+                "type": "string"
+              },
+              "source": {
+                "description": "Provenance origin (URI or text)",
+                "type": "string"
+              },
+              "spatialScope": {
+                "description": "Spatial/jurisdictional scope (URI or text)",
+                "type": "string"
+              },
+              "validFrom": {
+                "description": "Inclusive start of temporal validity (xsd:date or xsd:dateTime)",
+                "type": "string"
+              },
+              "validTo": {
+                "description": "Exclusive end of temporal validity (xsd:date or xsd:dateTime)",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "facts": {
+            "description": "Array of RDF facts to store",
+            "items": {
+              "properties": {
+                "meta": {
+                  "$ref": "#/$defs/meta"
+                },
+                "object": {
+                  "description": "Object URI or literal value",
+                  "type": "string"
+                },
+                "objectType": {
+                  "default": "literal",
+                  "description": "Whether object is a URI or literal",
+                  "enum": [
+                    "literal",
+                    "uri"
+                  ],
+                  "type": "string"
+                },
+                "predicate": {
+                  "description": "Predicate URI or prefixed name",
+                  "type": "string"
+                },
+                "subject": {
+                  "description": "Subject URI or prefixed name",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "object",
+                "predicate",
+                "subject"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "graph": {
+            "description": "Named graph URI for longterm memory (defaults to cqels://memory/longterm). The tool-owned system graphs (policy, annotations, procedures, decisions, episodic, inferred) are reserved and rejected \u2014 use their owning tools instead.",
+            "type": "string"
+          },
+          "memory": {
+            "default": "longterm",
+            "description": "Memory type: longterm (persistent RDF graph) or shortterm (stream with time window)",
+            "enum": [
+              "longterm",
+              "shortterm"
+            ],
+            "type": "string"
+          },
+          "meta": {
+            "$ref": "#/$defs/meta",
+            "description": "Default context-graph metadata applied to every fact/turtle statement in this call (longterm only)"
+          },
+          "stream": {
+            "description": "Target stream name for shortterm memory (auto-created if not exists)",
+            "type": "string"
+          },
+          "turtle": {
+            "description": "RDF data in Turtle format to store",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "store_memory"
+    },
+    {
+      "description": "Validate data against SHACL shapes. Returns conformance status, violation details, and optionally repair suggestions.",
+      "inputSchema": {
+        "properties": {
+          "dataGraph": {
+            "description": "Named graph URI containing data to validate (defaults to cqels://memory/longterm)",
+            "type": "string"
+          },
+          "enableRepair": {
+            "default": true,
+            "description": "Whether to compute repair candidates for violations",
+            "type": "boolean"
+          },
+          "format": {
+            "default": "json",
+            "description": "Output format for validation results",
+            "enum": [
+              "json",
+              "natural"
+            ],
+            "type": "string"
+          },
+          "maxRepairCandidates": {
+            "default": 3,
+            "description": "Maximum number of repair candidates to compute per violation",
+            "type": "integer"
+          },
+          "shapes": {
+            "description": "SHACL shapes in Turtle format",
+            "type": "string"
+          },
+          "shapesGraph": {
+            "description": "Named graph URI containing SHACL shapes (alternative to inline shapes)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "validate"
+    },
+    {
+      "description": "Dry-run: statically validate a CQELS-QL query WITHOUT registering or executing it. Returns {valid:true} for well-formed CQELS-QL, or {valid:false, error} with the syntax error. Use this to check a draft before register_stream_query.",
+      "inputSchema": {
+        "properties": {
+          "language": {
+            "default": "cqelsql",
+            "description": "cqelsql = full static parse (syntax + window forms). cypher (CypherQL) is validated at registration time, not here.",
+            "enum": [
+              "cqelsql",
+              "cypher"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "description": "The CQELS-QL (or Cypher) query text to validate. Nothing is registered or executed \u2014 this is a static parse check for a draft query. A valid result therefore means the text PARSES, not that it will register: the shapes register_stream_query refuses at REGISTRATION are constructor-time guards that this check never runs, so an aggregate over [NOW] without GROUP BY, a MINUS query, a bare ORDER BY or bare LIMIT on a boundary-less route, and a directional-window shape all validate here and still fail to register.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "validate_stream_query"
+    },
+    {
+      "description": "Register a continuous SHACL invariant over a named stream (created if absent). Every observation pushed via push_stream_events is validated against the shapes as it arrives (a multi-triple observation is seen whole). Violations are buffered like query results \u2014 poll with recall_memory(queryId), stop with forget_stream_query. Register BEFORE pushing (streams are hot, no replay).",
+      "inputSchema": {
+        "properties": {
+          "bufferSize": {
+            "default": 100,
+            "description": "Max buffered violation rows (clamped to [1, 100000]); oldest dropped when full.",
+            "maximum": 100000,
+            "type": "integer"
+          },
+          "notify": {
+            "default": false,
+            "description": "Push a resources/updated notification for cqels://queries/{queryId}/results on each new row (the poll buffer is the always-on fallback).",
+            "type": "boolean"
+          },
+          "queryId": {
+            "description": "Optional custom id suffix; the returned queryId is always prefixed 'wi-'. Poll violations with recall_memory(queryId); stop with forget_stream_query.",
+            "type": "string"
+          },
+          "reportConforming": {
+            "default": false,
+            "description": "When true, also buffer a row for each observation that CONFORMS (default: only violations are buffered).",
+            "type": "boolean"
+          },
+          "shapes": {
+            "description": "SHACL shapes as Turtle (same format as the one-shot validate tool). Validated continuously as each observation arrives; a multi-triple observation pushed via push_stream_events is seen whole (every constituent triple participates).",
+            "type": "string"
+          },
+          "stream": {
+            "description": "Stream to watch (created if absent). Register the invariant BEFORE pushing events \u2014 streams are hot with no replay.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "shapes",
+          "stream"
+        ],
+        "type": "object"
+      },
+      "name": "watch_invariant"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+PREFIX sosa: <http://www.w3.org/ns/sosa/>
+PREFIX vss: <https://covesa.global/vss#>
+SELECT ?vehicle (AVG(?kmh) AS ?avgSpeed) (MAX(?kmh) AS ?peak) (COUNT(*) AS ?n)
+FROM STREAM Telemetry [RANGE 3s]
+WHERE { STREAM Telemetry {
+  ?obs sosa:observedProperty vss:Speed .
+  ?obs sosa:hasFeatureOfInterest ?vehicle .
+  ?obs sosa:hasSimpleResult ?kmh .
+} } GROUP BY ?vehicle

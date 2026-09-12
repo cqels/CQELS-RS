@@ -1,2 +1,8 @@
 /target/
 .DS_Store
+
+/.cqels/
+__pycache__/
+/results.json
+/rust.json
+/java.json

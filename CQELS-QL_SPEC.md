@@ -1,76 +1,118 @@
-# CQELS-QL Specification
+# CQELS-QL reference for the Rust distribution
 
-**CQELS-RS release:** 2.0.0-alpha.20
+Release: **2.0.0-alpha.21**. CQELS-QL combines SPARQL-style graph patterns with
+continuous stream sources and windows. This compact reference describes the
+measured public examples. The complete server-advertised syntax is available
+through `resources/read` at `cqels://docs/cqelsql` and `cqels://docs/cep`.
+Read [COMPATIBILITY.md](COMPATIBILITY.md): accepted syntax is not proof of correct
+execution, and the runtime's broad syntax descriptions include known gaps.
 
-CQELS-QL extends SPARQL-style graph patterns with continuous stream sources
-and window semantics. This document is the compact distribution reference.
+## Query shape and advertised syntax
 
-## Query shape
+The following is a compact syntax map, not a claim that every combination
+executes correctly in this release. The measured limitations below still apply.
 
 ```text
 [PREFIX prefix: <iri>]*
 [REGISTER QUERY name AS]
 SELECT [DISTINCT] select_items
 FROM STREAM stream_name [window]
+[FROM STREAM second_stream [window]]
 [FROM STATIC <graph-iri>]
-WHERE { triple_patterns [FILTER(expression)] }
+WHERE { graph_patterns [FILTER(expression)] }
 [GROUP BY variables]
 [HAVING(expression)]
-[ORDER BY variable [ASC|DESC]]*
+[ORDER BY expressions]
 [LIMIT number]
 ```
 
-`FILTER NOT EXISTS { ... }` is supported as a correlated anti-join. Its
-patterns are evaluated against the complete pre-projection solution, so a
-correlation variable does not need to appear in `SELECT`.
-
-## Windows
-
-| Syntax | Meaning |
+| Window form | Syntax intent |
 | --- | --- |
-| `[NOW]` | Evaluate each incoming observation immediately. |
-| `[RANGE 10s]` | Tumbling event-time window. |
-| `[RANGE 30s STEP 10s]` | Overlapping sliding window. |
-| `[TRIPLES 100]` | Count-based window. |
+| `[NOW]` | Current observation |
+| `[RANGE 10s]` | Time extent; evaluation/closure depends on the route |
+| `[RANGE 30s STEP 10s]` | Time extent with a step |
+| `[SLIDE 30s STEP 10s]` | Sliding-window form |
+| `[TRIPLES 100]` | Count of observations, not individual statements |
+| `[FUTURE 10s]` | Unsupported by the Rust release parser |
+| `[RANGE 10s LATENESS 2s]` | Unsupported by the Rust release parser |
 
-`FROM STREAM` may be declared twice for the alpha.20 two-stream interval-join
-route. Each `STREAM` block is a natural-join side; multiple triple patterns in
-one block are conjoined within that side's declared window. Shared variables
-on both sides must agree, and the interval endpoints are inclusive. Per-side
-interval retention is bounded by `CQELS_JOIN_INTERVAL_BUFFER_CAP` (default
-100000); an exceeded bound fails loudly rather than silently losing rows.
+Duration units include `ms`, `s`, `m`, `h`, and `d`. The shared MCP descriptors also describe Java features that the Rust parser
+does not yet accept, including FUTURE and LATENESS. Parser-only checks of the declaration, static-graph,
+`sameTerm`, `FILTER NOT EXISTS`, and duration forms are recorded in
+[syntax-checks.json](examples/fleet/syntax-checks.json) for the Rust alpha.21
+artifact. `executable_sha256` hashes the extracted executable, while RELEASE.json
+hashes each archive. The fleet static-join fixture uses a plain BGP outside STREAM, rather
+than FROM STATIC. Only the concrete linked fleet fixtures have execution
+assertions in this public suite. A parser accepting a form does not establish
+its retention, emission cadence, or late-event behavior for your query shape.
 
-The `sameTerm(A, B)` expression function compares RDF term identity, including
-datatype and language tag, without numeric promotion. An unbound argument is
-a type error.
+`FILTER NOT EXISTS { ... }` expresses a correlated anti-join; `sameTerm(A, B)`
+expresses RDF term identity rather than numeric equality. Two `FROM STREAM`
+clauses describe a two-source join. This compact reference preserves those
+language entry points without asserting that all operator combinations or
+interval-join retention paths have been verified by the fleet probes. Use the
+server syntax resources for detailed constraints and test emitted rows for
+these forms before relying on them.
 
-Durations support `ms`, `s`, `m`, `h`, and `d`.
+## Sources, patterns, and filters
 
-## Example
+Create the stream before registration. [low-battery.rq](examples/fleet/low-battery.rq)
+uses `FROM STREAM Telemetry [NOW]`, an explicit `STREAM Telemetry { ... }` block,
+and `FILTER(?soc < 20)`. Variables `?obs` and `?soc` bind each observation and its
+numeric value. Prefixes expand to RDF IRIs; send typed numeric literals through
+N-Quads rather than relying on string-to-number coercion.
 
-```sparql
-PREFIX ex: <http://example.org/>
+## Windows and event time
 
-SELECT ?sensor ?temperature
-FROM STREAM sensors [RANGE 10s]
-WHERE {
-  ?sensor ex:temperature ?temperature .
-  FILTER(?temperature > 30)
-}
-ORDER BY ?temperature DESC
-LIMIT 5
-```
+`push_stream_events` carries explicit epoch-millisecond or ISO-instant event
+times. An event groups its statements atomically. The tested `[NOW]` filter
+matches incoming observations. `[RANGE 30s]` bounds the tested CEP sequence.
+The grouped `[RANGE 3s]` aggregate in [aggregation.rq](examples/fleet/aggregation.rq)
+produces the three expected running aggregate rows on its probe input.
 
-## CypherQL
+The server advertises count, sliding, and directional windows as well. Their
+complete semantics depend on the query route. This public suite does not verify
+all such shapes and does not label every RANGE window as universally tumbling
+or rolling. Consult the server syntax resource and test your actual query.
 
-The distribution also supports a Cypher-style graph syntax:
+## Joins and aggregation
 
-```cypher
-FROM STREAM social [NOW]
-MATCH (person:Person)-[:FOLLOWS]->(friend:Person)
-WHERE person.age > 18
-RETURN person.name, friend.name
-```
+[static-join.rq](examples/fleet/static-join.rq) combines a stream observation with
+stored depot data. The probe seeds data before registering, and both engines
+produce the expected depot lookup row. [aggregation.rq](examples/fleet/aggregation.rq)
+uses three conjoined observation patterns, AVG, MAX, COUNT, and GROUP BY vehicle;
+both engines produce the three expected running aggregate rows. These are
+executable assertions for those specific fixtures, not proof of every join,
+aggregate, or modifier combination.
 
-For CEP, use the Rust API or the released MCP server to register sequence
-patterns with `FILTER(SEQ(...))` semantics.
+## Complex Event Processing
+
+[cep.rq](examples/fleet/cep.rq) uses `FILTER(SEQ(?e1 ; ?e2))` to detect a speed
+drop followed by a speed spike. Register with `cep: true`, then send the two
+single-triple event observations in order. The result carries `start`, `end`,
+and event details. Reversing their order must produce no match, as checked by
+the same [cep.rq](examples/fleet/cep.rq) with reversed input.
+Quantifiers, negation, and multi-triple event patterns need separate validation;
+they are not implied by this two-event example.
+
+## Reasoning
+
+The RDFS demo stores an EV-to-Vehicle subclass edge in `cqels://memory/schema`,
+an EV instance in `cqels://memory/longterm`, and calls `reason` with `RDFS_FULL`.
+It verifies the inferred Vehicle type. This one-shot materialization example
+does not claim support-time retraction or arbitrary Delta/ASP program parity.
+
+## CypherQL and other SPARQL constructs
+
+CypherQL is the server's reduced streaming MATCH/RETURN graph dialect, not full
+openCypher. The MCP descriptors and syntax resources advertise additional
+SPARQL-style operators. Use `validate_stream_query` for registration diagnostics,
+then assert the emitted results for your input. Java-only limitations and
+workarounds should not be assumed to apply to Rust without evidence.
+
+## Executable specification
+
+Run `python3 examples/mcp_fleet.py --server .cqels/bin/cqels-mcp` to check all
+linked query files against the release. The driver fails on unexpected rows or
+protocol drift. Reports retain raw and normalized rows, input acknowledgements,
+and failed controls.
