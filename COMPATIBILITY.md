@@ -1,9 +1,11 @@
 # CQELS-RS and CQELS4J compatibility
 
-Tested release: **2.0.0-alpha.20** on both implementations. Rust build revision:
-`a76244c51456ecc20252d718ca8f26b39a05c756`. Archive and Java reference digests are
-pinned in [RELEASE.json](RELEASE.json). These observations concern the downloadable
-artifacts, not subsequent source changes or an unreleased Delta/reasoning port.
+Rust release: **2.0.0-alpha.21**. Java reference:
+[Java 2.0.0-alpha.20](https://github.com/cqels/CQELS4J/releases/tag/v2.0.0-alpha.20).
+Rust source revision: `2d1b43a7c8f7e9cef143680f7747969ad4e5d038`.
+Archive and reference digests are pinned in [RELEASE.json](RELEASE.json).
+These observations concern the verified executable artifacts, not all unreleased
+language or reasoning work.
 
 ## Interface boundary
 
@@ -27,24 +29,23 @@ specific subclass consequence independently of unrelated axiomatic triples.
 | Probe | Rust | Java | Consequence |
 | --- | --- | --- | --- |
 | low-battery | obs/2 = 18.5, obs/4 = 12 | Same values as JSON numbers | Consumers must accept numeric strings from Rust |
-| aggregation | No rows | Three running rows: (avg, peak, n) = (60,60,1), (70,80,2), (60,80,2) | Grouped three-pattern fleet speed aggregate is not usable on this Rust artifact |
-| static-join | No rows | EV-7Q2 at depot/north | This mixed stream/background lookup is not usable on this Rust artifact |
+| aggregation | (avg, peak, n) = (60,60,1), (70,80,2), (60,80,2) | Same numeric values | This grouped fleet aggregate works |
+| static-join | EV-7Q2 at depot/north | Same row | This mixed stream/background lookup works |
 | cep | One match, timestamps 1000–2000 | Same | Drop then spike works |
 | cep-reversed | No matches | No matches | Reversed order is a negative control |
 | rdfs | EV-7Q2 inferred as Vehicle | Same consequence | Schema-driven subclass inference works with RDFS_FULL |
 
 Every push must acknowledge exactly one accepted observation, and the static
 seed is read back from its named graph before registration. Reports retain these
-controls alongside the query rows. They prove that inputs were accepted and the
-seed was stored; they do not prove the streaming engine has wired the background
-graph into its lookup route. Empty results are observed across a 1.5-second drain
-interval after all pushes.
-The probes assert both the working behavior and the known differences. If a later
-release fixes a limitation, the old expectation fails so the documentation must
-change. Inputs, queries, and expected rows are in [examples/fleet/](examples/fleet/).
-These bounded probes do not prove that every aggregate or static query fails, nor
-that every other query form succeeds. There is currently no verified Rust
-workaround for the two listed query routes.
+controls alongside the query rows. Successful aggregate and lookup probes require
+nonempty, exact expected results. Duplicate rows are retained. The independent
+release suite also verifies result order, live memory edits, query-ID reuse,
+replay, and solver-backed operations. A bounded passing example does not establish
+full language, modifier, numerical, or storage-backend parity.
+
+Inputs, queries, and expected rows are in [examples/fleet/](examples/fleet/).
+Rust's implementation version differs from the Java reference. The release
+checks assert both actual versions and compare the remaining contract strictly.
 
 The release descriptors describe CEP `events` as an array, but both tested
 artifacts actually return a human-readable string. The probe records this
@@ -94,8 +95,8 @@ startup-completion log can lose the response with a "Failed to enqueue message"
 error. The driver waits for that log before negotiation, then checks engine
 readiness on both servers. Keep the reference jar's default startup logging.
 Reports retain raw rows and normalized comparison rows separately, including
-controls for failed scenarios. They distinguish passing scenarios from reproduced
-known differences.
+controls for failed scenarios. They distinguish successful results from failed assertions and reference
+transport failures.
 
 The Java reference can also intermittently fail to enqueue a response after
 startup, during a tool call. Waiting for the launcher does not eliminate this

@@ -1,6 +1,6 @@
 # Getting Started with CQELS 2.0 in Rust
 
-Current release: **2.0.0-alpha.20**. Start with the prebuilt MCP executable.
+Current release: **2.0.0-alpha.21**. Start with the prebuilt MCP executable.
 
 ## 1. Prerequisites
 
@@ -33,7 +33,7 @@ executable at that destination after successful verification. Stop a running
 Windows server before replacing its executable.
 
 For manual installation, select the exact archive and adjacent `.sha256` file
-from the [release page](https://github.com/cqels/CQELS-RS/releases/tag/v2.0.0-alpha.20).
+from the [release page](https://github.com/cqels/CQELS-RS/releases/tag/v2.0.0-alpha.21).
 Verify them using [SUPPLY_CHAIN.md](SUPPLY_CHAIN.md) before extracting.
 
 ## 3. Run the fleet demos

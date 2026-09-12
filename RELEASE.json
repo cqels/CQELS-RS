@@ -1,6 +1,6 @@
 {
-  "version": "2.0.0-alpha.20",
-  "source_revision": "a76244c51456ecc20252d718ca8f26b39a05c756",
+  "version": "2.0.0-alpha.21",
+  "source_revision": "2d1b43a7c8f7e9cef143680f7747969ad4e5d038",
   "public_repository": "cqels/CQELS-RS",
   "java_reference": {
     "version": "2.0.0-alpha.20",
@@ -9,20 +9,20 @@
   },
   "archives": {
     "aarch64-apple-darwin": {
-      "filename": "cqels-mcp-2.0.0-alpha.20-aarch64-apple-darwin.tar.gz",
-      "sha256": "919b9f3744c43d668b9a2b044d23a66b339dacb5f9a4b48da69e635954fcbde9"
+      "filename": "cqels-mcp-2.0.0-alpha.21-aarch64-apple-darwin.tar.gz",
+      "sha256": "1aacc210c8deac30f6f0839a29dfd577db8882e7d02544fa2e587b9407926e55"
     },
     "x86_64-apple-darwin": {
-      "filename": "cqels-mcp-2.0.0-alpha.20-x86_64-apple-darwin.tar.gz",
-      "sha256": "9a2849405f0cc873c71649ca84eb2df6544024889999dd722fc81f95dce3daa5"
+      "filename": "cqels-mcp-2.0.0-alpha.21-x86_64-apple-darwin.tar.gz",
+      "sha256": "ccfa9148206c26b0a481ddbf21b8c9cddc8cd8f4a3abda625b4b7c3bf104e7d6"
     },
     "x86_64-pc-windows-msvc": {
-      "filename": "cqels-mcp-2.0.0-alpha.20-x86_64-pc-windows-msvc.zip",
-      "sha256": "ce9e5816556a7c98b960ee1930f364b72cee763a554e249517302ad3c1f3b8f9"
+      "filename": "cqels-mcp-2.0.0-alpha.21-x86_64-pc-windows-msvc.zip",
+      "sha256": "c641e0c7c1b78496a4f218242ae273f57bd27d40150aa343d87fbdb7e4c1ddca"
     },
     "x86_64-unknown-linux-gnu": {
-      "filename": "cqels-mcp-2.0.0-alpha.20-x86_64-unknown-linux-gnu.tar.gz",
-      "sha256": "2db7bfade5a511e9fc5eda56f2dfc56004d6a11984b6b0b1dc4677c8b20821ef"
+      "filename": "cqels-mcp-2.0.0-alpha.21-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "560f45da8b9ca90e6a0f9374f7470719f9d0c90331ab0135b6f4b3f7d3949a1a"
     }
   }
 }

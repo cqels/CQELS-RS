@@ -1,6 +1,6 @@
 # Updating the public CQELS-RS distribution
 
-Current pinned release: **2.0.0-alpha.20**. This repository documents released
+Current pinned release: **2.0.0-alpha.21**. This repository documents released
 artifacts; moving a version string alone does not create an installable release.
 
 1. Confirm that the target source build succeeded and produced all four platform

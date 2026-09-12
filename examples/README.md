@@ -1,6 +1,6 @@
 # CQELS fleet examples
 
-Current release: **2.0.0-alpha.20**. These MCP scenarios use the electric-vehicle
+Current release: **2.0.0-alpha.21**. These MCP scenarios use the electric-vehicle
 fleet world from [CQELS4J examples](https://github.com/cqels/CQELS4J/tree/master/examples):
 SOSA observations, VSS Speed, `https://example.org/fleet/` identifiers, EV-7Q2,
 and the north depot. Deterministic timestamps and readings replace Java's random
@@ -23,17 +23,16 @@ asserts the expected output, and exits nonzero if behavior drifts.
 | Scenario flag | Java demonstration | Expected Rust result |
 | --- | --- | --- |
 | `--scenario low-battery` | HelloCqels | Two low-battery alerts (18.5 and 12) |
-| `--scenario aggregation` | WindowedAggregation | KNOWN DIFFERENCE: zero rows |
-| `--scenario static-join` | StreamStaticJoin | KNOWN DIFFERENCE: zero rows |
+| `--scenario aggregation` | WindowedAggregation | Three running rows: averages 60, 70, 60 |
+| `--scenario static-join` | StreamStaticJoin | EV-7Q2 at depot/north |
 | `--scenario cep` | ComplexEventPattern | One drop/spike match (1000–2000 ms) |
 | `--scenario cep-reversed` | ComplexEventPattern negative control | No match |
 | `--scenario rdfs` | RdfsReasoning | EV-7Q2 has inferred type Vehicle |
 
-`all` is the default. The two known differences are explicit, executable
-compatibility probes, not functioning aggregate/lookup demonstrations. Java
-produces three aggregate rows and one lookup row on the same inputs. Keeping the
-probes prevents a limitation from silently disappearing from documentation or
-being advertised as working merely because registration succeeds.
+`all` is the default. All six scenarios assert the expected behavior, including
+three aggregate rows and one static lookup row. The reversed CEP input remains
+a negative control. These examples verify bounded cases rather than every
+possible aggregate, join, or reasoning program.
 
 The exact queries live in [fleet/](fleet/), expected results in
 [expectations.json](fleet/expectations.json), and timestamped RDF inputs in
@@ -56,10 +55,11 @@ behavioral parity.
 
 ## Rust API illustrations
 
-`src/` and `Cargo.toml` are retained for API reference only. Their alpha.20 CQELS
+`src/` and `Cargo.toml` are retained for API reference only. Their alpha.21 CQELS
 crates are not available on crates.io, so these files are **not currently runnable
 from a clean public checkout**. Do not use them as installation instructions.
-The MCP examples above consume only public release artifacts.
+The MCP examples above consume only public release artifacts. A Cargo lockfile
+will be provided only when those public crate dependencies can actually resolve.
 
 ## Test the driver controls
 

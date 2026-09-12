@@ -1,6 +1,6 @@
 # Verifying CQELS-RS releases
 
-Current release: **2.0.0-alpha.20**. Each platform archive has an adjacent
+Current release: **2.0.0-alpha.21**. Each platform archive has an adjacent
 SHA-256 checksum file. [RELEASE.json](RELEASE.json) independently pins the expected
 archive digests used by the public installer and the separately maintained
 release-validation pipeline.
@@ -22,7 +22,7 @@ Download the archive and its `.sha256` file from the same release. Example for
 Apple Silicon macOS, run in the download directory:
 
 ```bash
-shasum -a 256 -c cqels-mcp-2.0.0-alpha.20-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c cqels-mcp-2.0.0-alpha.21-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Expected: the archive filename followed by `OK`. Also compare the digest to
@@ -33,7 +33,7 @@ Do not extract an archive when a checksum disagrees.
 ## What the checks establish
 
 A checksum detects differing bytes. Its trust depends on the release metadata
-and the pinned copy of this repository you trust. Rust alpha.20 does not publish
+and the pinned copy of this repository you trust. Rust alpha.21 does not publish
 a signed manifest or signature bundle. The retained `cosign.pub` file alone is
 not evidence that the Rust archives were signed, and this guide makes no such
 claim. CQELS4J has its own verification procedure; it does not authenticate Rust
@@ -44,3 +44,7 @@ binary build and pins the Java reference jar separately. Public distribution
 commits and binary build revisions serve different purposes and need not match.
 Release assets must not be silently replaced to repair documentation: update the
 public guides or publish a new version when binary contents change.
+
+This release includes `PROVENANCE.json` with source/build identifiers and asset
+digests. It is an unsigned provenance record, not a cryptographic signature.
+The archive checksums and pinned public manifest must still agree.

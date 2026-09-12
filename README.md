@@ -4,7 +4,7 @@
 continuous querying and reasoning over RDF and graph streams. It shares CQELS-QL
 and a versioned MCP compatibility target with [CQELS4J](https://github.com/cqels/CQELS4J).
 
-> **Current release:** [2.0.0-alpha.20](https://github.com/cqels/CQELS-RS/releases/tag/v2.0.0-alpha.20) · **License:** MIT
+> **Current release:** [2.0.0-alpha.21](https://github.com/cqels/CQELS-RS/releases/tag/v2.0.0-alpha.21) · **License:** MIT
 >
 > [Getting started](GETTING_STARTED.md) · [Fleet demos](examples/README.md) · [Compatibility and limitations](COMPATIBILITY.md)
 
@@ -18,9 +18,9 @@ and a versioned MCP compatibility target with [CQELS4J](https://github.com/cqels
 - **MCP:** stdio and opt-in Streamable HTTP; 25 tools, 9 resources, 1 resource template,
   and 10 prompts in this release. [Full descriptors](mcp-server/contract.json).
 
-This alpha has measured query differences from Java. In particular, the grouped
-speed aggregate and stream/static fleet probes currently return no Rust rows.
-Read [COMPATIBILITY.md](COMPATIBILITY.md) before relying on those routes.
+The fleet speed aggregate and stream/static depot lookup produce the measured
+Java results in this release. This does not establish universal query or language
+parity; read [COMPATIBILITY.md](COMPATIBILITY.md) for the tested boundary.
 
 ## Quick start
 
@@ -49,24 +49,23 @@ and 27.5 percent. Only observations 2 and 4 cross the threshold.
 
 ### Use it as a library
 
-The alpha.20 CQELS packages are **not available on crates.io**. The `examples/src/`
+The alpha.21 CQELS packages are **not available on crates.io**. The `examples/src/`
 Rust files are API illustrations, not an installable library quick start. Use the
 released MCP executable for the runnable examples below. A public Cargo dependency
 route will be documented only after its packages and examples can be verified.
 
 ## Demonstration scenarios
 
-| Scenario | Java counterpart | Rust alpha.20 result |
+| Scenario | Java counterpart | Rust alpha.21 result |
 | --- | --- | --- |
 | Low battery | HelloCqels | Two alerts, numeric payloads normalized |
-| Speed aggregation | WindowedAggregation | Known difference: no rows; Java emits three |
-| Stream/static depot lookup | StreamStaticJoin | Known difference: no rows; Java emits one |
+| Speed aggregation | WindowedAggregation | Three running aggregate rows, matching Java |
+| Stream/static depot lookup | StreamStaticJoin | One depot lookup row, matching Java |
 | Speed drop then spike | ComplexEventPattern | One match; reversed order emits none |
 | EV subclass inference | RdfsReasoning | Inferred Vehicle type |
 
-[Run all scenarios](examples/README.md), including the two explicit compatibility
-probes. A successful probe of a known difference means the limitation remains
-accurately documented; it does **not** mean that capability works.
+[Run all scenarios](examples/README.md). Successful runs require the expected
+rows, including the aggregate and lookup results; registration alone cannot pass.
 
 ## Use CQELS as an MCP server
 

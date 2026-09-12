@@ -1,6 +1,6 @@
 # CQELS as an MCP server — Rust
 
-Current release: **2.0.0-alpha.20**. Install with `python3 mcp-server/install.py`
+Current release: **2.0.0-alpha.21**. Install with `python3 mcp-server/install.py`
 from the repository root. [Platforms and manual installation](../GETTING_STARTED.md).
 The Rust executable needs no JDK or Maven launcher.
 
@@ -164,8 +164,8 @@ status and readiness resources to inspect the actual configured process.
 
 ## Compatibility and evidence
 
-The release-specific public probes cover discovery, the fleet scenarios, and
-known differences. The release-validation pipeline, maintained separately from this distribution
+The release-specific public probes cover discovery and the fleet scenarios,
+including successful aggregate and static-lookup results. The release-validation pipeline, maintained separately from this distribution
 repository, additionally runs the pinned Java/Rust HTTP and persistence
 comparison suites. See [COMPATIBILITY.md](../COMPATIBILITY.md)
 for the scope: matching wire schemas does not imply complete Java engine parity.

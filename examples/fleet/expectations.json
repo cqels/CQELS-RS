@@ -26,8 +26,26 @@
   "aggregation": {
     "stream": "Telemetry",
     "java_demo": "WindowedAggregation",
-    "difference": true,
-    "rust": [],
+    "rust": [
+      {
+        "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
+        "avgSpeed": 60.0,
+        "peak": 60.0,
+        "n": 1
+      },
+      {
+        "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
+        "avgSpeed": 70.0,
+        "peak": 80.0,
+        "n": 2
+      },
+      {
+        "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
+        "avgSpeed": 60.0,
+        "peak": 80.0,
+        "n": 2
+      }
+    ],
     "java": [
       {
         "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
@@ -52,8 +70,12 @@
   "static-join": {
     "stream": "Enrich",
     "java_demo": "StreamStaticJoin",
-    "difference": true,
-    "rust": [],
+    "rust": [
+      {
+        "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",
+        "depot": "https://example.org/fleet/depot/north"
+      }
+    ],
     "java": [
       {
         "vehicle": "https://example.org/fleet/vehicle/EV-7Q2",

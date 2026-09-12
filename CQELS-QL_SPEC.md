@@ -1,6 +1,6 @@
 # CQELS-QL reference for the Rust distribution
 
-Release: **2.0.0-alpha.20**. CQELS-QL combines SPARQL-style graph patterns with
+Release: **2.0.0-alpha.21**. CQELS-QL combines SPARQL-style graph patterns with
 continuous stream sources and windows. This compact reference describes the
 measured public examples. The complete server-advertised syntax is available
 through `resources/read` at `cqels://docs/cqelsql` and `cqels://docs/cep`.
@@ -39,7 +39,7 @@ WHERE { graph_patterns [FILTER(expression)] }
 Duration units include `ms`, `s`, `m`, `h`, and `d`. The window table follows the
 release descriptors. Parser-only checks of the declaration, static-graph,
 `sameTerm`, `FILTER NOT EXISTS`, and duration forms are recorded in
-[syntax-checks.json](examples/fleet/syntax-checks.json) for the Rust alpha.20
+[syntax-checks.json](examples/fleet/syntax-checks.json) for the Rust alpha.21
 artifact. The fleet static-join fixture uses a plain BGP outside STREAM, rather
 than FROM STATIC. Only the concrete linked fleet fixtures have execution
 assertions in this public suite. A parser accepting a form does not establish
