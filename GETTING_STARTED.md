@@ -45,8 +45,9 @@ python3 examples/mcp_fleet.py --server .cqels/bin/cqels-mcp --report results.jso
 
 The first command prints one line containing two low-battery alert rows. The second runs six probes:
 low battery, aggregation, static lookup, CEP, reversed CEP, and RDFS inference.
-It reports two `KNOWN DIFFERENCE` results, explained in
-[COMPATIBILITY.md](COMPATIBILITY.md). A mismatch or protocol error exits nonzero.
+All six probes assert the expected behavior, including three aggregate rows and
+one depot lookup row. A mismatch or protocol error exits nonzero. See
+[COMPATIBILITY.md](COMPATIBILITY.md) for the bounded guarantees.
 Each scenario uses a fresh process and temporary state, leaving existing server
 data untouched. CQELS environment variables are cleared for reproducible demos.
 
@@ -65,7 +66,7 @@ The server is not an interactive command prompt.
 battery percentage, with `[NOW]` and `FILTER(?soc < 20)`. The runnable driver:
 
 1. Initializes MCP and creates `Telemetry`.
-2. Registers the query before pushing any data; streams have no replay.
+2. Registers the query before pushing live data; ordinary ephemeral streams do not replay earlier events.
 3. Sends five observations with explicit millisecond timestamps and typed numeric
    N-Quads literals. Ordinary `facts` string literals are not typed doubles.
 4. Drains matches with `recall_memory(queryId)` and asserts exactly two alerts.
@@ -74,11 +75,11 @@ battery percentage, with `[NOW]` and `FILTER(?soc < 20)`. The runnable driver:
 ## 6. Known limitations
 
 See the [release-specific compatibility table](COMPATIBILITY.md). Most notably,
-matching MCP descriptors do not imply identical query behavior. The documented
-aggregate and static lookup probes register successfully but return no Rust rows.
-The probes verify push acknowledgements and read back the static seed. Treat
-registration and ingestion as separate checks from query execution. The native Rust example source files require unavailable crates and
-are retained as API illustrations only.
+matching MCP descriptors do not imply identical behavior for every query shape.
+The documented aggregate and static lookup probes produce the expected rows;
+their results do not establish all aggregate, join, or modifier semantics. The
+probes also verify push acknowledgements and the stored static seed. The native
+Rust example source files require unavailable crates and remain API illustrations.
 
 ## 7. Where to go next
 

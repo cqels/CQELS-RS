@@ -1,7 +1,6 @@
 {
   "version": "2.0.0-alpha.21",
-  "engine": "Rust canonical aarch64-apple-darwin archive",
-  "binary_sha256": "fe470c3ef9aed3490e890c45c756af0e0217e480fe3ac7b7eca81e78a3471842",
+  "engine": "Rust alpha.21 executable extracted from the aarch64-apple-darwin release archive",
   "scope": "parser validation only; not execution guarantees",
   "checks": {
     "register-query": {
@@ -66,6 +65,21 @@
         "language": "cqelsql",
         "valid": true
       }
+    },
+    "unsupported-future": {
+      "query": "SELECT ?s ?v FROM STREAM S [FUTURE 10s] WHERE { STREAM S { ?s <https://example.org/value> ?v } }",
+      "result": {
+        "language": "cqelsql",
+        "valid": false
+      }
+    },
+    "unsupported-lateness": {
+      "query": "SELECT ?s ?v FROM STREAM S [RANGE 10s LATENESS 2s] WHERE { STREAM S { ?s <https://example.org/value> ?v } }",
+      "result": {
+        "language": "cqelsql",
+        "valid": false
+      }
     }
-  }
+  },
+  "executable_sha256": "fe470c3ef9aed3490e890c45c756af0e0217e480fe3ac7b7eca81e78a3471842"
 }

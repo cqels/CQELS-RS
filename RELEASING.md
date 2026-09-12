@@ -23,13 +23,18 @@ artifacts; moving a version string alone does not create an installable release.
 5. Reconcile manual edits on the public branch with the export template before
    publication. Publication must stop if the live public tree differs from the
    reviewed baseline; it must not overwrite a new edit without review.
-6. Prepare a draft release after verifying the complete source artifact set.
-   Verify the mirrored asset digests and provenance before making it public.
-   A rerun may verify an existing release; it must not silently overwrite
-   different released binaries or attach new artifacts to stale source metadata.
-7. Review the CI reports and documentation PR before merging. Repository
+6. Prepare a draft release after verifying the complete source artifact set and
+   the reviewed public documentation commit. Verify mirrored asset digests and
+   provenance, publish the release, and check anonymous downloads before updating
+   public main with the new links. A rerun may verify an existing release; it
+   must not overwrite different binaries or attach assets to stale provenance.
+7. Review the CI reports and documentation PR before publication. Public main is
+   fast-forwarded to the reviewed commit only after the downloads are available. Repository
    metadata (description, homepage, topics, issues/wiki/discussions settings) is
    managed separately and is not reset by file publication.
+8. Record the published public commit and complete file tree as the next
+   reviewed publishing baseline before preparing another export. A later manual
+   edit must be imported and reviewed separately, not silently accepted.
 
 Library instructions may be added only after anonymous Cargo dependency
 resolution and the native examples work against the published version.

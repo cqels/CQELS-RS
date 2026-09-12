@@ -33,14 +33,15 @@ WHERE { graph_patterns [FILTER(expression)] }
 | `[RANGE 30s STEP 10s]` | Time extent with a step |
 | `[SLIDE 30s STEP 10s]` | Sliding-window form |
 | `[TRIPLES 100]` | Count of observations, not individual statements |
-| `[FUTURE 10s]` | Directional window; consult the server resource for emission options |
-| `[RANGE 10s LATENESS 2s]` | Allowed lateness on supported routes |
+| `[FUTURE 10s]` | Unsupported by the Rust release parser |
+| `[RANGE 10s LATENESS 2s]` | Unsupported by the Rust release parser |
 
-Duration units include `ms`, `s`, `m`, `h`, and `d`. The window table follows the
-release descriptors. Parser-only checks of the declaration, static-graph,
+Duration units include `ms`, `s`, `m`, `h`, and `d`. The shared MCP descriptors also describe Java features that the Rust parser
+does not yet accept, including FUTURE and LATENESS. Parser-only checks of the declaration, static-graph,
 `sameTerm`, `FILTER NOT EXISTS`, and duration forms are recorded in
 [syntax-checks.json](examples/fleet/syntax-checks.json) for the Rust alpha.21
-artifact. The fleet static-join fixture uses a plain BGP outside STREAM, rather
+artifact. `executable_sha256` hashes the extracted executable, while RELEASE.json
+hashes each archive. The fleet static-join fixture uses a plain BGP outside STREAM, rather
 than FROM STATIC. Only the concrete linked fleet fixtures have execution
 assertions in this public suite. A parser accepting a form does not establish
 its retention, emission cadence, or late-event behavior for your query shape.
@@ -67,7 +68,7 @@ N-Quads rather than relying on string-to-number coercion.
 times. An event groups its statements atomically. The tested `[NOW]` filter
 matches incoming observations. `[RANGE 30s]` bounds the tested CEP sequence.
 The grouped `[RANGE 3s]` aggregate in [aggregation.rq](examples/fleet/aggregation.rq)
-returns no Rust rows on the probe input even though it registers successfully.
+produces the three expected running aggregate rows on its probe input.
 
 The server advertises count, sliding, and directional windows as well. Their
 complete semantics depend on the query route. This public suite does not verify
@@ -77,12 +78,12 @@ or rolling. Consult the server syntax resource and test your actual query.
 ## Joins and aggregation
 
 [static-join.rq](examples/fleet/static-join.rq) combines a stream observation with
-stored depot data. The probe seeds data before registering; Java emits a lookup
-row but this Rust artifact emits none. [aggregation.rq](examples/fleet/aggregation.rq)
+stored depot data. The probe seeds data before registering, and both engines
+produce the expected depot lookup row. [aggregation.rq](examples/fleet/aggregation.rq)
 uses three conjoined observation patterns, AVG, MAX, COUNT, and GROUP BY vehicle;
-Java emits three running aggregate rows, while this Rust artifact emits none.
-Both limitations have executable expectations. Neither probe proves the status
-of every possible join or aggregate variant.
+both engines produce the three expected running aggregate rows. These are
+executable assertions for those specific fixtures, not proof of every join,
+aggregate, or modifier combination.
 
 ## Complex Event Processing
 
@@ -113,5 +114,5 @@ workarounds should not be assumed to apply to Rust without evidence.
 
 Run `python3 examples/mcp_fleet.py --server .cqels/bin/cqels-mcp` to check all
 linked query files against the release. The driver fails on unexpected rows or
-a changed known limitation; reports preserve the distinction between working
-scenarios and reproduced differences.
+protocol drift. Reports retain raw and normalized rows, input acknowledgements,
+and failed controls.

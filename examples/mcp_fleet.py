@@ -343,7 +343,11 @@ def main():
                 report["scenarios"][name]["status"] = status
                 print(f"{name}: {status.upper()} {json.dumps(rows, sort_keys=True)}", flush=True)
             finally:
-                rpc.close()
+                rpc.close(timeout=10 if engine == "rust" else 2)
+                report["scenarios"][name]["shutdown"] = {
+                    "forced": rpc.forced_shutdown, "returncode": rpc.process.returncode}
+            if engine == "rust" and (rpc.forced_shutdown or rpc.process.returncode != 0):
+                raise AssertionError(f"Rust server did not exit cleanly: {report['scenarios'][name]['shutdown']}")
             if rpc.contamination:
                 raise AssertionError(f"non-JSON protocol stdout: {rpc.contamination}")
     except Exception as exc:

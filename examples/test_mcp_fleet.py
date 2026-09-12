@@ -85,7 +85,7 @@ class FleetControls(unittest.TestCase):
             (root / "mcp-server/contract.json").write_text('{}', encoding="utf-8")
             (here / "fleet/expectations.json").write_text('{"rdfs":{"java":[]}}', encoding="utf-8")
             report = root / "report.json"
-            rpc = Mock(contamination=[])
+            rpc = Mock(contamination=[], forced_shutdown=False, process=Mock(returncode=0))
             rpc.initialize.return_value = {"serverInfo": {"version": "java-version"}}
             with patch.object(fleet, "HERE", here), patch.object(fleet, "Rpc", return_value=rpc), \
                  patch.object(fleet, "surface", return_value={}), patch.object(fleet, "run_scenario", return_value=[]), \
@@ -145,7 +145,7 @@ class FleetControls(unittest.TestCase):
         actual = [{k: str(v) for k, v in row.items()} for row in reversed(expected)]
         self.assertEqual(fleet.canonical_rows(actual, "aggregation"), fleet.canonical_rows(expected, "aggregation"))
 
-    def capture_fake_report(self, observed, expected, fail_during_push=False):
+    def capture_fake_report(self, observed, expected, fail_during_push=False, forced=False, returncode=0):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             here = root / "examples"
@@ -157,7 +157,7 @@ class FleetControls(unittest.TestCase):
             (root / "mcp-server/contract.json").write_text('{}', encoding="utf-8")
             (here / "fleet/expectations.json").write_text(json.dumps({"low-battery": {"rust": expected}}), encoding="utf-8")
             report = root / "report.json"
-            rpc = Mock(contamination=[])
+            rpc = Mock(contamination=[], forced_shutdown=forced, process=Mock(returncode=returncode))
             rpc.initialize.return_value = {"serverInfo": {"version": "test"}}
             def scenario(rpc, name, controls):
                 controls["push_acks"] = [{"accepted": 1}]
@@ -173,6 +173,13 @@ class FleetControls(unittest.TestCase):
                 except AssertionError:
                     pass
             return json.loads(report.read_text(encoding="utf-8"))["scenarios"]["low-battery"]
+
+    def test_rust_shutdown_must_be_clean_even_after_correct_results(self):
+        for forced, code in [(True, -15), (False, 1), (True, 0)]:
+            entry = self.capture_fake_report([], [], forced=forced, returncode=code)
+            self.assertEqual(entry["status"], "fail")
+            self.assertIn("did not exit cleanly", entry["error"])
+            self.assertEqual(entry["shutdown"], {"forced": forced, "returncode": code})
 
     def test_report_preserves_raw_numeric_strings(self):
         entry = self.capture_fake_report([{"soc": "18.5"}], [{"soc": 18.5}])

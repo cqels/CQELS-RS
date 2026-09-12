@@ -40,7 +40,7 @@ seed is read back from its named graph before registration. Reports retain these
 controls alongside the query rows. Successful aggregate and lookup probes require
 nonempty, exact expected results. Duplicate rows are retained. The independent
 release suite also verifies result order, live memory edits, query-ID reuse,
-replay, and solver-backed operations. A bounded passing example does not establish
+journal replay, and solver-backed operations. A bounded passing example does not establish
 full language, modifier, numerical, or storage-backend parity.
 
 Inputs, queries, and expected rows are in [examples/fleet/](examples/fleet/).

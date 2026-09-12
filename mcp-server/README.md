@@ -77,7 +77,9 @@ Ten prompts: `recent_events_window`, `value_over_window`, `entity_by_type`,
 
 The lossless sequence is **create_stream → register_stream_query →
 push_stream_events → recall_memory(queryId)**. Register before pushing because
-streams are hot and do not replay earlier observations to a new query.
+ordinary live streams do not replay earlier ephemeral observations to a new
+query. Restart recovery with durable operator storage can replay journaled
+observations; that separate path is covered by the persistence checks.
 
 ```json
 {"name":"create_stream","arguments":{"stream":"Telemetry"}}
