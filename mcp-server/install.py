@@ -11,6 +11,8 @@ import tarfile
 import tempfile
 import time
 import http.client
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 import urllib.error
 import urllib.request
 import zipfile
@@ -21,18 +23,36 @@ ROOT = Path(__file__).resolve().parents[1]
 def download(url):
     request = urllib.request.Request(url, headers={"User-Agent": "cqels-public-distribution/1"})
     for attempt in range(4):
+        delay = 0.5 * 2 ** attempt
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 return response.read()
         except urllib.error.HTTPError as error:
             if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
                 raise
+            retry_after = error.headers.get("Retry-After") if error.headers else None
+            if retry_after:
+                try:
+                    requested = float(retry_after)
+                except ValueError:
+                    try:
+                        timestamp = parsedate_to_datetime(retry_after)
+                        if timestamp.tzinfo is None:
+                            timestamp = timestamp.replace(tzinfo=timezone.utc)
+                        requested = timestamp.timestamp() - time.time()
+                    except (TypeError, ValueError, OverflowError):
+                        requested = delay
+                # Respect the server without turning installation into an
+                # unbounded wait. A longer cooldown must be retried later.
+                if requested > 60:
+                    raise
+                delay = max(delay, requested)
             if error.fp is not None:
                 error.close()
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
             if attempt == 3:
                 raise
-        time.sleep(0.5 * 2 ** attempt)
+        time.sleep(delay)
 
 
 def host_target():

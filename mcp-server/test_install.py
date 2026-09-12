@@ -20,6 +20,24 @@ class InstallerChecks(unittest.TestCase):
         self.assertIsNone(request.call_args.args[0].get_header("Authorization"))
         sleep.assert_called_once_with(0.5)
 
+    def test_retry_after_seconds_and_dates_are_honored(self):
+        for value in ("60", "Thu, 01 Jan 1970 00:17:40 GMT"):
+            failure = urllib.error.HTTPError("https://example.test/archive", 429, "wait", {"Retry-After": value}, None)
+            with patch.object(install.urllib.request, "urlopen", side_effect=[failure, io.BytesIO(b"archive")]), \
+                    patch.object(install.time, "sleep") as sleep, \
+                    patch.object(install.time, "time", return_value=1000):
+                self.assertEqual(install.download("https://example.test/archive"), b"archive")
+            sleep.assert_called_once_with(60.0)
+
+    def test_excessive_cooldown_is_not_retried_early(self):
+        failure = urllib.error.HTTPError("https://example.test/archive", 429, "wait", {"Retry-After": "120"}, None)
+        with patch.object(install.urllib.request, "urlopen", side_effect=failure) as request, \
+                patch.object(install.time, "sleep") as sleep:
+            with self.assertRaises(urllib.error.HTTPError):
+                install.download("https://example.test/archive")
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
     def test_permanent_http_error_does_not_retry(self):
         for status in (401, 403, 404):
             failure = urllib.error.HTTPError("https://example.test/archive", status, "permanent", {}, None)

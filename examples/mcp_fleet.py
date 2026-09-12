@@ -36,7 +36,8 @@ class Rpc:
                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                             stderr=subprocess.PIPE, text=True, encoding="utf-8")
         except Exception:
-            self.directory.cleanup()
+            with suppress(OSError):
+                self.directory.cleanup()
             raise
         self.readers = [threading.Thread(target=self._stdout, daemon=True),
                         threading.Thread(target=self._stderr, daemon=True)]
@@ -141,12 +142,14 @@ class Rpc:
             time.sleep(0.05)
         return rows
 
-    def close(self):
+    def close(self, timeout=2):
+        self.forced_shutdown = False
         with suppress(OSError):
             self.process.stdin.close()
         try:
-            self.process.wait(timeout=2)
+            self.process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            self.forced_shutdown = True
             self.process.terminate()
             try:
                 self.process.wait(timeout=2)
@@ -159,7 +162,10 @@ class Rpc:
             self.process.stdout.close()
         with suppress(OSError):
             self.process.stderr.close()
-        self.directory.cleanup()
+        # A Windows scanner may briefly retain session files after exit.
+        # Cleanup must not discard captured shutdown evidence.
+        with suppress(OSError):
+            self.directory.cleanup()
 
 
 def surface(rpc):

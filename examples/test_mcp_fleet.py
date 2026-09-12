@@ -13,6 +13,20 @@ import mcp_fleet as fleet
 
 
 class FleetControls(unittest.TestCase):
+    def test_session_cleanup_error_preserves_forced_shutdown_evidence(self):
+        rpc = fleet.Rpc.__new__(fleet.Rpc)
+        rpc.process = Mock(stdin=io.StringIO(), stdout=io.StringIO(), stderr=io.StringIO(), returncode=-15)
+        rpc.process.wait.side_effect = [fleet.subprocess.TimeoutExpired("server", 10), -15]
+        rpc.readers = []
+        rpc.directory = Mock()
+        rpc.directory.cleanup.side_effect = PermissionError("scanner retains a file")
+        rpc.close(timeout=10)
+        self.assertTrue(rpc.forced_shutdown)
+        self.assertEqual(rpc.process.returncode, -15)
+        self.assertEqual(rpc.process.wait.call_args_list[0].kwargs["timeout"], 10)
+        rpc.process.terminate.assert_called_once()
+        rpc.directory.cleanup.assert_called_once()
+
     def test_blank_lines_are_ignored_but_non_json_is_reported(self):
         rpc = fleet.Rpc.__new__(fleet.Rpc)
         rpc.process = Mock(stdout=io.StringIO('\n  \n{"id":1}\nnot JSON\n'))
