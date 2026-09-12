@@ -9,6 +9,8 @@ from pathlib import Path
 import platform
 import tarfile
 import tempfile
+import time
+import http.client
 import urllib.error
 import urllib.request
 import zipfile
@@ -18,8 +20,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def download(url):
     request = urllib.request.Request(url, headers={"User-Agent": "cqels-public-distribution/1"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read()
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                raise
+            if error.fp is not None:
+                error.close()
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
+            if attempt == 3:
+                raise
+        time.sleep(0.5 * 2 ** attempt)
 
 
 def host_target():
